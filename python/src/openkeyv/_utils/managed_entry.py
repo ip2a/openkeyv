@@ -1,0 +1,162 @@
+"""ManagedEntry dataclass for storing values with metadata.
+
+The ManagedEntry class wraps stored values with metadata including creation time
+and expiration time. This allows stores to track TTL information consistently.
+"""
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, SupportsFloat
+
+from typing_extensions import Self
+
+from openkeyv._utils.beartype import bear_enforce
+from openkeyv._utils.time_to_live import now, now_plus, seconds_to
+from openkeyv.errors import DeserializationError, SerializationError
+
+
+try:
+    import orjson as _json_lib
+
+    def _dump_to_json_impl(obj: dict[str, Any]) -> str:
+        return _json_lib.dumps(obj, option=_json_lib.OPT_SORT_KEYS).decode()
+
+    def _dump_to_json_bytes_impl(obj: dict[str, Any]) -> bytes:
+        return _json_lib.dumps(obj)
+
+    def _load_from_json_impl(json_data: str | bytes) -> Any:
+        return _json_lib.loads(json_data)
+
+except ImportError:
+    import json as _json_lib
+
+    def _dump_to_json_impl(obj: dict[str, Any]) -> str:
+        return _json_lib.dumps(obj, sort_keys=True)
+
+    def _dump_to_json_bytes_impl(obj: dict[str, Any]) -> bytes:
+        return _json_lib.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+    def _load_from_json_impl(json_data: str | bytes) -> Any:
+        if isinstance(json_data, bytes):
+            json_data = json_data.decode("utf-8")
+        return _json_lib.loads(json_data)
+
+
+@dataclass(kw_only=True)
+class ManagedEntry:
+    """A managed cache entry containing value data and TTL metadata.
+
+    The entry supports either TTL seconds or absolute expiration datetime. On init:
+    - If `ttl` is provided but `expires_at` is not, an `expires_at` will be computed.
+    - If `expires_at` is provided but `ttl` is not, a live TTL will be computed on access.
+    """
+
+    value: Mapping[str, Any]
+
+    created_at: datetime | None = field(default=None)
+    expires_at: datetime | None = field(default=None)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.expires_at is None:
+            return False
+        return self.expires_at <= now()
+
+    @property
+    def ttl(self) -> float | None:
+        if self.expires_at is None:
+            return None
+        return seconds_to(datetime=self.expires_at)
+
+    @property
+    def value_as_json(self) -> str:
+        """Return the value as a JSON string."""
+        return dump_to_json(obj=self.value_as_dict)
+
+    @property
+    def value_as_dict(self) -> dict[str, Any]:
+        return verify_dict(obj=self.value)
+
+    @property
+    def created_at_isoformat(self) -> str | None:
+        return self.created_at.isoformat() if self.created_at else None
+
+    @property
+    def expires_at_isoformat(self) -> str | None:
+        return self.expires_at.isoformat() if self.expires_at else None
+
+    @classmethod
+    def from_ttl(cls, *, value: Mapping[str, Any], created_at: datetime | None = None, ttl: SupportsFloat) -> Self:
+        return cls(
+            value=value,
+            created_at=created_at,
+            expires_at=(now_plus(seconds=float(ttl)) if ttl else None),
+        )
+
+
+@bear_enforce
+def dump_to_json(obj: dict[str, Any]) -> str:
+    """Serialize a dictionary to a sorted JSON string."""
+    try:
+        return _dump_to_json_impl(obj)
+    except (ValueError, TypeError) as e:
+        msg: str = f"Failed to serialize object to JSON: {e}"
+        raise SerializationError(msg) from e
+
+
+@bear_enforce
+def dump_to_json_bytes(obj: dict[str, Any]) -> bytes:
+    """Serialize a dictionary to compact JSON bytes."""
+    try:
+        return _dump_to_json_bytes_impl(obj)
+    except (ValueError, TypeError) as e:
+        msg: str = f"Failed to serialize object to JSON: {e}"
+        raise SerializationError(msg) from e
+
+
+@bear_enforce
+def load_from_json(json_str: str | bytes) -> dict[str, Any]:
+    """Deserialize JSON string or bytes to a dictionary."""
+    try:
+        loaded = _load_from_json_impl(json_str)
+    except (ValueError, TypeError) as e:
+        msg: str = f"Failed to deserialize JSON string: {e}"
+        raise DeserializationError(msg) from e
+
+    # JSON parse results from standard loaders are already dict[str, Any].
+    # Skip the verify_dict copy for the common path.
+    if isinstance(loaded, dict):
+        return loaded
+
+    return verify_dict(obj=loaded)
+
+
+@bear_enforce
+def verify_dict(obj: Any) -> dict[str, Any]:
+    """Verify that an object is a mapping with string keys."""
+    if not isinstance(obj, Mapping):
+        msg = "Object is not a Mapping"
+        raise TypeError(msg)
+
+    if not all(isinstance(key, str) for key in obj):  # pyright: ignore[reportUnknownVariableType]
+        msg = "Object contains non-string keys"
+        raise TypeError(msg)
+
+    return dict(obj)  # pyright: ignore[reportUnknownArgumentType]
+
+
+def estimate_serialized_size(value: Mapping[str, Any]) -> int:
+    """Estimate the serialized size of a value without creating a ManagedEntry.
+
+    This function provides a more efficient way to estimate the size of a value
+    when serialized to JSON, without the overhead of creating a full ManagedEntry object.
+    This is useful for size-based checks in wrappers.
+
+    Args:
+        value: The value mapping to estimate the size for.
+
+    Returns:
+        The estimated size in bytes when serialized to JSON.
+    """
+    return len(dump_to_json_bytes(obj=dict(value)))

@@ -1,0 +1,38 @@
+# Rust
+target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+*.whl
+
+# Maturin
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / local env
+.env
+.env.local
+
+# Lock files managed by release scripts
+uv.lock
+
+# Reference projects are not part of this repository's source
+references/

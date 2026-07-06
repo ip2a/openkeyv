@@ -1,0 +1,69 @@
+[package]
+name = "openkeyv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Async Key-Value Store - A pluggable interface for KV Stores"
+readme = "../../README.md"
+repository = "https://github.com/whillhill/openkeyv"
+keywords = ["kv", "store", "async", "cache", "database"]
+categories = ["database", "caching", "asynchronous"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+blake3 = "1.8"
+flate2 = "1.1"
+base64 = "0.22"
+
+sled = { version = "0.34", optional = true }
+redis = { version = "0.29", features = ["tokio-comp"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "json"], optional = true }
+mongodb = { version = "3.2", optional = true }
+futures-util = { version = "0.3", optional = true }
+rocksdb = { version = "0.23", features = ["multi-threaded-cf"], optional = true }
+aws-config = { version = "1", optional = true }
+aws-sdk-dynamodb = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true }
+duckdb = { version = "1.2", features = ["bundled", "chrono"], optional = true }
+memcache = { version = "0.19", optional = true }
+vaultrs = { version = "0.8", optional = true }
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"], optional = true }
+firestore = { version = "0.48", optional = true }
+opensearch = { version = "2.4", optional = true }
+pyo3 = { version = "0.28", features = ["extension-module"], optional = true }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"], optional = true }
+
+[features]
+default = ["disk", "redis", "rocksdb"]
+disk = ["dep:sled"]
+redis = ["dep:redis"]
+postgres = ["dep:sqlx"]
+mongodb = ["dep:mongodb", "dep:futures-util"]
+rocksdb = ["dep:rocksdb"]
+dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
+s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+duckdb-store = ["dep:duckdb"]
+memcached = ["dep:memcache"]
+valkey = ["dep:redis"]
+vault = ["dep:vaultrs"]
+keyring-store = ["dep:keyring"]
+firestore-store = ["dep:firestore"]
+opensearch = ["dep:opensearch"]
+python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
+python-full = ["python", "disk", "redis", "postgres", "mongodb", "rocksdb", "dynamodb", "s3", "duckdb-store", "memcached", "valkey", "vault", "keyring-store", "firestore-store", "opensearch"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.14"
