@@ -1,5 +1,7 @@
+use super::client::RocksDBClient;
+use super::config::RocksDBConfig;
+use super::error::{Error, Result, map_rocksdb_err};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -8,17 +10,10 @@ use crate::value::Value;
 use async_trait::async_trait;
 use std::path::Path;
 
-const DEFAULT_COLLECTION: &str = "default_collection";
 const COLLECTION_SEPARATOR: &str = ":";
 
 fn compound_key(collection: &str, key: &str) -> String {
     format!("{}{}{}", collection, COLLECTION_SEPARATOR, key)
-}
-
-fn map_rocksdb_err(e: rocksdb::Error) -> Error {
-    Error::StoreConnection {
-        message: e.to_string(),
-    }
 }
 
 /// RocksDB-backed key-value store.
@@ -26,8 +21,8 @@ fn map_rocksdb_err(e: rocksdb::Error) -> Error {
 /// Each collection is represented by a key prefix.
 /// Values are stored as JSON-serialized `ManagedEntry` bytes.
 pub struct RocksDBStore {
-    db: rocksdb::DB,
-    default_collection: String,
+    client: RocksDBClient,
+    config: RocksDBConfig,
 }
 
 impl RocksDBStore {
@@ -35,26 +30,31 @@ impl RocksDBStore {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
         let db = rocksdb::DB::open(&opts, path).map_err(map_rocksdb_err)?;
-        Ok(Self {
-            db,
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        })
+        Ok(Self::with_config(db, RocksDBConfig::default()))
     }
 
     pub fn from_db(db: rocksdb::DB) -> Self {
+        Self::with_config(db, RocksDBConfig::default())
+    }
+
+    pub fn with_config(db: rocksdb::DB, config: RocksDBConfig) -> Self {
         Self {
-            db,
-            default_collection: DEFAULT_COLLECTION.to_string(),
+            client: RocksDBClient::new(db),
+            config,
         }
     }
 
+    fn db(&self) -> &rocksdb::DB {
+        self.client.db()
+    }
+
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
     }
 
     fn get_entry(&self, key: &str, collection: &str) -> Result<Option<ManagedEntry>> {
         let ck = compound_key(collection, key);
-        match self.db.get(&ck).map_err(map_rocksdb_err)? {
+        match self.db().get(&ck).map_err(map_rocksdb_err)? {
             Some(bytes) => {
                 let entry: ManagedEntry = serde_json::from_slice(&bytes)
                     .map_err(|e| Error::Deserialization(e.to_string()))?;
@@ -71,7 +71,7 @@ impl RocksDBStore {
     fn put_entry(&self, key: &str, collection: &str, entry: &ManagedEntry) -> Result<()> {
         let ck = compound_key(collection, key);
         let bytes = serde_json::to_vec(entry).map_err(|e| Error::Serialization(e.to_string()))?;
-        self.db.put(&ck, bytes).map_err(map_rocksdb_err)?;
+        self.db().put(&ck, bytes).map_err(map_rocksdb_err)?;
         Ok(())
     }
 }
@@ -112,8 +112,8 @@ impl AsyncKeyValue for RocksDBStore {
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
-        let existed = self.db.key_may_exist(&ck);
-        self.db.delete(&ck).map_err(map_rocksdb_err)?;
+        let existed = self.db().key_may_exist(&ck);
+        self.db().delete(&ck).map_err(map_rocksdb_err)?;
         Ok(existed)
     }
 
@@ -174,7 +174,7 @@ impl AsyncKeyValue for RocksDBStore {
                 serde_json::to_vec(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
             batch.put(&ck, bytes);
         }
-        self.db.write(batch).map_err(map_rocksdb_err)?;
+        self.db().write(batch).map_err(map_rocksdb_err)?;
         Ok(())
     }
 
@@ -184,12 +184,12 @@ impl AsyncKeyValue for RocksDBStore {
         let mut count = 0;
         for key in keys {
             let ck = compound_key(cname, key);
-            if self.db.key_may_exist(&ck) {
+            if self.db().key_may_exist(&ck) {
                 count += 1;
             }
             batch.delete(&ck);
         }
-        self.db.write(batch).map_err(map_rocksdb_err)?;
+        self.db().write(batch).map_err(map_rocksdb_err)?;
         Ok(count)
     }
 }
@@ -198,7 +198,7 @@ impl AsyncKeyValue for RocksDBStore {
 impl AsyncCull for RocksDBStore {
     async fn cull(&self) -> Result<()> {
         let mut batch = rocksdb::WriteBatch::default();
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        let iter = self.db().iterator(rocksdb::IteratorMode::Start);
         for item in iter {
             let (k, v) = item.map_err(map_rocksdb_err)?;
             if let Ok(entry) = serde_json::from_slice::<ManagedEntry>(&v) {
@@ -207,7 +207,7 @@ impl AsyncCull for RocksDBStore {
                 }
             }
         }
-        self.db.write(batch).map_err(map_rocksdb_err)?;
+        self.db().write(batch).map_err(map_rocksdb_err)?;
         Ok(())
     }
 }
@@ -219,7 +219,7 @@ impl AsyncEnumerateKeys for RocksDBStore {
         let prefix = format!("{}{}", cname, COLLECTION_SEPARATOR);
         let limit = limit.unwrap_or(10_000).min(10_000);
         let mut keys = Vec::new();
-        let iter = self.db.prefix_iterator(prefix.as_bytes());
+        let iter = self.db().prefix_iterator(prefix.as_bytes());
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
             if let Ok(s) = std::str::from_utf8(&k) {
@@ -240,7 +240,7 @@ impl AsyncEnumerateCollections for RocksDBStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
         let limit = limit.unwrap_or(10_000).min(10_000);
         let mut collections = std::collections::HashSet::new();
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        let iter = self.db().iterator(rocksdb::IteratorMode::Start);
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
             if let Ok(s) = std::str::from_utf8(&k) {
@@ -262,14 +262,14 @@ impl AsyncDestroyCollection for RocksDBStore {
         let prefix = format!("{}{}", collection, COLLECTION_SEPARATOR);
         let mut batch = rocksdb::WriteBatch::default();
         let mut had_any = false;
-        let iter = self.db.prefix_iterator(prefix.as_bytes());
+        let iter = self.db().prefix_iterator(prefix.as_bytes());
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
             batch.delete(&k);
             had_any = true;
         }
         if had_any {
-            self.db.write(batch).map_err(map_rocksdb_err)?;
+            self.db().write(batch).map_err(map_rocksdb_err)?;
         }
         Ok(had_any)
     }
@@ -279,12 +279,12 @@ impl AsyncDestroyCollection for RocksDBStore {
 impl AsyncDestroyStore for RocksDBStore {
     async fn destroy(&self) -> Result<bool> {
         let mut batch = rocksdb::WriteBatch::default();
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        let iter = self.db().iterator(rocksdb::IteratorMode::Start);
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
             batch.delete(&k);
         }
-        self.db.write(batch).map_err(map_rocksdb_err)?;
+        self.db().write(batch).map_err(map_rocksdb_err)?;
         Ok(true)
     }
 }
