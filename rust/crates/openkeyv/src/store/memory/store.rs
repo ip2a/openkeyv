@@ -1,5 +1,7 @@
+use super::client::MemoryClient;
+use super::config::{MemoryConfig, SeedData};
+use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -7,22 +9,14 @@ use crate::protocol::{
 use crate::value::Value;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use std::collections::HashMap;
-use tokio::sync::RwLock;
 
-type SeedData = HashMap<String, HashMap<String, Value>>;
-
-const DEFAULT_COLLECTION: &str = "default_collection";
 const DEFAULT_PAGE_SIZE: usize = 10_000;
 const PAGE_LIMIT: usize = 10_000;
 
 /// A fixed-size in-memory key-value store using time-aware LRU cache per collection.
 pub struct MemoryStore {
-    collections: DashMap<String, DashMap<String, ManagedEntry>>,
-    max_entries_per_collection: Option<usize>,
-    setup_complete: RwLock<bool>,
-    default_collection: String,
-    seed: Option<SeedData>,
+    client: MemoryClient,
+    config: MemoryConfig,
 }
 
 impl MemoryStore {
@@ -35,26 +29,33 @@ impl MemoryStore {
         default_collection: Option<String>,
         seed: Option<SeedData>,
     ) -> Self {
-        Self {
-            collections: DashMap::new(),
+        Self::with_config(MemoryConfig::new(
             max_entries_per_collection,
-            setup_complete: RwLock::new(false),
-            default_collection: default_collection
-                .unwrap_or_else(|| DEFAULT_COLLECTION.to_string()),
+            default_collection,
             seed,
+        ))
+    }
+
+    pub fn with_config(config: MemoryConfig) -> Self {
+        Self {
+            client: MemoryClient::new(),
+            config,
         }
     }
 
     async fn setup(&self) -> Result<()> {
-        let mut complete = self.setup_complete.write().await;
+        let mut complete = self.client.setup_complete().write().await;
         if *complete {
             return Ok(());
         }
 
-        // Seed store if data provided
-        if let Some(seed) = &self.seed {
+        if let Some(seed) = &self.config.seed {
             for (collection, items) in seed {
-                let col = self.collections.entry(collection.clone()).or_default();
+                let col = self
+                    .client
+                    .collections()
+                    .entry(collection.clone())
+                    .or_default();
                 for (key, value) in items {
                     let entry = ManagedEntry::new(value.clone());
                     col.insert(key.clone(), entry);
@@ -68,30 +69,31 @@ impl MemoryStore {
 
     async fn setup_collection(&self, collection: &str) -> Result<()> {
         self.setup().await?;
-        self.collections.entry(collection.to_string()).or_default();
+        self.client
+            .collections()
+            .entry(collection.to_string())
+            .or_default();
         Ok(())
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
     }
 
     fn get_collection(
         &self,
         name: &str,
     ) -> Result<dashmap::mapref::one::Ref<'_, String, DashMap<String, ManagedEntry>>> {
-        self.collections
+        self.client
+            .collections()
             .get(name)
             .ok_or_else(|| Error::InvalidOperation(format!("collection '{}' not found", name)))
     }
 
     fn maybe_cull_collection(&self, col: &DashMap<String, ManagedEntry>) {
-        // Evict expired entries if we have a size limit approaching
-        if let Some(max) = self.max_entries_per_collection {
+        if let Some(max) = self.config.max_entries_per_collection {
             if col.len() > max {
-                // Remove expired first
                 col.retain(|_k, v| !v.is_expired());
-                // If still over limit, remove oldest (simple strategy: arbitrary)
                 while col.len() > max {
                     if let Some(k) = col.iter().next().map(|e| e.key().clone()) {
                         col.remove(&k);
@@ -152,7 +154,7 @@ impl AsyncKeyValue for MemoryStore {
             None => ManagedEntry::new(value),
         };
 
-        if let Some(col) = self.collections.get_mut(cname) {
+        if let Some(col) = self.client.collections().get_mut(cname) {
             self.maybe_cull_collection(&col);
             col.insert(key.to_string(), entry);
         }
@@ -225,7 +227,7 @@ impl AsyncKeyValue for MemoryStore {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
-        if let Some(col) = self.collections.get_mut(cname) {
+        if let Some(col) = self.client.collections().get_mut(cname) {
             self.maybe_cull_collection(&col);
             for (key, value) in keys.iter().zip(values.iter()) {
                 let entry = match ttl {
@@ -256,7 +258,7 @@ impl AsyncKeyValue for MemoryStore {
 #[async_trait]
 impl AsyncCull for MemoryStore {
     async fn cull(&self) -> Result<()> {
-        for entry in self.collections.iter() {
+        for entry in self.client.collections().iter() {
             let col = entry.value();
             col.retain(|_k, v| !v.is_expired());
         }
@@ -282,7 +284,8 @@ impl AsyncEnumerateCollections for MemoryStore {
         self.setup().await?;
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
         Ok(self
-            .collections
+            .client
+            .collections()
             .iter()
             .take(limit)
             .map(|e| e.key().clone())
@@ -294,15 +297,15 @@ impl AsyncEnumerateCollections for MemoryStore {
 impl AsyncDestroyCollection for MemoryStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
         self.setup().await?;
-        Ok(self.collections.remove(collection).is_some())
+        Ok(self.client.collections().remove(collection).is_some())
     }
 }
 
 #[async_trait]
 impl AsyncDestroyStore for MemoryStore {
     async fn destroy(&self) -> Result<bool> {
-        self.collections.clear();
-        let mut complete = self.setup_complete.write().await;
+        self.client.collections().clear();
+        let mut complete = self.client.setup_complete().write().await;
         *complete = false;
         Ok(true)
     }
