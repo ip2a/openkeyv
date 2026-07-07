@@ -1,5 +1,7 @@
+use super::client::DiskClient;
+use super::config::DiskConfig;
+use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -7,8 +9,6 @@ use crate::protocol::{
 use crate::value::Value;
 use async_trait::async_trait;
 use std::path::Path;
-
-const DEFAULT_COLLECTION: &str = "default_collection";
 
 fn json_to_ivec(entry: &ManagedEntry) -> Result<sled::IVec> {
     let json = serde_json::to_vec(entry).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -23,8 +23,8 @@ fn ivec_to_entry(iv: sled::IVec) -> Result<ManagedEntry> {
 ///
 /// Each collection maps to a separate sled `Tree`.
 pub struct DiskStore {
-    db: sled::Db,
-    default_collection: String,
+    client: DiskClient,
+    config: DiskConfig,
 }
 
 impl DiskStore {
@@ -32,22 +32,40 @@ impl DiskStore {
         let db = sled::open(path).map_err(|e| Error::StoreSetup {
             message: format!("failed to open sled database: {}", e),
         })?;
-        Ok(Self {
-            db,
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        })
+        Ok(Self::with_config(db, DiskConfig::default()))
+    }
+
+    pub fn with_config(db: sled::Db, config: DiskConfig) -> Self {
+        Self {
+            client: DiskClient::new(db),
+            config,
+        }
+    }
+
+    fn db(&self) -> &sled::Db {
+        self.client.db()
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
     }
 
     fn get_tree(&self, collection: &str) -> Result<sled::Tree> {
-        self.db
+        self.db()
             .open_tree(collection)
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to open tree: {}", e),
             })
+    }
+}
+
+impl Default for DiskStore {
+    fn default() -> Self {
+        let db = sled::Config::new()
+            .temporary(true)
+            .open()
+            .expect("temporary sled database should open");
+        Self::with_config(db, DiskConfig::default())
     }
 }
 
@@ -239,9 +257,9 @@ impl AsyncKeyValue for DiskStore {
 #[async_trait]
 impl AsyncCull for DiskStore {
     async fn cull(&self) -> Result<()> {
-        for name in self.db.tree_names() {
+        for name in self.db().tree_names() {
             let tree = self
-                .db
+                .db()
                 .open_tree(&name)
                 .map_err(|e| Error::StoreConnection {
                     message: format!("failed to open tree: {}", e),
@@ -288,7 +306,7 @@ impl AsyncEnumerateCollections for DiskStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
         let mut collections = Vec::new();
         let limit = limit.unwrap_or(10_000).min(10_000);
-        for name in self.db.tree_names() {
+        for name in self.db().tree_names() {
             if let Ok(s) = std::str::from_utf8(&name) {
                 collections.push(s.to_string());
             }
@@ -297,7 +315,7 @@ impl AsyncEnumerateCollections for DiskStore {
             }
         }
         // Also include the default tree if it has been accessed
-        if !self.db.was_recovered() {
+        if !self.db().was_recovered() {
             // sled doesn't have a direct way to list "open" trees vs all trees
             // tree_names already returns all trees
         }
@@ -309,7 +327,7 @@ impl AsyncEnumerateCollections for DiskStore {
 impl AsyncDestroyCollection for DiskStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
         let cname = self.collection_name(Some(collection));
-        self.db
+        self.db()
             .drop_tree(cname)
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to drop tree: {}", e),
@@ -321,7 +339,7 @@ impl AsyncDestroyCollection for DiskStore {
 #[async_trait]
 impl AsyncDestroyStore for DiskStore {
     async fn destroy(&self) -> Result<bool> {
-        self.db.clear().map_err(|e| Error::StoreConnection {
+        self.db().clear().map_err(|e| Error::StoreConnection {
             message: format!("failed to clear database: {}", e),
         })?;
         Ok(true)
