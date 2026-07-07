@@ -1,20 +1,14 @@
+use super::client::VaultClient;
+use super::config::VaultConfig;
+use super::error::{Error, Result, map_vault_err};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::AsyncKeyValue;
 use crate::value::Value;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_COLLECTION: &str = "default_collection";
-
 fn compound_key(collection: &str, key: &str) -> String {
     format!("{}:{}", collection, key)
-}
-
-fn map_vault_err(e: vaultrs::error::ClientError) -> Error {
-    Error::StoreConnection {
-        message: e.to_string(),
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,9 +21,8 @@ struct VaultSecret {
 /// Each entry is stored as a secret with the compound key as the path
 /// and the JSON-serialized `ManagedEntry` inside a `value` field.
 pub struct VaultStore {
-    client: vaultrs::client::VaultClient,
-    mount_point: String,
-    default_collection: String,
+    client: VaultClient,
+    config: VaultConfig,
 }
 
 impl VaultStore {
@@ -45,27 +38,35 @@ impl VaultStore {
             vaultrs::client::VaultClient::new(settings).map_err(|e| Error::StoreConnection {
                 message: format!("failed to create vault client: {e}"),
             })?;
-        Ok(Self {
-            client,
-            mount_point: mount_point.unwrap_or("secret").to_string(),
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        })
+        let config = VaultConfig::new(None, mount_point.map(ToString::to_string));
+        Ok(Self::with_config(client, config))
     }
 
     pub fn from_client(client: vaultrs::client::VaultClient, mount_point: Option<&str>) -> Self {
+        let config = VaultConfig::new(None, mount_point.map(ToString::to_string));
+        Self::with_config(client, config)
+    }
+
+    pub fn with_config(client: vaultrs::client::VaultClient, config: VaultConfig) -> Self {
+        let mount_point = config.mount_point.clone();
         Self {
-            client,
-            mount_point: mount_point.unwrap_or("secret").to_string(),
-            default_collection: DEFAULT_COLLECTION.to_string(),
+            client: VaultClient::new(client, mount_point),
+            config,
         }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
     }
 
     async fn get_secret(&self, path: &str) -> Result<Option<VaultSecret>> {
-        match vaultrs::kv2::read::<VaultSecret>(&self.client, &self.mount_point, path).await {
+        match vaultrs::kv2::read::<VaultSecret>(
+            self.client.client(),
+            self.client.mount_point(),
+            path,
+        )
+        .await
+        {
             Ok(secret) => Ok(Some(secret)),
             Err(vaultrs::error::ClientError::APIError { code: 404, .. }) => Ok(None),
             Err(e) => Err(map_vault_err(e)),
@@ -126,9 +127,14 @@ impl AsyncKeyValue for VaultStore {
         let json_str =
             serde_json::to_string(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
         let secret = VaultSecret { value: json_str };
-        vaultrs::kv2::set(&self.client, &self.mount_point, &path, &secret)
-            .await
-            .map_err(map_vault_err)?;
+        vaultrs::kv2::set(
+            self.client.client(),
+            self.client.mount_point(),
+            &path,
+            &secret,
+        )
+        .await
+        .map_err(map_vault_err)?;
         Ok(())
     }
 
@@ -137,9 +143,13 @@ impl AsyncKeyValue for VaultStore {
         let path = compound_key(cname, key);
         match self.get_secret(&path).await? {
             Some(_) => {
-                vaultrs::kv2::delete_metadata(&self.client, &self.mount_point, &path)
-                    .await
-                    .map_err(map_vault_err)?;
+                vaultrs::kv2::delete_metadata(
+                    self.client.client(),
+                    self.client.mount_point(),
+                    &path,
+                )
+                .await
+                .map_err(map_vault_err)?;
                 Ok(true)
             }
             None => Ok(false),
@@ -195,9 +205,14 @@ impl AsyncKeyValue for VaultStore {
                 serde_json::to_string(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
             let path = compound_key(cname, key);
             let secret = VaultSecret { value: json_str };
-            vaultrs::kv2::set(&self.client, &self.mount_point, &path, &secret)
-                .await
-                .map_err(map_vault_err)?;
+            vaultrs::kv2::set(
+                self.client.client(),
+                self.client.mount_point(),
+                &path,
+                &secret,
+            )
+            .await
+            .map_err(map_vault_err)?;
         }
         Ok(())
     }
