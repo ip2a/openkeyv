@@ -4,9 +4,8 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 const DEFAULT_COLLECTION: &str = "default_collection";
 
@@ -138,7 +137,7 @@ impl DuckDBStore {
             let value_str: String = row
                 .get(0)
                 .map_err(|e| Error::Deserialization(e.to_string()))?;
-            let value: HashMap<String, Value> = serde_json::from_str(&value_str)
+            let value: Value = serde_json::from_str(&value_str)
                 .map_err(|e| Error::Deserialization(e.to_string()))?;
             let created_at: Option<chrono::DateTime<chrono::Utc>> = row
                 .get(1)
@@ -190,20 +189,12 @@ impl DuckDBStore {
 
 #[async_trait]
 impl AsyncKeyValue for DuckDBStore {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         Ok(self.get_entry(key, cname).await?.map(|e| e.value))
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         match self.get_entry(key, cname).await? {
             Some(entry) => {
@@ -217,7 +208,7 @@ impl AsyncKeyValue for DuckDBStore {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -248,7 +239,7 @@ impl AsyncKeyValue for DuckDBStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -261,7 +252,7 @@ impl AsyncKeyValue for DuckDBStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -273,7 +264,7 @@ impl AsyncKeyValue for DuckDBStore {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {

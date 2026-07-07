@@ -4,8 +4,8 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
 use sqlx::Row;
 use std::collections::HashMap;
 
@@ -123,7 +123,7 @@ impl PostgresStore {
             })?;
         match row {
             Some(row) => {
-                let value: sqlx::types::Json<HashMap<String, Value>> = row
+                let value: sqlx::types::Json<Value> = row
                     .try_get("value")
                     .map_err(|e| Error::Deserialization(e.to_string()))?;
                 let created_at: Option<chrono::DateTime<chrono::Utc>> =
@@ -179,20 +179,12 @@ impl PostgresStore {
 
 #[async_trait]
 impl AsyncKeyValue for PostgresStore {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         Ok(self.get_entry(key, cname).await?.map(|e| e.value))
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         match self.get_entry(key, cname).await? {
             Some(entry) => {
@@ -206,7 +198,7 @@ impl AsyncKeyValue for PostgresStore {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -239,7 +231,7 @@ impl AsyncKeyValue for PostgresStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         if keys.is_empty() {
             return Ok(vec![]);
@@ -261,7 +253,7 @@ impl AsyncKeyValue for PostgresStore {
             let key: String = row
                 .try_get("key")
                 .map_err(|e| Error::Deserialization(e.to_string()))?;
-            let value: sqlx::types::Json<HashMap<String, Value>> = row
+            let value: sqlx::types::Json<Value> = row
                 .try_get("value")
                 .map_err(|e| Error::Deserialization(e.to_string()))?;
             let created_at: Option<chrono::DateTime<chrono::Utc>> = row
@@ -286,7 +278,7 @@ impl AsyncKeyValue for PostgresStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         if keys.is_empty() {
             return Ok(vec![]);
@@ -308,7 +300,7 @@ impl AsyncKeyValue for PostgresStore {
             let key: String = row
                 .try_get("key")
                 .map_err(|e| Error::Deserialization(e.to_string()))?;
-            let value: sqlx::types::Json<HashMap<String, Value>> = row
+            let value: sqlx::types::Json<Value> = row
                 .try_get("value")
                 .map_err(|e| Error::Deserialization(e.to_string()))?;
             let created_at: Option<chrono::DateTime<chrono::Utc>> = row
@@ -333,7 +325,7 @@ impl AsyncKeyValue for PostgresStore {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {

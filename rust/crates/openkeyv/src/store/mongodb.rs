@@ -4,6 +4,7 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::value::Value;
 use async_trait::async_trait;
 use futures_util::stream::StreamExt;
 use mongodb::{
@@ -11,7 +12,6 @@ use mongodb::{
     bson::{DateTime as BsonDateTime, Document, doc},
     options::UpdateOptions,
 };
-use serde_json::Value;
 use std::collections::HashMap;
 
 const DEFAULT_COLLECTION: &str = "default_collection";
@@ -98,7 +98,7 @@ impl MongoStore {
         let value_bson = doc
             .get("value")
             .ok_or_else(|| Error::Deserialization("missing value field".to_string()))?;
-        let value: HashMap<String, Value> = mongodb::bson::from_bson(value_bson.clone())
+        let value: Value = mongodb::bson::from_bson(value_bson.clone())
             .map_err(|e| Error::Deserialization(e.to_string()))?;
         let created_at = doc
             .get_datetime("created_at")
@@ -118,11 +118,7 @@ impl MongoStore {
 
 #[async_trait]
 impl AsyncKeyValue for MongoStore {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         let coll = self.get_collection(cname).await?;
         let doc = coll
@@ -144,11 +140,7 @@ impl AsyncKeyValue for MongoStore {
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         let coll = self.get_collection(cname).await?;
         let doc = coll
@@ -174,7 +166,7 @@ impl AsyncKeyValue for MongoStore {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -212,7 +204,7 @@ impl AsyncKeyValue for MongoStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         let coll = self.get_collection(cname).await?;
         if keys.is_empty() {
@@ -244,7 +236,7 @@ impl AsyncKeyValue for MongoStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         let coll = self.get_collection(cname).await?;
         if keys.is_empty() {
@@ -276,7 +268,7 @@ impl AsyncKeyValue for MongoStore {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {

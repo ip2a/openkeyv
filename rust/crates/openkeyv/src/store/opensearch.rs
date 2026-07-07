@@ -4,10 +4,9 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::value::Value;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
 
 const DEFAULT_COLLECTION: &str = "default_collection";
 const DEFAULT_PAGE_SIZE: usize = 10_000;
@@ -78,7 +77,7 @@ impl OpenSearchStore {
     }
 
     fn doc_to_entry(doc: &OpenSearchDoc) -> Result<ManagedEntry> {
-        let value: HashMap<String, Value> =
+        let value: Value =
             serde_json::from_str(&doc.value).map_err(|e| Error::Deserialization(e.to_string()))?;
         let created_at = doc
             .created_at
@@ -98,11 +97,7 @@ impl OpenSearchStore {
 
 #[async_trait]
 impl AsyncKeyValue for OpenSearchStore {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         let index = self.index_name(cname);
         let response = self
@@ -140,11 +135,7 @@ impl AsyncKeyValue for OpenSearchStore {
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         let index = self.index_name(cname);
         let response = self
@@ -186,7 +177,7 @@ impl AsyncKeyValue for OpenSearchStore {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -231,7 +222,7 @@ impl AsyncKeyValue for OpenSearchStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -244,7 +235,7 @@ impl AsyncKeyValue for OpenSearchStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -256,7 +247,7 @@ impl AsyncKeyValue for OpenSearchStore {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
