@@ -1,40 +1,45 @@
+use super::client::MemcachedClient;
+use super::config::MemcachedConfig;
+use super::error::{Error, Result, memcached_connection_error};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{AsyncDestroyStore, AsyncKeyValue};
 use crate::value::Value;
 use async_trait::async_trait;
-
-const DEFAULT_COLLECTION: &str = "default_collection";
 
 /// Memcached-backed key-value store.
 ///
 /// Uses the `memcache` crate (sync client) under a Tokio mutex.
 /// Values are JSON-serialized `ManagedEntry` strings stored by compound key.
 pub struct MemcachedStore {
-    client: tokio::sync::Mutex<memcache::Client>,
-    default_collection: String,
+    client: MemcachedClient,
+    config: MemcachedConfig,
 }
 
 impl MemcachedStore {
     pub fn new(url: &str) -> Result<Self> {
-        let client = memcache::Client::connect(url).map_err(|e| Error::StoreConnection {
-            message: format!("failed to connect to memcached: {e}"),
+        let client = memcache::Client::connect(url).map_err(|e| {
+            memcached_connection_error(format!("failed to connect to memcached: {e}"))
         })?;
-        Ok(Self {
-            client: tokio::sync::Mutex::new(client),
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        })
+        Ok(Self::with_config(client, MemcachedConfig::default()))
     }
 
     pub fn from_client(client: memcache::Client) -> Self {
+        Self::with_config(client, MemcachedConfig::default())
+    }
+
+    pub fn with_config(client: memcache::Client, config: MemcachedConfig) -> Self {
         Self {
-            client: tokio::sync::Mutex::new(client),
-            default_collection: DEFAULT_COLLECTION.to_string(),
+            client: MemcachedClient::new(client),
+            config,
         }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
+    }
+
+    fn client(&self) -> &tokio::sync::Mutex<memcache::Client> {
+        self.client.client()
     }
 
     fn compound_key(collection: &str, key: &str) -> String {
@@ -47,10 +52,10 @@ impl AsyncKeyValue for MemcachedStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         let ck = Self::compound_key(cname, key);
-        let guard = self.client.lock().await;
-        let raw: Option<String> = guard.get(&ck).map_err(|e| Error::StoreConnection {
-            message: format!("{e}"),
-        })?;
+        let guard = self.client().lock().await;
+        let raw: Option<String> = guard
+            .get(&ck)
+            .map_err(|e| memcached_connection_error(format!("{e}")))?;
         match raw {
             Some(json_str) => {
                 let entry: ManagedEntry = serde_json::from_str(&json_str)
@@ -69,10 +74,10 @@ impl AsyncKeyValue for MemcachedStore {
     async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         let ck = Self::compound_key(cname, key);
-        let guard = self.client.lock().await;
-        let raw: Option<String> = guard.get(&ck).map_err(|e| Error::StoreConnection {
-            message: format!("{e}"),
-        })?;
+        let guard = self.client().lock().await;
+        let raw: Option<String> = guard
+            .get(&ck)
+            .map_err(|e| memcached_connection_error(format!("{e}")))?;
         match raw {
             Some(json_str) => {
                 let entry: ManagedEntry = serde_json::from_str(&json_str)
@@ -105,22 +110,20 @@ impl AsyncKeyValue for MemcachedStore {
         let json_str =
             serde_json::to_string(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
         let exptime = entry.ttl().map(|t| t.max(1.0) as u32).unwrap_or(0);
-        let guard = self.client.lock().await;
+        let guard = self.client().lock().await;
         guard
             .set(&ck, json_str, exptime)
-            .map_err(|e| Error::StoreConnection {
-                message: format!("{e}"),
-            })?;
+            .map_err(|e| memcached_connection_error(format!("{e}")))?;
         Ok(())
     }
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
         let ck = Self::compound_key(cname, key);
-        let guard = self.client.lock().await;
-        guard.delete(&ck).map_err(|e| Error::StoreConnection {
-            message: format!("{e}"),
-        })
+        let guard = self.client().lock().await;
+        guard
+            .delete(&ck)
+            .map_err(|e| memcached_connection_error(format!("{e}")))
     }
 
     async fn get_many(
@@ -172,12 +175,10 @@ impl AsyncKeyValue for MemcachedStore {
                 serde_json::to_string(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
             let exptime = entry.ttl().map(|t| t.max(1.0) as u32).unwrap_or(0);
             let ck = Self::compound_key(cname, key);
-            let guard = self.client.lock().await;
+            let guard = self.client().lock().await;
             guard
                 .set(&ck, json_str, exptime)
-                .map_err(|e| Error::StoreConnection {
-                    message: format!("{e}"),
-                })?;
+                .map_err(|e| memcached_connection_error(format!("{e}")))?;
         }
         Ok(())
     }
@@ -197,10 +198,10 @@ impl AsyncKeyValue for MemcachedStore {
 #[async_trait]
 impl AsyncDestroyStore for MemcachedStore {
     async fn destroy(&self) -> Result<bool> {
-        let guard = self.client.lock().await;
-        guard.flush().map_err(|e| Error::StoreConnection {
-            message: format!("{e}"),
-        })?;
+        let guard = self.client().lock().await;
+        guard
+            .flush()
+            .map_err(|e| memcached_connection_error(format!("{e}")))?;
         Ok(true)
     }
 }
