@@ -1,21 +1,15 @@
+use super::client::FirestoreClient;
+use super::config::FirestoreConfig;
+use super::error::{Error, Result, map_firestore_err};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::AsyncKeyValue;
 use crate::value::Value;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_COLLECTION: &str = "default_collection";
-
 #[derive(Debug, Serialize, Deserialize)]
 struct FirestoreDoc {
     value: String,
-}
-
-fn map_firestore_err(e: firestore::errors::FirestoreError) -> Error {
-    Error::StoreConnection {
-        message: e.to_string(),
-    }
 }
 
 /// Google Firestore-backed key-value store.
@@ -24,8 +18,8 @@ fn map_firestore_err(e: firestore::errors::FirestoreError) -> Error {
 /// The document contains a single `value` field with the JSON-serialized
 /// `ManagedEntry` string.
 pub struct FirestoreStore {
-    db: firestore::FirestoreDb,
-    default_collection: String,
+    client: FirestoreClient,
+    config: FirestoreConfig,
 }
 
 impl FirestoreStore {
@@ -33,21 +27,26 @@ impl FirestoreStore {
         let db = firestore::FirestoreDb::new(project_id)
             .await
             .map_err(map_firestore_err)?;
-        Ok(Self {
-            db,
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        })
+        Ok(Self::with_config(db, FirestoreConfig::new(None)))
     }
 
     pub fn from_db(db: firestore::FirestoreDb) -> Self {
+        Self::with_config(db, FirestoreConfig::new(None))
+    }
+
+    pub fn with_config(db: firestore::FirestoreDb, config: FirestoreConfig) -> Self {
         Self {
-            db,
-            default_collection: DEFAULT_COLLECTION.to_string(),
+            client: FirestoreClient::new(db),
+            config,
         }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
+    }
+
+    fn db(&self) -> &firestore::FirestoreDb {
+        self.client.db()
     }
 }
 
@@ -56,7 +55,7 @@ impl AsyncKeyValue for FirestoreStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         let doc: Option<FirestoreDoc> = self
-            .db
+            .db()
             .fluent()
             .select()
             .by_id_in(cname)
@@ -70,7 +69,7 @@ impl AsyncKeyValue for FirestoreStore {
                     .map_err(|e| Error::Deserialization(e.to_string()))?;
                 if entry.is_expired() {
                     let _ = self
-                        .db
+                        .db()
                         .fluent()
                         .delete()
                         .from(cname)
@@ -89,7 +88,7 @@ impl AsyncKeyValue for FirestoreStore {
     async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         let doc: Option<FirestoreDoc> = self
-            .db
+            .db()
             .fluent()
             .select()
             .by_id_in(cname)
@@ -103,7 +102,7 @@ impl AsyncKeyValue for FirestoreStore {
                     .map_err(|e| Error::Deserialization(e.to_string()))?;
                 if entry.is_expired() {
                     let _ = self
-                        .db
+                        .db()
                         .fluent()
                         .delete()
                         .from(cname)
@@ -138,7 +137,7 @@ impl AsyncKeyValue for FirestoreStore {
 
         // Upsert via update (merge); if document doesn't exist, fall back to insert
         match self
-            .db
+            .db()
             .fluent()
             .update()
             .in_col(cname)
@@ -149,7 +148,7 @@ impl AsyncKeyValue for FirestoreStore {
         {
             Ok(_) => Ok(()),
             Err(firestore::errors::FirestoreError::DataNotFoundError(_)) => {
-                self.db
+                self.db()
                     .fluent()
                     .insert()
                     .into(cname)
@@ -167,7 +166,7 @@ impl AsyncKeyValue for FirestoreStore {
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
         let exists: Option<FirestoreDoc> = self
-            .db
+            .db()
             .fluent()
             .select()
             .by_id_in(cname)
@@ -176,7 +175,7 @@ impl AsyncKeyValue for FirestoreStore {
             .await
             .map_err(map_firestore_err)?;
         if exists.is_some() {
-            self.db
+            self.db()
                 .fluent()
                 .delete()
                 .from(cname)
@@ -239,7 +238,7 @@ impl AsyncKeyValue for FirestoreStore {
                 serde_json::to_string(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
             let doc = FirestoreDoc { value: json_str };
             match self
-                .db
+                .db()
                 .fluent()
                 .update()
                 .in_col(cname)
@@ -250,7 +249,7 @@ impl AsyncKeyValue for FirestoreStore {
             {
                 Ok(_) => {}
                 Err(firestore::errors::FirestoreError::DataNotFoundError(_)) => {
-                    self.db
+                    self.db()
                         .fluent()
                         .insert()
                         .into(cname)
