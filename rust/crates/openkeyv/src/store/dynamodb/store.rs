@@ -1,5 +1,7 @@
+use super::client::DynamoDBClient;
+use super::config::DynamoDBConfig;
+use super::error::{Error, Result, build_err};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -12,63 +14,61 @@ use aws_sdk_dynamodb::types::{
 };
 use std::collections::HashMap;
 
-const DEFAULT_COLLECTION: &str = "default_collection";
-
-fn build_err(e: aws_sdk_dynamodb::error::BuildError) -> Error {
-    Error::StoreSetup {
-        message: e.to_string(),
-    }
-}
-
 /// DynamoDB-backed key-value store.
 ///
 /// Uses a single table with `collection` (HASH) and `key` (RANGE) as the composite primary key.
 /// Values are stored as JSON strings in a `value` attribute. TTL is supported via a `ttl` attribute
 /// (Unix epoch seconds) with DynamoDB native TTL.
 pub struct DynamoDBStore {
-    client: aws_sdk_dynamodb::Client,
-    table_name: String,
-    default_collection: String,
+    client: DynamoDBClient,
+    config: DynamoDBConfig,
 }
 
 impl DynamoDBStore {
     pub async fn new(table_name: impl Into<String>) -> Result<Self> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_dynamodb::Client::new(&config);
-        let store = Self {
-            client,
-            table_name: table_name.into(),
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        };
+        let store = Self::with_config(client, DynamoDBConfig::new(table_name, None));
         store.ensure_table().await?;
         Ok(store)
     }
 
     pub fn from_client(client: aws_sdk_dynamodb::Client, table_name: impl Into<String>) -> Self {
+        Self::with_config(client, DynamoDBConfig::new(table_name, None))
+    }
+
+    pub fn with_config(client: aws_sdk_dynamodb::Client, config: DynamoDBConfig) -> Self {
         Self {
-            client,
-            table_name: table_name.into(),
-            default_collection: DEFAULT_COLLECTION.to_string(),
+            client: DynamoDBClient::new(client),
+            config,
         }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
+    }
+
+    fn table_name(&self) -> &str {
+        &self.config.table_name
+    }
+
+    fn client(&self) -> &aws_sdk_dynamodb::Client {
+        self.client.client()
     }
 
     async fn ensure_table(&self) -> Result<()> {
         let exists = self
-            .client
+            .client()
             .describe_table()
-            .table_name(&self.table_name)
+            .table_name(self.table_name())
             .send()
             .await
             .is_ok();
 
         if !exists {
-            self.client
+            self.client()
                 .create_table()
-                .table_name(&self.table_name)
+                .table_name(self.table_name())
                 .key_schema(
                     KeySchemaElement::builder()
                         .attribute_name("collection")
@@ -170,9 +170,9 @@ impl AsyncKeyValue for DynamoDBStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         let res = self
-            .client
+            .client()
             .get_item()
-            .table_name(&self.table_name)
+            .table_name(self.table_name())
             .key("collection", AttributeValue::S(cname.to_string()))
             .key("key", AttributeValue::S(key.to_string()))
             .send()
@@ -189,9 +189,9 @@ impl AsyncKeyValue for DynamoDBStore {
     async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         let res = self
-            .client
+            .client()
             .get_item()
-            .table_name(&self.table_name)
+            .table_name(self.table_name())
             .key("collection", AttributeValue::S(cname.to_string()))
             .key("key", AttributeValue::S(key.to_string()))
             .send()
@@ -224,9 +224,9 @@ impl AsyncKeyValue for DynamoDBStore {
             None => ManagedEntry::new(value),
         };
         let item = Self::entry_to_item(key, cname, &entry)?;
-        self.client
+        self.client()
             .put_item()
-            .table_name(&self.table_name)
+            .table_name(self.table_name())
             .set_item(Some(item))
             .send()
             .await
@@ -239,9 +239,9 @@ impl AsyncKeyValue for DynamoDBStore {
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
         let res = self
-            .client
+            .client()
             .delete_item()
-            .table_name(&self.table_name)
+            .table_name(self.table_name())
             .key("collection", AttributeValue::S(cname.to_string()))
             .key("key", AttributeValue::S(key.to_string()))
             .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
@@ -299,9 +299,9 @@ impl AsyncKeyValue for DynamoDBStore {
                 None => ManagedEntry::new(value.clone()),
             };
             let item = Self::entry_to_item(key, cname, &entry)?;
-            self.client
+            self.client()
                 .put_item()
-                .table_name(&self.table_name)
+                .table_name(self.table_name())
                 .set_item(Some(item))
                 .send()
                 .await
@@ -341,9 +341,9 @@ impl AsyncEnumerateKeys for DynamoDBStore {
         let mut last_key: Option<HashMap<String, AttributeValue>> = None;
         loop {
             let mut req = self
-                .client
+                .client()
                 .query()
-                .table_name(&self.table_name)
+                .table_name(self.table_name())
                 .key_condition_expression("collection = :c")
                 .expression_attribute_values(":c", AttributeValue::S(cname.to_string()))
                 .projection_expression("key")
@@ -378,9 +378,9 @@ impl AsyncEnumerateCollections for DynamoDBStore {
         let mut last_key: Option<HashMap<String, AttributeValue>> = None;
         loop {
             let mut req = self
-                .client
+                .client()
                 .scan()
-                .table_name(&self.table_name)
+                .table_name(self.table_name())
                 .projection_expression("collection")
                 .limit(limit);
             if let Some(ref k) = last_key {
@@ -422,9 +422,9 @@ impl AsyncDestroyCollection for DynamoDBStore {
 #[async_trait]
 impl AsyncDestroyStore for DynamoDBStore {
     async fn destroy(&self) -> Result<bool> {
-        self.client
+        self.client()
             .delete_table()
-            .table_name(&self.table_name)
+            .table_name(self.table_name())
             .send()
             .await
             .map_err(|e| Error::StoreConnection {
