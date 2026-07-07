@@ -1,5 +1,7 @@
+use super::client::OpenSearchClient;
+use super::config::{DEFAULT_PAGE_SIZE, OpenSearchConfig, PAGE_LIMIT};
+use super::error::{Error, Result, map_os_err};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -7,10 +9,6 @@ use crate::protocol::{
 use crate::value::Value;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-
-const DEFAULT_COLLECTION: &str = "default_collection";
-const DEFAULT_PAGE_SIZE: usize = 10_000;
-const PAGE_LIMIT: usize = 10_000;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenSearchDoc {
@@ -20,30 +18,19 @@ struct OpenSearchDoc {
     collection: String,
 }
 
-fn map_os_err(e: opensearch::Error) -> Error {
-    Error::StoreConnection {
-        message: e.to_string(),
-    }
-}
-
 /// OpenSearch-backed key-value store.
 ///
 /// Each collection maps to an index named `{index_prefix}-{collection}`.
 /// Each key maps to a document ID. Values are JSON-serialized `ManagedEntry`
 /// strings with metadata fields.
 pub struct OpenSearchStore {
-    client: opensearch::OpenSearch,
-    index_prefix: String,
-    default_collection: String,
+    client: OpenSearchClient,
+    config: OpenSearchConfig,
 }
 
 impl OpenSearchStore {
     pub fn new(client: opensearch::OpenSearch, index_prefix: impl Into<String>) -> Self {
-        Self {
-            client,
-            index_prefix: index_prefix.into(),
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        }
+        Self::with_config(client, OpenSearchConfig::new(index_prefix))
     }
 
     pub async fn from_url(url: impl Into<String>, index_prefix: impl Into<String>) -> Result<Self> {
@@ -57,12 +44,23 @@ impl OpenSearchStore {
         Ok(Self::new(client, index_prefix))
     }
 
+    pub fn with_config(client: opensearch::OpenSearch, config: OpenSearchConfig) -> Self {
+        Self {
+            client: OpenSearchClient::new(client),
+            config,
+        }
+    }
+
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
     }
 
     fn index_name(&self, collection: &str) -> String {
-        format!("{}-{}", self.index_prefix, collection)
+        format!("{}-{}", self.config.index_prefix, collection)
+    }
+
+    fn os(&self) -> &opensearch::OpenSearch {
+        self.client.client()
     }
 
     fn entry_to_doc(entry: &ManagedEntry, collection: &str) -> Result<OpenSearchDoc> {
@@ -101,7 +99,7 @@ impl AsyncKeyValue for OpenSearchStore {
         let cname = self.collection_name(collection);
         let index = self.index_name(cname);
         let response = self
-            .client
+            .os()
             .get(opensearch::GetParts::IndexId(&index, key))
             .send()
             .await
@@ -119,7 +117,7 @@ impl AsyncKeyValue for OpenSearchStore {
                 let entry = Self::doc_to_entry(&doc)?;
                 if entry.is_expired() {
                     let _ = self
-                        .client
+                        .os()
                         .delete(opensearch::DeleteParts::IndexId(&index, key))
                         .send()
                         .await;
@@ -139,7 +137,7 @@ impl AsyncKeyValue for OpenSearchStore {
         let cname = self.collection_name(collection);
         let index = self.index_name(cname);
         let response = self
-            .client
+            .os()
             .get(opensearch::GetParts::IndexId(&index, key))
             .send()
             .await
@@ -157,7 +155,7 @@ impl AsyncKeyValue for OpenSearchStore {
                 let entry = Self::doc_to_entry(&doc)?;
                 if entry.is_expired() {
                     let _ = self
-                        .client
+                        .os()
                         .delete(opensearch::DeleteParts::IndexId(&index, key))
                         .send()
                         .await;
@@ -188,7 +186,7 @@ impl AsyncKeyValue for OpenSearchStore {
             None => ManagedEntry::new(value),
         };
         let doc = Self::entry_to_doc(&entry, cname)?;
-        self.client
+        self.os()
             .index(opensearch::IndexParts::IndexId(&index, key))
             .body(doc)
             .send()
@@ -201,7 +199,7 @@ impl AsyncKeyValue for OpenSearchStore {
         let cname = self.collection_name(collection);
         let index = self.index_name(cname);
         let response = self
-            .client
+            .os()
             .delete(opensearch::DeleteParts::IndexId(&index, key))
             .send()
             .await
@@ -264,7 +262,7 @@ impl AsyncKeyValue for OpenSearchStore {
                 None => ManagedEntry::new(value.clone()),
             };
             let doc = Self::entry_to_doc(&entry, cname)?;
-            self.client
+            self.os()
                 .index(opensearch::IndexParts::IndexId(
                     &self.index_name(cname),
                     key,
@@ -292,9 +290,9 @@ impl AsyncKeyValue for OpenSearchStore {
 #[async_trait]
 impl AsyncCull for OpenSearchStore {
     async fn cull(&self) -> Result<()> {
-        let pattern = format!("{}-*", self.index_prefix);
+        let pattern = format!("{}-*", self.config.index_prefix);
         let now = chrono::Utc::now().timestamp_millis();
-        self.client
+        self.os()
             .delete_by_query(opensearch::DeleteByQueryParts::Index(&[&pattern]))
             .body(serde_json::json!({
                 "query": {
@@ -317,7 +315,7 @@ impl AsyncEnumerateKeys for OpenSearchStore {
         let index = self.index_name(cname);
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
         let response = self
-            .client
+            .os()
             .search(opensearch::SearchParts::Index(&[&index]))
             .body(serde_json::json!({
                 "query": { "match_all": {} },
@@ -352,10 +350,10 @@ impl AsyncEnumerateKeys for OpenSearchStore {
 #[async_trait]
 impl AsyncEnumerateCollections for OpenSearchStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
-        let pattern = format!("{}-*", self.index_prefix);
+        let pattern = format!("{}-*", self.config.index_prefix);
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
         let response = self
-            .client
+            .os()
             .search(opensearch::SearchParts::Index(&[&pattern]))
             .body(serde_json::json!({
                 "query": { "match_all": {} },
@@ -400,7 +398,7 @@ impl AsyncDestroyCollection for OpenSearchStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
         let index = self.index_name(collection);
         let response = self
-            .client
+            .os()
             .indices()
             .delete(opensearch::indices::IndicesDeleteParts::Index(&[&index]))
             .send()
@@ -423,9 +421,9 @@ impl AsyncDestroyCollection for OpenSearchStore {
 #[async_trait]
 impl AsyncDestroyStore for OpenSearchStore {
     async fn destroy(&self) -> Result<bool> {
-        let pattern = format!("{}-*", self.index_prefix);
+        let pattern = format!("{}-*", self.config.index_prefix);
         let response = self
-            .client
+            .os()
             .indices()
             .delete(opensearch::indices::IndicesDeleteParts::Index(&[&pattern]))
             .send()
