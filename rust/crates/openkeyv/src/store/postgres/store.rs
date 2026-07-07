@@ -1,5 +1,7 @@
+use super::client::PostgresClient;
+use super::config::PostgresConfig;
+use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -9,39 +11,12 @@ use async_trait::async_trait;
 use sqlx::Row;
 use std::collections::HashMap;
 
-const DEFAULT_COLLECTION: &str = "default_collection";
-
-fn validate_table_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        return Err(Error::StoreSetup {
-            message: "table name cannot be empty".to_string(),
-        });
-    }
-    if name.len() > 63 {
-        return Err(Error::StoreSetup {
-            message: format!("table name too long (>63): {name}"),
-        });
-    }
-    if name.chars().next().unwrap().is_ascii_digit() {
-        return Err(Error::StoreSetup {
-            message: format!("table name must not start with a digit: {name}"),
-        });
-    }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(Error::StoreSetup {
-            message: format!("table name must be alphanumeric (with underscores): {name}"),
-        });
-    }
-    Ok(())
-}
-
 /// PostgreSQL-backed key-value store.
 ///
 /// Uses a single table with columns for collection, key, JSONB value, and TTL metadata.
 pub struct PostgresStore {
-    pool: sqlx::PgPool,
-    table_name: String,
-    default_collection: String,
+    client: PostgresClient,
+    config: PostgresConfig,
 }
 
 impl PostgresStore {
@@ -55,19 +30,24 @@ impl PostgresStore {
     }
 
     pub async fn from_pool(pool: sqlx::PgPool, table_name: Option<&str>) -> Result<Self> {
-        let table_name = table_name.unwrap_or("kv_store").to_string();
-        validate_table_name(&table_name)?;
-        let store = Self {
-            pool,
-            table_name,
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        };
+        let store = Self::with_config(pool, PostgresConfig::new(table_name)?);
         store.ensure_table().await?;
         Ok(store)
     }
 
+    pub fn with_config(pool: sqlx::PgPool, config: PostgresConfig) -> Self {
+        Self {
+            client: PostgresClient::new(pool),
+            config,
+        }
+    }
+
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
+    }
+
+    fn pool(&self) -> &sqlx::PgPool {
+        self.client.pool()
     }
 
     async fn ensure_table(&self) -> Result<()> {
@@ -81,26 +61,26 @@ impl PostgresStore {
                 expires_at TIMESTAMPTZ,\
                 PRIMARY KEY (collection, key)\
             )",
-            self.table_name
+            self.config.table_name
         );
         sqlx::query(&create_sql)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to create table: {e}"),
             })?;
 
-        let mut index_name = format!("idx_{}_expires_at", self.table_name);
+        let mut index_name = format!("idx_{}_expires_at", self.config.table_name);
         if index_name.len() > 63 {
-            let hash = blake3::hash(self.table_name.as_bytes()).to_hex();
+            let hash = blake3::hash(self.config.table_name.as_bytes()).to_hex();
             index_name = format!("idx_{}_exp", &hash[..16]);
         }
         let index_sql = format!(
             "CREATE INDEX IF NOT EXISTS {} ON {}(expires_at) WHERE expires_at IS NOT NULL",
-            index_name, self.table_name
+            index_name, self.config.table_name
         );
         sqlx::query(&index_sql)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to create index: {e}"),
@@ -111,12 +91,12 @@ impl PostgresStore {
     async fn get_entry(&self, key: &str, collection: &str) -> Result<Option<ManagedEntry>> {
         let sql = format!(
             "SELECT value, created_at, expires_at FROM {} WHERE collection = $1 AND key = $2",
-            self.table_name
+            self.config.table_name
         );
         let row = sqlx::query(&sql)
             .bind(collection)
             .bind(key)
-            .fetch_optional(&self.pool)
+            .fetch_optional(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to get: {e}"),
@@ -159,7 +139,7 @@ impl PostgresStore {
              VALUES ($1, $2, $3, $4, $5, $6) \
              ON CONFLICT (collection, key) \
              DO UPDATE SET value = EXCLUDED.value, ttl = EXCLUDED.ttl, expires_at = EXCLUDED.expires_at",
-            self.table_name
+            self.config.table_name
         );
         sqlx::query(&sql)
             .bind(collection)
@@ -168,7 +148,7 @@ impl PostgresStore {
             .bind(ttl)
             .bind(entry.created_at)
             .bind(entry.expires_at)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to put: {e}"),
@@ -214,12 +194,12 @@ impl AsyncKeyValue for PostgresStore {
         let cname = self.collection_name(collection);
         let sql = format!(
             "DELETE FROM {} WHERE collection = $1 AND key = $2",
-            self.table_name
+            self.config.table_name
         );
         let res = sqlx::query(&sql)
             .bind(cname)
             .bind(key)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to delete: {e}"),
@@ -238,12 +218,12 @@ impl AsyncKeyValue for PostgresStore {
         }
         let sql = format!(
             "SELECT key, value, created_at, expires_at FROM {} WHERE collection = $1 AND key = ANY($2)",
-            self.table_name
+            self.config.table_name
         );
         let rows = sqlx::query(&sql)
             .bind(cname)
             .bind(keys)
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to get_many: {e}"),
@@ -285,12 +265,12 @@ impl AsyncKeyValue for PostgresStore {
         }
         let sql = format!(
             "SELECT key, value, created_at, expires_at FROM {} WHERE collection = $1 AND key = ANY($2)",
-            self.table_name
+            self.config.table_name
         );
         let rows = sqlx::query(&sql)
             .bind(cname)
             .bind(keys)
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to ttl_many: {e}"),
@@ -353,12 +333,12 @@ impl AsyncKeyValue for PostgresStore {
         }
         let sql = format!(
             "DELETE FROM {} WHERE collection = $1 AND key = ANY($2)",
-            self.table_name
+            self.config.table_name
         );
         let res = sqlx::query(&sql)
             .bind(cname)
             .bind(keys)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to delete_many: {e}"),
@@ -372,10 +352,10 @@ impl AsyncCull for PostgresStore {
     async fn cull(&self) -> Result<()> {
         let sql = format!(
             "DELETE FROM {} WHERE expires_at IS NOT NULL AND expires_at <= NOW()",
-            self.table_name
+            self.config.table_name
         );
         sqlx::query(&sql)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to cull: {e}"),
@@ -391,12 +371,12 @@ impl AsyncEnumerateKeys for PostgresStore {
         let limit = limit.unwrap_or(10_000).min(10_000) as i64;
         let sql = format!(
             "SELECT key FROM {} WHERE collection = $1 LIMIT $2",
-            self.table_name
+            self.config.table_name
         );
         let rows = sqlx::query(&sql)
             .bind(cname)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to list keys: {e}"),
@@ -418,11 +398,11 @@ impl AsyncEnumerateCollections for PostgresStore {
         let limit = limit.unwrap_or(10_000).min(10_000) as i64;
         let sql = format!(
             "SELECT DISTINCT collection FROM {} ORDER BY collection LIMIT $1",
-            self.table_name
+            self.config.table_name
         );
         let rows = sqlx::query(&sql)
             .bind(limit)
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to list collections: {e}"),
@@ -441,10 +421,13 @@ impl AsyncEnumerateCollections for PostgresStore {
 #[async_trait]
 impl AsyncDestroyCollection for PostgresStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let sql = format!("DELETE FROM {} WHERE collection = $1", self.table_name);
+        let sql = format!(
+            "DELETE FROM {} WHERE collection = $1",
+            self.config.table_name
+        );
         let res = sqlx::query(&sql)
             .bind(collection)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to destroy collection: {e}"),
@@ -456,9 +439,9 @@ impl AsyncDestroyCollection for PostgresStore {
 #[async_trait]
 impl AsyncDestroyStore for PostgresStore {
     async fn destroy(&self) -> Result<bool> {
-        let sql = format!("DELETE FROM {}", self.table_name);
+        let sql = format!("DELETE FROM {}", self.config.table_name);
         sqlx::query(&sql)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to destroy store: {e}"),
