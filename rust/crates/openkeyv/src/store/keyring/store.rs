@@ -1,26 +1,10 @@
+use super::client::KeyringClient;
+use super::config::KeyringConfig;
+use super::error::{Error, Result, map_keyring_err};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::AsyncKeyValue;
 use crate::value::Value;
 use async_trait::async_trait;
-
-const DEFAULT_COLLECTION: &str = "default_collection";
-
-fn compound_key(collection: &str, key: &str) -> String {
-    format!("{}:{}", collection, key)
-}
-
-fn map_keyring_err(e: keyring::Error) -> Error {
-    match e {
-        keyring::Error::TooLong(_name, len) => Error::ValueTooLarge {
-            size: len as usize,
-            max: len as usize,
-        },
-        _ => Error::StoreConnection {
-            message: e.to_string(),
-        },
-    }
-}
 
 /// System keyring-backed key-value store.
 ///
@@ -29,25 +13,26 @@ fn map_keyring_err(e: keyring::Error) -> Error {
 /// `keyring` crate. Each entry is stored as a password identified by
 /// `(service_name, "{collection}:{key}")`.
 pub struct KeyringStore {
-    service_name: String,
-    default_collection: String,
+    client: KeyringClient,
+    config: KeyringConfig,
 }
 
 impl KeyringStore {
     pub fn new(service_name: Option<&str>) -> Self {
+        let config = KeyringConfig::new(service_name.map(ToString::to_string), None);
+        Self::with_config(config)
+    }
+
+    pub fn with_config(config: KeyringConfig) -> Self {
+        let service_name = config.service_name.clone();
         Self {
-            service_name: service_name.unwrap_or("openkeyv").to_string(),
-            default_collection: DEFAULT_COLLECTION.to_string(),
+            client: KeyringClient::new(service_name),
+            config,
         }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
-    }
-
-    fn entry(&self, collection: &str, key: &str) -> Result<keyring::Entry> {
-        let username = compound_key(collection, key);
-        keyring::Entry::new(&self.service_name, &username).map_err(map_keyring_err)
+        collection.unwrap_or(&self.config.default_collection)
     }
 }
 
@@ -55,7 +40,7 @@ impl KeyringStore {
 impl AsyncKeyValue for KeyringStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
-        let entry = self.entry(cname, key)?;
+        let entry = self.client.entry(cname, key)?;
         match entry.get_password() {
             Ok(json_str) => {
                 let managed: ManagedEntry = serde_json::from_str(&json_str)
@@ -74,7 +59,7 @@ impl AsyncKeyValue for KeyringStore {
 
     async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
-        let entry = self.entry(cname, key)?;
+        let entry = self.client.entry(cname, key)?;
         match entry.get_password() {
             Ok(json_str) => {
                 let managed: ManagedEntry = serde_json::from_str(&json_str)
@@ -100,7 +85,7 @@ impl AsyncKeyValue for KeyringStore {
         ttl: Option<f64>,
     ) -> Result<()> {
         let cname = self.collection_name(collection);
-        let entry = self.entry(cname, key)?;
+        let entry = self.client.entry(cname, key)?;
         let managed = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds),
             None => ManagedEntry::new(value),
@@ -113,7 +98,7 @@ impl AsyncKeyValue for KeyringStore {
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
-        let entry = self.entry(cname, key)?;
+        let entry = self.client.entry(cname, key)?;
         match entry.delete_credential() {
             Ok(()) => Ok(true),
             Err(keyring::Error::NoEntry) => Ok(false),
@@ -168,7 +153,7 @@ impl AsyncKeyValue for KeyringStore {
             };
             let json_str =
                 serde_json::to_string(&managed).map_err(|e| Error::Serialization(e.to_string()))?;
-            let entry = self.entry(cname, key)?;
+            let entry = self.client.entry(cname, key)?;
             entry.set_password(&json_str).map_err(map_keyring_err)?;
         }
         Ok(())
