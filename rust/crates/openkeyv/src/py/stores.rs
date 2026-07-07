@@ -48,7 +48,7 @@ impl PyMemoryStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -70,7 +70,7 @@ impl PyMemoryStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -93,7 +93,7 @@ impl PyMemoryStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -136,7 +136,7 @@ impl PyMemoryStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -161,7 +161,7 @@ impl PyMemoryStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -188,7 +188,7 @@ impl PyMemoryStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -316,7 +316,7 @@ impl PySimpleStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -332,7 +332,7 @@ impl PySimpleStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -375,7 +375,7 @@ impl PySimpleStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -404,7 +404,7 @@ impl PySimpleStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -429,7 +429,7 @@ impl PySimpleStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -456,7 +456,7 @@ impl PySimpleStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -584,7 +584,7 @@ impl PyFileTreeStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -600,7 +600,7 @@ impl PyFileTreeStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -643,7 +643,7 @@ impl PyFileTreeStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -672,7 +672,7 @@ impl PyFileTreeStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -697,7 +697,7 @@ impl PyFileTreeStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -724,7 +724,7 @@ impl PyFileTreeStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -852,7 +852,7 @@ impl PyNullStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -868,7 +868,7 @@ impl PyNullStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -894,7 +894,7 @@ impl PyNullStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -923,7 +923,7 @@ impl PyNullStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -948,7 +948,7 @@ impl PyNullStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -975,7 +975,7 @@ impl PyNullStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -1106,7 +1106,7 @@ impl PyDiskStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -1122,7 +1122,7 @@ impl PyDiskStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -1165,7 +1165,7 @@ impl PyDiskStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -1194,7 +1194,7 @@ impl PyDiskStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -1219,7 +1219,7 @@ impl PyDiskStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -1246,7 +1246,7 @@ impl PyDiskStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -1383,7 +1383,7 @@ impl PyRedisStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -1405,7 +1405,7 @@ impl PyRedisStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -1428,7 +1428,7 @@ impl PyRedisStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -1471,7 +1471,7 @@ impl PyRedisStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -1496,7 +1496,7 @@ impl PyRedisStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -1523,7 +1523,7 @@ impl PyRedisStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -1660,7 +1660,7 @@ impl PyValkeyStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -1682,7 +1682,7 @@ impl PyValkeyStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -1705,7 +1705,7 @@ impl PyValkeyStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -1748,7 +1748,7 @@ impl PyValkeyStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -1773,7 +1773,7 @@ impl PyValkeyStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -1800,7 +1800,7 @@ impl PyValkeyStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -1932,7 +1932,7 @@ impl PyRocksDBStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -1954,7 +1954,7 @@ impl PyRocksDBStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -1977,7 +1977,7 @@ impl PyRocksDBStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -2020,7 +2020,7 @@ impl PyRocksDBStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -2045,7 +2045,7 @@ impl PyRocksDBStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -2072,7 +2072,7 @@ impl PyRocksDBStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -2210,7 +2210,7 @@ impl PyPostgresStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -2232,7 +2232,7 @@ impl PyPostgresStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -2255,7 +2255,7 @@ impl PyPostgresStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -2298,7 +2298,7 @@ impl PyPostgresStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -2323,7 +2323,7 @@ impl PyPostgresStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -2350,7 +2350,7 @@ impl PyPostgresStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -2487,7 +2487,7 @@ impl PyMongoStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -2509,7 +2509,7 @@ impl PyMongoStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -2532,7 +2532,7 @@ impl PyMongoStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -2575,7 +2575,7 @@ impl PyMongoStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -2600,7 +2600,7 @@ impl PyMongoStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -2627,7 +2627,7 @@ impl PyMongoStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -2764,7 +2764,7 @@ impl PyDynamoDBStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -2786,7 +2786,7 @@ impl PyDynamoDBStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -2809,7 +2809,7 @@ impl PyDynamoDBStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -2852,7 +2852,7 @@ impl PyDynamoDBStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -2877,7 +2877,7 @@ impl PyDynamoDBStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -2904,7 +2904,7 @@ impl PyDynamoDBStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -3041,7 +3041,7 @@ impl PyS3Store {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -3063,7 +3063,7 @@ impl PyS3Store {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -3086,7 +3086,7 @@ impl PyS3Store {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -3129,7 +3129,7 @@ impl PyS3Store {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -3154,7 +3154,7 @@ impl PyS3Store {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -3181,7 +3181,7 @@ impl PyS3Store {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -3320,7 +3320,7 @@ impl PyDuckDBStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -3342,7 +3342,7 @@ impl PyDuckDBStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -3365,7 +3365,7 @@ impl PyDuckDBStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -3408,7 +3408,7 @@ impl PyDuckDBStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -3433,7 +3433,7 @@ impl PyDuckDBStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -3460,7 +3460,7 @@ impl PyDuckDBStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -3592,7 +3592,7 @@ impl PyMemcachedStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -3614,7 +3614,7 @@ impl PyMemcachedStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -3637,7 +3637,7 @@ impl PyMemcachedStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -3680,7 +3680,7 @@ impl PyMemcachedStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -3705,7 +3705,7 @@ impl PyMemcachedStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -3732,7 +3732,7 @@ impl PyMemcachedStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -3806,7 +3806,7 @@ impl PyVaultStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -3828,7 +3828,7 @@ impl PyVaultStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -3851,7 +3851,7 @@ impl PyVaultStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -3894,7 +3894,7 @@ impl PyVaultStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -3919,7 +3919,7 @@ impl PyVaultStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -3946,7 +3946,7 @@ impl PyVaultStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -4011,7 +4011,7 @@ impl PyKeyringStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -4033,7 +4033,7 @@ impl PyKeyringStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -4056,7 +4056,7 @@ impl PyKeyringStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -4099,7 +4099,7 @@ impl PyKeyringStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -4124,7 +4124,7 @@ impl PyKeyringStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -4151,7 +4151,7 @@ impl PyKeyringStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -4220,7 +4220,7 @@ impl PyFirestoreStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -4242,7 +4242,7 @@ impl PyFirestoreStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -4265,7 +4265,7 @@ impl PyFirestoreStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -4308,7 +4308,7 @@ impl PyFirestoreStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -4333,7 +4333,7 @@ impl PyFirestoreStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -4360,7 +4360,7 @@ impl PyFirestoreStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
@@ -4431,7 +4431,7 @@ impl PyOpenSearchStore {
                 .await
                 .map_err(error_to_py)?;
             with_gil(|py| {
-                let obj = hashmap_to_py(py, result)?;
+                let obj = optional_value_to_py(py, result)?;
                 Ok(obj)
             })
         })
@@ -4453,7 +4453,7 @@ impl PyOpenSearchStore {
             with_gil(|py| {
                 let tuple = match result {
                     Some((value, ttl)) => {
-                        let dict = hashmap_to_py(py, Some(value))?;
+                        let dict = optional_value_to_py(py, Some(value))?;
                         (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
@@ -4476,7 +4476,7 @@ impl PyOpenSearchStore {
         ttl: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.inner.clone();
-        let value = with_gil(|_py| py_to_hashmap(&value))?;
+        let value = with_gil(|_py| py_to_value(&value))?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
                 .put(&key, value, collection.as_deref(), ttl)
@@ -4519,7 +4519,7 @@ impl PyOpenSearchStore {
             with_gil(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for item in results {
-                    list.append(hashmap_to_py(py, item)?)?;
+                    list.append(optional_value_to_py(py, item)?)?;
                 }
                 Ok(list.unbind())
             })
@@ -4544,7 +4544,7 @@ impl PyOpenSearchStore {
                 for item in results {
                     let tuple = match item {
                         Some((value, ttl)) => {
-                            let dict = hashmap_to_py(py, Some(value))?;
+                            let dict = optional_value_to_py(py, Some(value))?;
                             (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
@@ -4571,7 +4571,7 @@ impl PyOpenSearchStore {
         let store = self.inner.clone();
         let values: Vec<_> = values
             .iter()
-            .map(|v| py_to_hashmap(v))
+            .map(|v| py_to_value(v))
             .collect::<PyResult<_>>()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store
