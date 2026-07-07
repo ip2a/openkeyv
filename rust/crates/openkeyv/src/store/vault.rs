@@ -1,10 +1,9 @@
 use crate::entry::ManagedEntry;
 use crate::error::{Error, Result};
 use crate::protocol::AsyncKeyValue;
+use crate::value::Value;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
 
 const DEFAULT_COLLECTION: &str = "default_collection";
 
@@ -76,11 +75,7 @@ impl VaultStore {
 
 #[async_trait]
 impl AsyncKeyValue for VaultStore {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         let path = compound_key(cname, key);
         match self.get_secret(&path).await? {
@@ -97,11 +92,7 @@ impl AsyncKeyValue for VaultStore {
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         let path = compound_key(cname, key);
         match self.get_secret(&path).await? {
@@ -122,7 +113,7 @@ impl AsyncKeyValue for VaultStore {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -159,7 +150,7 @@ impl AsyncKeyValue for VaultStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -172,7 +163,7 @@ impl AsyncKeyValue for VaultStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
@@ -184,7 +175,7 @@ impl AsyncKeyValue for VaultStore {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
