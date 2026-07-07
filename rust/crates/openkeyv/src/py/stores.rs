@@ -558,7 +558,7 @@ impl PySimpleStore {
 // ---------------------------------------------------------------------------
 #[pyclass(subclass, name = "FileTreeStore")]
 pub struct PyFileTreeStore {
-    inner: Arc<crate::store::filetree::store::FileTreeStore>,
+    inner: Arc<crate::store::filetree::FileTreeStore>,
 }
 
 #[pymethods]
@@ -566,7 +566,7 @@ impl PyFileTreeStore {
     #[new]
     fn new(base_path: String) -> Self {
         Self {
-            inner: Arc::new(crate::store::filetree::store::FileTreeStore::new(base_path)),
+            inner: Arc::new(crate::store::filetree::FileTreeStore::new(base_path)),
         }
     }
 

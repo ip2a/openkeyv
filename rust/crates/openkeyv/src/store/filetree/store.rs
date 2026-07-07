@@ -1,5 +1,7 @@
+use super::client::FileTreeClient;
+use super::config::FileTreeConfig;
+use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -9,8 +11,6 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-
-const DEFAULT_COLLECTION: &str = "default_collection";
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
@@ -48,8 +48,8 @@ fn collection_path(base: &Path, collection: &str) -> PathBuf {
 /// Each collection is a directory under `base_path`.
 /// Each key is a file containing a JSON-serialized `ManagedEntry`.
 pub struct FileTreeStore {
-    base_path: PathBuf,
-    default_collection: String,
+    client: FileTreeClient,
+    config: FileTreeConfig,
 }
 
 impl FileTreeStore {
@@ -58,19 +58,26 @@ impl FileTreeStore {
     }
 
     pub fn with_options(base_path: impl Into<PathBuf>, default_collection: Option<String>) -> Self {
+        Self::with_config(base_path, FileTreeConfig::new(default_collection))
+    }
+
+    pub fn with_config(base_path: impl Into<PathBuf>, config: FileTreeConfig) -> Self {
         Self {
-            base_path: base_path.into(),
-            default_collection: default_collection
-                .unwrap_or_else(|| DEFAULT_COLLECTION.to_string()),
+            client: FileTreeClient::new(base_path),
+            config,
         }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
+    }
+
+    fn base_path(&self) -> &Path {
+        self.client.base_path()
     }
 
     async fn ensure_collection_dir(&self, collection: &str) -> Result<()> {
-        let path = collection_path(&self.base_path, collection);
+        let path = collection_path(self.base_path(), collection);
         fs::create_dir_all(&path)
             .await
             .map_err(|e| Error::StoreSetup {
@@ -115,7 +122,7 @@ impl AsyncKeyValue for FileTreeStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
-        let path = safe_path(&self.base_path, cname, key)?;
+        let path = safe_path(self.base_path(), cname, key)?;
         match self.read_entry(&path).await? {
             Some(entry) if !entry.is_expired() => Ok(Some(entry.value)),
             _ => Ok(None),
@@ -125,7 +132,7 @@ impl AsyncKeyValue for FileTreeStore {
     async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
-        let path = safe_path(&self.base_path, cname, key)?;
+        let path = safe_path(self.base_path(), cname, key)?;
         match self.read_entry(&path).await? {
             Some(entry) if !entry.is_expired() => {
                 let ttl = entry.ttl().unwrap_or(0.0);
@@ -144,7 +151,7 @@ impl AsyncKeyValue for FileTreeStore {
     ) -> Result<()> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
-        let path = safe_path(&self.base_path, cname, key)?;
+        let path = safe_path(self.base_path(), cname, key)?;
         let entry = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds),
             None => ManagedEntry::new(value),
@@ -154,7 +161,7 @@ impl AsyncKeyValue for FileTreeStore {
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
-        let path = safe_path(&self.base_path, cname, key)?;
+        let path = safe_path(self.base_path(), cname, key)?;
         match fs::remove_file(&path).await {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -173,7 +180,7 @@ impl AsyncKeyValue for FileTreeStore {
         self.ensure_collection_dir(cname).await?;
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
-            let path = safe_path(&self.base_path, cname, key)?;
+            let path = safe_path(self.base_path(), cname, key)?;
             match self.read_entry(&path).await? {
                 Some(entry) if !entry.is_expired() => results.push(Some(entry.value)),
                 _ => results.push(None),
@@ -191,7 +198,7 @@ impl AsyncKeyValue for FileTreeStore {
         self.ensure_collection_dir(cname).await?;
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
-            let path = safe_path(&self.base_path, cname, key)?;
+            let path = safe_path(self.base_path(), cname, key)?;
             match self.read_entry(&path).await? {
                 Some(entry) if !entry.is_expired() => {
                     let ttl = entry.ttl().unwrap_or(0.0);
@@ -219,7 +226,7 @@ impl AsyncKeyValue for FileTreeStore {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
         for (key, value) in keys.iter().zip(values.iter()) {
-            let path = safe_path(&self.base_path, cname, key)?;
+            let path = safe_path(self.base_path(), cname, key)?;
             let entry = match ttl {
                 Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
                 None => ManagedEntry::new(value.clone()),
@@ -233,7 +240,7 @@ impl AsyncKeyValue for FileTreeStore {
         let cname = self.collection_name(collection);
         let mut count = 0;
         for key in keys {
-            let path = safe_path(&self.base_path, cname, key)?;
+            let path = safe_path(self.base_path(), cname, key)?;
             match fs::remove_file(&path).await {
                 Ok(()) => count += 1,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -252,7 +259,7 @@ impl AsyncKeyValue for FileTreeStore {
 impl AsyncCull for FileTreeStore {
     async fn cull(&self) -> Result<()> {
         let mut entries =
-            fs::read_dir(&self.base_path)
+            fs::read_dir(self.base_path())
                 .await
                 .map_err(|e| Error::StoreConnection {
                     message: format!("failed to read base dir: {}", e),
@@ -297,7 +304,7 @@ impl AsyncEnumerateKeys for FileTreeStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
-        let path = collection_path(&self.base_path, cname);
+        let path = collection_path(self.base_path(), cname);
         let mut entries = fs::read_dir(&path)
             .await
             .map_err(|e| Error::StoreConnection {
@@ -327,7 +334,7 @@ impl AsyncEnumerateKeys for FileTreeStore {
 impl AsyncEnumerateCollections for FileTreeStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
         let mut entries =
-            fs::read_dir(&self.base_path)
+            fs::read_dir(self.base_path())
                 .await
                 .map_err(|e| Error::StoreConnection {
                     message: format!("failed to read base dir: {}", e),
@@ -358,7 +365,7 @@ impl AsyncEnumerateCollections for FileTreeStore {
 #[async_trait]
 impl AsyncDestroyCollection for FileTreeStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let path = collection_path(&self.base_path, collection);
+        let path = collection_path(self.base_path(), collection);
         match fs::remove_dir_all(&path).await {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -372,7 +379,7 @@ impl AsyncDestroyCollection for FileTreeStore {
 #[async_trait]
 impl AsyncDestroyStore for FileTreeStore {
     async fn destroy(&self) -> Result<bool> {
-        match fs::remove_dir_all(&self.base_path).await {
+        match fs::remove_dir_all(self.base_path()).await {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
             Err(e) => Err(Error::StoreConnection {
