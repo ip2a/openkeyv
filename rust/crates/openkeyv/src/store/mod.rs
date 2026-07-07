@@ -1,13 +1,13 @@
 #[cfg(feature = "disk")]
 pub mod disk;
-#[cfg(feature = "duckdb-store")]
+#[cfg(feature = "duckdb")]
 pub mod duckdb;
 #[cfg(feature = "dynamodb")]
 pub mod dynamodb;
 pub mod filetree;
-#[cfg(feature = "firestore-store")]
+#[cfg(feature = "firestore")]
 pub mod firestore;
-#[cfg(feature = "keyring-store")]
+#[cfg(feature = "keyring")]
 pub mod keyring;
 #[cfg(feature = "memcached")]
 pub mod memcached;

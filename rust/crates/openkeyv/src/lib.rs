@@ -25,12 +25,12 @@
 //! | MongoDB | `mongodb` | MongoDB |
 //! | DynamoDB | `dynamodb` | AWS DynamoDB |
 //! | S3 | `s3` | AWS S3 |
-//! | DuckDB | `duckdb-store` | DuckDB embedded |
+//! | DuckDB | `duckdb` | DuckDB embedded |
 //! | Memcached | `memcached` | Memcached |
 //! | Valkey | `valkey` | Valkey (Redis-compatible) |
 //! | Vault | `vault` | HashiCorp Vault |
-//! | Keyring | `keyring-store` | OS keyring |
-//! | Firestore | `firestore-store` | Google Firestore |
+//! | Keyring | `keyring` | OS keyring |
+//! | Firestore | `firestore` | Google Firestore |
 //! | OpenSearch | `opensearch` | OpenSearch |
 
 pub mod adapter;

@@ -3281,13 +3281,13 @@ impl PyS3Store {
 // ---------------------------------------------------------------------------
 // DuckDBStore
 // ---------------------------------------------------------------------------
-#[cfg(feature = "duckdb-store")]
+#[cfg(feature = "duckdb")]
 #[pyclass(subclass, name = "DuckDBStore")]
 pub struct PyDuckDBStore {
     inner: Arc<crate::store::duckdb::DuckDBStore>,
 }
 
-#[cfg(feature = "duckdb-store")]
+#[cfg(feature = "duckdb")]
 #[pymethods]
 impl PyDuckDBStore {
     #[new]
@@ -3978,13 +3978,13 @@ impl PyVaultStore {
 // ---------------------------------------------------------------------------
 // KeyringStore
 // ---------------------------------------------------------------------------
-#[cfg(feature = "keyring-store")]
+#[cfg(feature = "keyring")]
 #[pyclass(subclass, name = "KeyringStore")]
 pub struct PyKeyringStore {
     inner: Arc<crate::store::keyring::KeyringStore>,
 }
 
-#[cfg(feature = "keyring-store")]
+#[cfg(feature = "keyring")]
 #[pymethods]
 impl PyKeyringStore {
     #[new]
@@ -4183,13 +4183,13 @@ impl PyKeyringStore {
 // ---------------------------------------------------------------------------
 // FirestoreStore
 // ---------------------------------------------------------------------------
-#[cfg(feature = "firestore-store")]
+#[cfg(feature = "firestore")]
 #[pyclass(subclass, name = "FirestoreStore")]
 pub struct PyFirestoreStore {
     inner: Arc<crate::store::firestore::FirestoreStore>,
 }
 
-#[cfg(feature = "firestore-store")]
+#[cfg(feature = "firestore")]
 #[pymethods]
 impl PyFirestoreStore {
     #[new]
@@ -4691,15 +4691,15 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDynamoDBStore>()?;
     #[cfg(feature = "s3")]
     m.add_class::<PyS3Store>()?;
-    #[cfg(feature = "duckdb-store")]
+    #[cfg(feature = "duckdb")]
     m.add_class::<PyDuckDBStore>()?;
     #[cfg(feature = "memcached")]
     m.add_class::<PyMemcachedStore>()?;
     #[cfg(feature = "vault")]
     m.add_class::<PyVaultStore>()?;
-    #[cfg(feature = "keyring-store")]
+    #[cfg(feature = "keyring")]
     m.add_class::<PyKeyringStore>()?;
-    #[cfg(feature = "firestore-store")]
+    #[cfg(feature = "firestore")]
     m.add_class::<PyFirestoreStore>()?;
     #[cfg(feature = "opensearch")]
     m.add_class::<PyOpenSearchStore>()?;
