@@ -1,3 +1,6 @@
+mod codec;
+
+use crate::error::Result;
 use crate::value::Value;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -61,6 +64,14 @@ impl ManagedEntry {
 
     pub fn estimate_size(&self) -> usize {
         self.value.len() + std::mem::size_of::<Self>()
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        codec::encode(self)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        codec::decode(bytes)
     }
 }
 

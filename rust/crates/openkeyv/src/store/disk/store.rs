@@ -10,13 +10,12 @@ use crate::value::Value;
 use async_trait::async_trait;
 use std::path::Path;
 
-fn json_to_ivec(entry: &ManagedEntry) -> Result<sled::IVec> {
-    let json = serde_json::to_vec(entry).map_err(|e| Error::Serialization(e.to_string()))?;
-    Ok(json.into())
+fn entry_to_ivec(entry: &ManagedEntry) -> Result<sled::IVec> {
+    Ok(entry.encode()?.into())
 }
 
 fn ivec_to_entry(iv: sled::IVec) -> Result<ManagedEntry> {
-    serde_json::from_slice(&iv).map_err(|e| Error::Deserialization(e.to_string()))
+    ManagedEntry::decode(iv.as_ref())
 }
 
 /// Disk-backed store using [sled], an embedded key-value database.
@@ -124,7 +123,7 @@ impl AsyncKeyValue for DiskStore {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds),
             None => ManagedEntry::new(value),
         };
-        let iv = json_to_ivec(&entry)?;
+        let iv = entry_to_ivec(&entry)?;
         tree.insert(key, iv).map_err(|e| Error::StoreConnection {
             message: format!("failed to insert: {}", e),
         })?;
@@ -224,7 +223,7 @@ impl AsyncKeyValue for DiskStore {
                 Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
                 None => ManagedEntry::new(value.clone()),
             };
-            let iv = json_to_ivec(&entry)?;
+            let iv = entry_to_ivec(&entry)?;
             tree.insert(key.as_bytes(), iv)
                 .map_err(|e| Error::StoreConnection {
                     message: format!("failed to insert: {}", e),
@@ -268,10 +267,11 @@ impl AsyncCull for DiskStore {
                 let (k, v) = res.map_err(|e| Error::StoreConnection {
                     message: format!("failed to iterate: {}", e),
                 })?;
-                if let Ok(entry) = ivec_to_entry(v) {
-                    if entry.is_expired() {
-                        tree.remove(k).ok();
-                    }
+                let entry = ivec_to_entry(v)?;
+                if entry.is_expired() {
+                    tree.remove(k).map_err(|e| Error::StoreConnection {
+                        message: format!("failed to remove expired entry: {}", e),
+                    })?;
                 }
             }
         }
@@ -397,5 +397,17 @@ mod tests {
 
         store.put("k", value, Some("c1"), None).await.unwrap();
         assert!(store.destroy_collection("c1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_disk_store_rejects_json_entry_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DiskStore::new(tmp.path()).unwrap();
+        let tree = store.get_tree(store.collection_name(None)).unwrap();
+        tree.insert("k", br#"{"value":null}"#).unwrap();
+
+        let err = store.get("k", None).await.unwrap_err();
+
+        assert!(err.to_string().contains("invalid OpenKeyV entry magic"));
     }
 }
