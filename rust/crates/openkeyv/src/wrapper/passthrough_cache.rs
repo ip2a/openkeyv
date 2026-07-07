@@ -1,8 +1,8 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// A two-tier cache wrapper.
 ///
@@ -34,11 +34,7 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> PassthroughCacheWrapper<C, P> {
 
 #[async_trait]
 impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapper<C, P> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         match self.cache.get(key, collection).await? {
             Some(value) => Ok(Some(value)),
             None => {
@@ -54,11 +50,7 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         match self.cache.ttl(key, collection).await? {
             Some((value, ttl)) => Ok(Some((value, ttl))),
             None => {
@@ -77,7 +69,7 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -94,7 +86,7 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         // Simple implementation: delegate to primary, could be optimized
         let results = self.primary.get_many(keys, collection).await?;
         for (key, result) in keys.iter().zip(results.iter()) {
@@ -112,14 +104,14 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         self.primary.ttl_many(keys, collection).await
     }
 
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -203,8 +195,7 @@ mod tests {
         let cache = MemoryStore::new();
         let primary = MemoryStore::new();
 
-        let mut value = HashMap::new();
-        value.insert("a".to_string(), Value::String("b".to_string()));
+        let value = Value::utf8("b");
         primary.put("k", value.clone(), None, None).await.unwrap();
 
         let wrapper = PassthroughCacheWrapper::new(cache, primary);

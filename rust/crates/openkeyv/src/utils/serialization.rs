@@ -34,12 +34,12 @@ impl SerializationAdapter for BasicSerializationAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::value::Value;
 
     #[test]
     fn test_basic_serialization_roundtrip() {
         let adapter = BasicSerializationAdapter::new();
-        let entry = ManagedEntry::new(HashMap::new());
+        let entry = ManagedEntry::new(Value::null());
 
         let json = adapter.dump_json(&entry).unwrap();
         let restored = adapter.load_json(&json).unwrap();

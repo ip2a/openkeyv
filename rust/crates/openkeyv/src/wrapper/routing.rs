@@ -1,7 +1,7 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 pub trait RoutedStore:
@@ -35,26 +35,18 @@ impl<F: Fn(Option<&str>, &str) -> usize + Send + Sync> RoutingWrapper<F> {
 
 #[async_trait]
 impl<F: Fn(Option<&str>, &str) -> usize + Send + Sync> AsyncKeyValue for RoutingWrapper<F> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         self.route(collection, key)?.get(key, collection).await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         self.route(collection, key)?.ttl(key, collection).await
     }
 
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -71,7 +63,7 @@ impl<F: Fn(Option<&str>, &str) -> usize + Send + Sync> AsyncKeyValue for Routing
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         // Route each key individually; if all route to same store, use bulk
         if keys.is_empty() {
             return Ok(Vec::new());
@@ -95,7 +87,7 @@ impl<F: Fn(Option<&str>, &str) -> usize + Send + Sync> AsyncKeyValue for Routing
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -117,7 +109,7 @@ impl<F: Fn(Option<&str>, &str) -> usize + Send + Sync> AsyncKeyValue for Routing
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -237,26 +229,18 @@ impl CollectionRoutingWrapper {
 
 #[async_trait]
 impl AsyncKeyValue for CollectionRoutingWrapper {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         self.resolve(collection).get(key, collection).await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         self.resolve(collection).ttl(key, collection).await
     }
 
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -273,7 +257,7 @@ impl AsyncKeyValue for CollectionRoutingWrapper {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         self.resolve(collection).get_many(keys, collection).await
     }
 
@@ -281,14 +265,14 @@ impl AsyncKeyValue for CollectionRoutingWrapper {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         self.resolve(collection).ttl_many(keys, collection).await
     }
 
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -374,8 +358,7 @@ mod tests {
 
         let router = CollectionRoutingWrapper::new(routes, Box::new(default_store));
 
-        let mut value = HashMap::new();
-        value.insert("a".to_string(), Value::String("b".to_string()));
+        let value = Value::utf8("b");
         router
             .put("k", value.clone(), Some("users"), None)
             .await

@@ -1,8 +1,8 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 /// A wrapper that falls back to a secondary store when the primary fails.
 pub struct FallbackWrapper<T: AsyncKeyValue, F: AsyncKeyValue> {
     primary: T,
@@ -17,11 +17,7 @@ impl<T: AsyncKeyValue, F: AsyncKeyValue> FallbackWrapper<T, F> {
 
 #[async_trait]
 impl<T: AsyncKeyValue, F: AsyncKeyValue> AsyncKeyValue for FallbackWrapper<T, F> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         match self.primary.get(key, collection).await {
             Ok(Some(value)) => Ok(Some(value)),
             Ok(None) => self.fallback.get(key, collection).await,
@@ -29,11 +25,7 @@ impl<T: AsyncKeyValue, F: AsyncKeyValue> AsyncKeyValue for FallbackWrapper<T, F>
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         match self.primary.ttl(key, collection).await {
             Ok(Some(value)) => Ok(Some(value)),
             Ok(None) => self.fallback.ttl(key, collection).await,
@@ -44,7 +36,7 @@ impl<T: AsyncKeyValue, F: AsyncKeyValue> AsyncKeyValue for FallbackWrapper<T, F>
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -59,7 +51,7 @@ impl<T: AsyncKeyValue, F: AsyncKeyValue> AsyncKeyValue for FallbackWrapper<T, F>
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         match self.primary.get_many(keys, collection).await {
             Ok(results) => Ok(results),
             Err(_) => self.fallback.get_many(keys, collection).await,
@@ -70,7 +62,7 @@ impl<T: AsyncKeyValue, F: AsyncKeyValue> AsyncKeyValue for FallbackWrapper<T, F>
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         match self.primary.ttl_many(keys, collection).await {
             Ok(results) => Ok(results),
             Err(_) => self.fallback.ttl_many(keys, collection).await,
@@ -80,7 +72,7 @@ impl<T: AsyncKeyValue, F: AsyncKeyValue> AsyncKeyValue for FallbackWrapper<T, F>
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -158,8 +150,7 @@ mod tests {
         let primary = MemoryStore::new();
         let fallback = MemoryStore::new();
 
-        let mut value = HashMap::new();
-        value.insert("a".to_string(), Value::String("b".to_string()));
+        let value = Value::utf8("b");
         fallback.put("k", value.clone(), None, None).await.unwrap();
 
         let wrapper = FallbackWrapper::new(primary, fallback);
@@ -172,12 +163,10 @@ mod tests {
         let primary = MemoryStore::new();
         let fallback = MemoryStore::new();
 
-        let mut pval = HashMap::new();
-        pval.insert("from".to_string(), Value::String("primary".to_string()));
+        let pval = Value::utf8("primary");
         primary.put("k", pval.clone(), None, None).await.unwrap();
 
-        let mut fval = HashMap::new();
-        fval.insert("from".to_string(), Value::String("fallback".to_string()));
+        let fval = Value::utf8("fallback");
         fallback.put("k", fval, None, None).await.unwrap();
 
         let wrapper = FallbackWrapper::new(primary, fallback);

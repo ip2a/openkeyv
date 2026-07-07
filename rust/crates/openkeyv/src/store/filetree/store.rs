@@ -4,9 +4,8 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -113,11 +112,7 @@ impl FileTreeStore {
 
 #[async_trait]
 impl AsyncKeyValue for FileTreeStore {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
         let path = safe_path(&self.base_path, cname, key)?;
@@ -127,11 +122,7 @@ impl AsyncKeyValue for FileTreeStore {
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
         let path = safe_path(&self.base_path, cname, key)?;
@@ -147,7 +138,7 @@ impl AsyncKeyValue for FileTreeStore {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -177,7 +168,7 @@ impl AsyncKeyValue for FileTreeStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
         let mut results = Vec::with_capacity(keys.len());
@@ -195,7 +186,7 @@ impl AsyncKeyValue for FileTreeStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
         let mut results = Vec::with_capacity(keys.len());
@@ -215,7 +206,7 @@ impl AsyncKeyValue for FileTreeStore {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -399,8 +390,7 @@ mod tests {
     async fn test_filetree_store_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileTreeStore::new(tmp.path());
-        let mut value = HashMap::new();
-        value.insert("name".to_string(), Value::String("Alice".to_string()));
+        let value = Value::utf8("Alice");
 
         store.put("user1", value.clone(), None, None).await.unwrap();
         let got = store.get("user1", None).await.unwrap();
@@ -411,7 +401,7 @@ mod tests {
     async fn test_filetree_store_delete() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileTreeStore::new(tmp.path());
-        let value = HashMap::new();
+        let value = Value::null();
 
         store.put("k", value, None, None).await.unwrap();
         assert!(store.delete("k", None).await.unwrap());
@@ -422,7 +412,7 @@ mod tests {
     async fn test_filetree_store_collections() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileTreeStore::new(tmp.path());
-        let value = HashMap::new();
+        let value = Value::null();
 
         store
             .put("k", value.clone(), Some("c1"), None)
@@ -439,7 +429,7 @@ mod tests {
     async fn test_filetree_store_destroy_collection() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileTreeStore::new(tmp.path());
-        let value = HashMap::new();
+        let value = Value::null();
 
         store.put("k", value, Some("c1"), None).await.unwrap();
         assert!(store.destroy_collection("c1").await.unwrap());
@@ -450,7 +440,7 @@ mod tests {
     async fn test_filetree_store_path_security() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileTreeStore::new(tmp.path());
-        let value = HashMap::new();
+        let value = Value::null();
 
         // Path traversal attempt should be sanitized or rejected
         store

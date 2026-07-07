@@ -1,8 +1,7 @@
 use crate::error::{Error, Result};
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -24,22 +23,14 @@ impl<T: AsyncKeyValue> TimeoutWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for TimeoutWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         match timeout(self.duration, self.inner.get(key, collection)).await {
             Ok(result) => result,
             Err(_) => Err(Error::InvalidOperation("operation timed out".to_string())),
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         match timeout(self.duration, self.inner.ttl(key, collection)).await {
             Ok(result) => result,
             Err(_) => Err(Error::InvalidOperation("operation timed out".to_string())),
@@ -49,7 +40,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TimeoutWrapper<T> {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -70,7 +61,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TimeoutWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         match timeout(self.duration, self.inner.get_many(keys, collection)).await {
             Ok(result) => result,
             Err(_) => Err(Error::InvalidOperation("operation timed out".to_string())),
@@ -81,7 +72,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TimeoutWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         match timeout(self.duration, self.inner.ttl_many(keys, collection)).await {
             Ok(result) => result,
             Err(_) => Err(Error::InvalidOperation("operation timed out".to_string())),
@@ -91,7 +82,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TimeoutWrapper<T> {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {

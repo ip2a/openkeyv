@@ -1,17 +1,14 @@
 use crate::error::{Error, Result};
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::{Value, ValueKind};
 use async_trait::async_trait;
-use base64::Engine;
-use serde_json::Value;
-use std::collections::HashMap;
 
-const ENCRYPTED_DATA_KEY: &str = "__encrypted_data__";
-const ENCRYPTION_VERSION_KEY: &str = "__encryption_version__";
+const ENCRYPTION_MAGIC: &[u8] = b"OKVE1";
 
 /// Wrapper that encrypts values before storing and decrypts on retrieval.
 ///
-/// Values are JSON-serialized, encrypted via the provided closure, base64-encoded,
-/// and stored as a special two-key dictionary. On retrieval the process is reversed.
+/// Value bytes are encrypted via the provided closure and stored with a small
+/// binary envelope that preserves the original value kind.
 ///
 /// Non-encrypted values are passed through transparently.
 pub struct EncryptionWrapper<T, E, D> {
@@ -53,48 +50,38 @@ where
         }
     }
 
-    fn encrypt_value(&self, value: &HashMap<String, Value>) -> Result<HashMap<String, Value>> {
-        let json_bytes =
-            serde_json::to_vec(value).map_err(|e| Error::Serialization(e.to_string()))?;
-        let encrypted = (self.encrypt_fn)(&json_bytes)?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&encrypted);
-        let mut result = HashMap::new();
-        result.insert(ENCRYPTED_DATA_KEY.to_string(), Value::String(b64));
-        result.insert(
-            ENCRYPTION_VERSION_KEY.to_string(),
-            Value::Number(serde_json::Number::from(self.version)),
-        );
-        Ok(result)
+    fn encrypt_value(&self, value: &Value) -> Result<Value> {
+        let encrypted = (self.encrypt_fn)(value.bytes())?;
+        let mut bytes = Vec::with_capacity(ENCRYPTION_MAGIC.len() + 5 + encrypted.len());
+        bytes.extend_from_slice(ENCRYPTION_MAGIC);
+        bytes.extend_from_slice(&self.version.to_le_bytes());
+        bytes.push(value.kind().tag());
+        bytes.extend_from_slice(&encrypted);
+        Ok(Value::binary(bytes))
     }
 
-    fn decrypt_value(
-        &self,
-        value: Option<HashMap<String, Value>>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    fn decrypt_value(&self, value: Option<Value>) -> Result<Option<Value>> {
         let value = match value {
             Some(v) => v,
             None => return Ok(None),
         };
-        if !value.contains_key(ENCRYPTED_DATA_KEY) {
+        if !value.bytes().starts_with(ENCRYPTION_MAGIC) {
             return Ok(Some(value));
         }
 
-        let decrypt = || -> Result<HashMap<String, Value>> {
-            let version = value
-                .get(ENCRYPTION_VERSION_KEY)
-                .and_then(|v| v.as_u64())
-                .ok_or(Error::CorruptedData)? as u32;
-            let data = value
-                .get(ENCRYPTED_DATA_KEY)
-                .and_then(|v| v.as_str())
+        let decrypt = || -> Result<Value> {
+            let bytes = value.bytes();
+            let header_len = ENCRYPTION_MAGIC.len() + 5;
+            if bytes.len() < header_len {
+                return Err(Error::CorruptedData);
+            }
+            let mut version = [0_u8; 4];
+            version.copy_from_slice(&bytes[ENCRYPTION_MAGIC.len()..ENCRYPTION_MAGIC.len() + 4]);
+            let version = u32::from_le_bytes(version);
+            let kind = ValueKind::from_tag(bytes[ENCRYPTION_MAGIC.len() + 4])
                 .ok_or(Error::CorruptedData)?;
-            let encrypted = base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .map_err(|e| Error::Decryption(e.to_string()))?;
-            let json_bytes = (self.decrypt_fn)(&encrypted, version)?;
-            let decrypted: HashMap<String, Value> = serde_json::from_slice(&json_bytes)
-                .map_err(|e| Error::Deserialization(e.to_string()))?;
-            Ok(decrypted)
+            let decrypted = (self.decrypt_fn)(&bytes[header_len..], version)?;
+            Ok(Value::new(kind, decrypted))
         };
 
         match decrypt() {
@@ -117,20 +104,12 @@ where
     E: Fn(&[u8]) -> Result<Vec<u8>> + Send + Sync,
     D: Fn(&[u8], u32) -> Result<Vec<u8>> + Send + Sync,
 {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let value = self.inner.get(key, collection).await?;
         self.decrypt_value(value)
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         match self.inner.ttl(key, collection).await? {
             Some((value, ttl)) => Ok(self.decrypt_value(Some(value))?.map(|v| (v, ttl))),
             None => Ok(None),
@@ -140,7 +119,7 @@ where
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -156,7 +135,7 @@ where
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let values = self.inner.get_many(keys, collection).await?;
         values.into_iter().map(|v| self.decrypt_value(v)).collect()
     }
@@ -165,7 +144,7 @@ where
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let results = self.inner.ttl_many(keys, collection).await?;
         results
             .into_iter()
@@ -179,7 +158,7 @@ where
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -241,8 +220,7 @@ mod tests {
     async fn test_encryption_wrapper_roundtrip() {
         let inner = MemoryStore::new();
         let wrapper = EncryptionWrapper::new(inner, noop_encrypt, noop_decrypt, 1);
-        let mut value = HashMap::new();
-        value.insert("name".to_string(), Value::String("Alice".to_string()));
+        let value = Value::utf8("Alice");
 
         wrapper.put("k", value.clone(), None, None).await.unwrap();
         let got = wrapper.get("k", None).await.unwrap();
@@ -255,8 +233,7 @@ mod tests {
         let wrapper = EncryptionWrapper::with_options(inner, noop_encrypt, noop_decrypt, 1, false);
 
         // Insert a non-encrypted value directly into inner store
-        let mut plain = HashMap::new();
-        plain.insert("x".to_string(), Value::Number(42.into()));
+        let plain = Value::integer(42);
         wrapper
             .inner
             .put("k", plain.clone(), None, None)

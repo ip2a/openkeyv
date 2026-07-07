@@ -4,13 +4,13 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::value::Value;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
-type SeedData = HashMap<String, HashMap<String, HashMap<String, Value>>>;
+type SeedData = HashMap<String, HashMap<String, Value>>;
 
 const DEFAULT_COLLECTION: &str = "default_collection";
 const DEFAULT_PAGE_SIZE: usize = 10_000;
@@ -112,11 +112,7 @@ impl Default for MemoryStore {
 
 #[async_trait]
 impl AsyncKeyValue for MemoryStore {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
@@ -127,11 +123,7 @@ impl AsyncKeyValue for MemoryStore {
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
@@ -148,7 +140,7 @@ impl AsyncKeyValue for MemoryStore {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -179,7 +171,7 @@ impl AsyncKeyValue for MemoryStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
@@ -199,7 +191,7 @@ impl AsyncKeyValue for MemoryStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
@@ -219,7 +211,7 @@ impl AsyncKeyValue for MemoryStore {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -323,8 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_basic() {
         let store = MemoryStore::new();
-        let mut value = HashMap::new();
-        value.insert("name".to_string(), Value::String("test".to_string()));
+        let value = Value::utf8("test");
 
         store.put("key1", value.clone(), None, None).await.unwrap();
         let result = store.get("key1", None).await.unwrap();
@@ -334,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_ttl() {
         let store = MemoryStore::new();
-        let value = HashMap::new();
+        let value = Value::null();
 
         store
             .put("key1", value.clone(), None, Some(0.01))
@@ -349,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_delete() {
         let store = MemoryStore::new();
-        let value = HashMap::new();
+        let value = Value::null();
 
         store.put("key1", value, None, None).await.unwrap();
         assert!(store.delete("key1", None).await.unwrap());
@@ -359,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_collections() {
         let store = MemoryStore::new();
-        let value = HashMap::new();
+        let value = Value::null();
 
         store
             .put("k", value.clone(), Some("c1"), None)
@@ -375,16 +366,8 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_bulk() {
         let store = MemoryStore::new();
-        let v1 = {
-            let mut m = HashMap::new();
-            m.insert("a".to_string(), Value::Number(1.into()));
-            m
-        };
-        let v2 = {
-            let mut m = HashMap::new();
-            m.insert("b".to_string(), Value::Number(2.into()));
-            m
-        };
+        let v1 = Value::integer(1);
+        let v2 = Value::integer(2);
 
         store
             .put_many(
@@ -406,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_destroy() {
         let store = MemoryStore::new();
-        let value = HashMap::new();
+        let value = Value::null();
         store.put("k", value, None, None).await.unwrap();
 
         assert!(store.destroy().await.unwrap());

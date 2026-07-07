@@ -1,8 +1,7 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 use tracing::{debug, instrument};
 
 /// A wrapper that logs all operations at debug level.
@@ -34,11 +33,7 @@ impl<T: AsyncKeyValue> LoggingWrapper<T> {
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for LoggingWrapper<T> {
     #[instrument(skip(self), fields(store = %self.name))]
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         debug!(key, collection, "get");
         let result = self.inner.get(key, collection).await;
         debug!(
@@ -54,7 +49,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LoggingWrapper<T> {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -68,11 +63,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LoggingWrapper<T> {
         self.inner.delete(key, collection).await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         self.inner.ttl(key, collection).await
     }
 
@@ -80,7 +71,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LoggingWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         debug!(count = keys.len(), collection, "get_many");
         self.inner.get_many(keys, collection).await
     }
@@ -89,14 +80,14 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LoggingWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         self.inner.ttl_many(keys, collection).await
     }
 
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {

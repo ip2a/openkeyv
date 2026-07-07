@@ -1,8 +1,7 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Tracks operation counts for a wrapped store.
@@ -74,11 +73,7 @@ impl<T: AsyncKeyValue> StatisticsWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for StatisticsWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         self.stats.gets.fetch_add(1, Ordering::Relaxed);
         let result = self.inner.get(key, collection).await?;
         if result.is_some() {
@@ -89,18 +84,14 @@ impl<T: AsyncKeyValue> AsyncKeyValue for StatisticsWrapper<T> {
         Ok(result)
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         self.inner.ttl(key, collection).await
     }
 
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -117,7 +108,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for StatisticsWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         self.stats.get_many.fetch_add(1, Ordering::Relaxed);
         let results = self.inner.get_many(keys, collection).await?;
         for r in &results {
@@ -134,14 +125,14 @@ impl<T: AsyncKeyValue> AsyncKeyValue for StatisticsWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         self.inner.ttl_many(keys, collection).await
     }
 
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -185,8 +176,7 @@ mod tests {
         let mem = MemoryStore::new();
         let wrapper = StatisticsWrapper::new(mem);
 
-        let mut value = HashMap::new();
-        value.insert("a".to_string(), Value::String("b".to_string()));
+        let value = Value::utf8("b");
 
         wrapper.put("k", value.clone(), None, None).await.unwrap();
         let _ = wrapper.get("k", None).await.unwrap();

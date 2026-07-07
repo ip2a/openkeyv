@@ -1,9 +1,8 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
 use crate::utils::retry::retry_operation;
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// A wrapper that retries failed operations with exponential backoff.
 pub struct RetryWrapper<T: AsyncKeyValue> {
@@ -44,11 +43,7 @@ impl<T: AsyncKeyValue> RetryWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for RetryWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         retry_operation(
             || self.inner.get(key, collection),
             self.max_attempts,
@@ -59,11 +54,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RetryWrapper<T> {
         .await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         retry_operation(
             || self.inner.ttl(key, collection),
             self.max_attempts,
@@ -77,7 +68,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RetryWrapper<T> {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -106,7 +97,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RetryWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         retry_operation(
             || self.inner.get_many(keys, collection),
             self.max_attempts,
@@ -121,7 +112,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RetryWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         retry_operation(
             || self.inner.ttl_many(keys, collection),
             self.max_attempts,
@@ -135,7 +126,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RetryWrapper<T> {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {

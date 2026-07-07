@@ -1,9 +1,8 @@
 use crate::entry::ManagedEntry;
 use crate::error::{Error, Result};
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// A wrapper that rejects values outside a size range.
 pub struct LimitSizeWrapper<T: AsyncKeyValue> {
@@ -49,7 +48,7 @@ impl<T: AsyncKeyValue> LimitSizeWrapper<T> {
         self.inner
     }
 
-    fn check_size(&self, value: &HashMap<String, Value>) -> Result<()> {
+    fn check_size(&self, value: &Value) -> Result<()> {
         let entry = ManagedEntry::new(value.clone());
         let size = entry.estimate_size();
 
@@ -69,26 +68,18 @@ impl<T: AsyncKeyValue> LimitSizeWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for LimitSizeWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         self.inner.get(key, collection).await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         self.inner.ttl(key, collection).await
     }
 
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -104,7 +95,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LimitSizeWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         self.inner.get_many(keys, collection).await
     }
 
@@ -112,14 +103,14 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LimitSizeWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         self.inner.ttl_many(keys, collection).await
     }
 
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -164,11 +155,7 @@ mod tests {
         let mem = MemoryStore::new();
         let wrapper = LimitSizeWrapper::with_max(mem, 10);
 
-        let mut value = HashMap::new();
-        value.insert(
-            "key".to_string(),
-            Value::String("this is a very long string that exceeds ten bytes".to_string()),
-        );
+        let value = Value::utf8("this is a very long string that exceeds ten bytes");
 
         let err = wrapper.put("k", value, None, None).await.unwrap_err();
         assert_eq!(err, Error::EntryTooLarge);
@@ -179,8 +166,7 @@ mod tests {
         let mem = MemoryStore::new();
         let wrapper = LimitSizeWrapper::with_range(mem, 1, 1000);
 
-        let mut value = HashMap::new();
-        value.insert("key".to_string(), Value::String("short".to_string()));
+        let value = Value::utf8("short");
 
         wrapper.put("k", value.clone(), None, None).await.unwrap();
         let got = wrapper.get("k", None).await.unwrap();

@@ -1,17 +1,16 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// A wrapper that returns a default value when a key is missing.
 pub struct DefaultValueWrapper<T: AsyncKeyValue> {
     inner: T,
-    default_value: HashMap<String, Value>,
+    default_value: Value,
 }
 
 impl<T: AsyncKeyValue> DefaultValueWrapper<T> {
-    pub fn new(inner: T, default_value: HashMap<String, Value>) -> Self {
+    pub fn new(inner: T, default_value: Value) -> Self {
         Self {
             inner,
             default_value,
@@ -25,22 +24,14 @@ impl<T: AsyncKeyValue> DefaultValueWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for DefaultValueWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         match self.inner.get(key, collection).await? {
             Some(value) => Ok(Some(value)),
             None => Ok(Some(self.default_value.clone())),
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         match self.inner.ttl(key, collection).await? {
             Some((value, ttl)) => Ok(Some((value, ttl))),
             None => Ok(Some((self.default_value.clone(), 0.0))),
@@ -50,7 +41,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for DefaultValueWrapper<T> {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -65,7 +56,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for DefaultValueWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let results = self.inner.get_many(keys, collection).await?;
         Ok(results
             .into_iter()
@@ -77,7 +68,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for DefaultValueWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let results = self.inner.ttl_many(keys, collection).await?;
         Ok(results
             .into_iter()
@@ -88,7 +79,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for DefaultValueWrapper<T> {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -128,8 +119,7 @@ mod tests {
     #[tokio::test]
     async fn test_default_value() {
         let mem = MemoryStore::new();
-        let mut default_value = HashMap::new();
-        default_value.insert("default".to_string(), Value::Bool(true));
+        let default_value = Value::bool(true);
 
         let wrapper = DefaultValueWrapper::new(mem, default_value.clone());
 
@@ -140,12 +130,10 @@ mod tests {
     #[tokio::test]
     async fn test_default_value_existing() {
         let mem = MemoryStore::new();
-        let mut existing = HashMap::new();
-        existing.insert("real".to_string(), Value::String("value".to_string()));
+        let existing = Value::utf8("value");
         mem.put("k", existing.clone(), None, None).await.unwrap();
 
-        let mut default_value = HashMap::new();
-        default_value.insert("default".to_string(), Value::Bool(true));
+        let default_value = Value::bool(true);
 
         let wrapper = DefaultValueWrapper::new(mem, default_value);
 

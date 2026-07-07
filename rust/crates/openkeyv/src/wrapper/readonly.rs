@@ -1,8 +1,7 @@
 use crate::error::{Error, Result};
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// A wrapper that makes an underlying store read-only.
 ///
@@ -24,26 +23,18 @@ impl<T: AsyncKeyValue> ReadOnlyWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for ReadOnlyWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         self.inner.get(key, collection).await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         self.inner.ttl(key, collection).await
     }
 
     async fn put(
         &self,
         _key: &str,
-        _value: HashMap<String, Value>,
+        _value: Value,
         _collection: Option<&str>,
         _ttl: Option<f64>,
     ) -> Result<()> {
@@ -58,7 +49,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for ReadOnlyWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         self.inner.get_many(keys, collection).await
     }
 
@@ -66,14 +57,14 @@ impl<T: AsyncKeyValue> AsyncKeyValue for ReadOnlyWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         self.inner.ttl_many(keys, collection).await
     }
 
     async fn put_many(
         &self,
         _keys: &[String],
-        _values: &[HashMap<String, Value>],
+        _values: &[Value],
         _collection: Option<&str>,
         _ttl: Option<f64>,
     ) -> Result<()> {
@@ -113,8 +104,7 @@ mod tests {
     #[tokio::test]
     async fn test_readonly_get() {
         let mem = MemoryStore::new();
-        let mut value = HashMap::new();
-        value.insert("a".to_string(), Value::String("b".to_string()));
+        let value = Value::utf8("b");
         mem.put("k", value.clone(), None, None).await.unwrap();
 
         let ro = ReadOnlyWrapper::new(mem);
@@ -126,7 +116,7 @@ mod tests {
     async fn test_readonly_put_fails() {
         let mem = MemoryStore::new();
         let ro = ReadOnlyWrapper::new(mem);
-        let value = HashMap::new();
+        let value = Value::null();
 
         let err = ro.put("k", value, None, None).await.unwrap_err();
         assert_eq!(err, Error::ReadOnly);

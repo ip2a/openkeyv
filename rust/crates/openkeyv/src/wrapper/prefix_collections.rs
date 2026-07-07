@@ -1,8 +1,7 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// A wrapper that prefixes all collection names before delegating to the underlying store.
 pub struct PrefixCollectionsWrapper<T: AsyncKeyValue> {
@@ -32,21 +31,13 @@ impl<T: AsyncKeyValue> PrefixCollectionsWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for PrefixCollectionsWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         self.inner
             .get(key, Some(&self.prefixed_collection(collection)))
             .await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         self.inner
             .ttl(key, Some(&self.prefixed_collection(collection)))
             .await
@@ -55,7 +46,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for PrefixCollectionsWrapper<T> {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -74,7 +65,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for PrefixCollectionsWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         self.inner
             .get_many(keys, Some(&self.prefixed_collection(collection)))
             .await
@@ -84,7 +75,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for PrefixCollectionsWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         self.inner
             .ttl_many(keys, Some(&self.prefixed_collection(collection)))
             .await
@@ -93,7 +84,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for PrefixCollectionsWrapper<T> {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -150,8 +141,7 @@ mod tests {
         let mem = MemoryStore::new();
         let wrapper = PrefixCollectionsWrapper::new(mem, "tenant_");
 
-        let mut value = HashMap::new();
-        value.insert("a".to_string(), Value::String("b".to_string()));
+        let value = Value::utf8("b");
         wrapper
             .put("k", value.clone(), Some("users"), None)
             .await

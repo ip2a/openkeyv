@@ -1,76 +1,35 @@
 use crate::error::{Error, Result};
 use crate::protocol::AsyncKeyValue;
+use crate::value::Value;
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// Adapter that provides type-safe access on top of an `AsyncKeyValue` store.
 ///
-/// If `T` serializes to a JSON object (i.e. `HashMap<String, Value>`), it is stored directly.
-/// Otherwise, it is wrapped in `{"_data": <serialized>}` to maintain the dict interface.
+/// Values are serialized into opaque structured bytes before entering the core
+/// protocol. This adapter is transitional while the Python boundary gets its
+/// OpenKeyV-owned structured encoding.
 pub struct TypedAdapter<T: Serialize + DeserializeOwned> {
     inner: Box<dyn AsyncKeyValue>,
-    needs_wrapping: bool,
     _phantom: std::marker::PhantomData<T>,
 }
 
 impl<T: Serialize + DeserializeOwned> TypedAdapter<T> {
     pub fn new(inner: Box<dyn AsyncKeyValue>) -> Self {
-        let needs_wrapping = !Self::serializes_to_object();
         Self {
             inner,
-            needs_wrapping,
             _phantom: std::marker::PhantomData,
         }
     }
 
-    fn serializes_to_object() -> bool {
-        // A simple heuristic: attempt to serialize a default/empty value and inspect.
-        // For real usage this could be improved, but works for typical structs/maps.
-        // Instead, we check the type name against known container patterns at compile time
-        // via std::any::type_name. This is heuristic but zero-cost.
-        let name = std::any::type_name::<T>();
-        name.contains("HashMap")
-            || name.contains("BTreeMap")
-            || name.contains("serde_json :: Value")
-            || (!name.contains("String")
-                && !name.contains("Vec")
-                && !name.contains("i32")
-                && !name.contains("i64")
-                && !name.contains("f32")
-                && !name.contains("f64")
-                && !name.contains("bool"))
-    }
-
-    fn to_store_value(&self, value: &T) -> Result<HashMap<String, Value>> {
-        if self.needs_wrapping {
-            let wrapped = serde_json::json!({ "_data": value });
-            let obj = wrapped
-                .as_object()
-                .ok_or_else(|| Error::Serialization("expected object".to_string()))?;
-            Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        } else {
-            let val =
-                serde_json::to_value(value).map_err(|e| Error::Serialization(e.to_string()))?;
-            let obj = val
-                .as_object()
-                .ok_or_else(|| Error::Serialization("expected object".to_string()))?;
-            Ok(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        }
+    fn to_store_value(&self, value: &T) -> Result<Value> {
+        serde_json::to_vec(value)
+            .map(Value::structured)
+            .map_err(|e| Error::Serialization(e.to_string()))
     }
 
     #[allow(clippy::wrong_self_convention)]
-    fn from_store_value(&self, map: HashMap<String, Value>) -> Result<T> {
-        if self.needs_wrapping {
-            let val = map
-                .get("_data")
-                .cloned()
-                .unwrap_or_else(|| Value::Object(map.into_iter().collect()));
-            serde_json::from_value(val).map_err(|e| Error::Deserialization(e.to_string()))
-        } else {
-            let val = Value::Object(map.into_iter().collect());
-            serde_json::from_value(val).map_err(|e| Error::Deserialization(e.to_string()))
-        }
+    fn from_store_value(&self, value: Value) -> Result<T> {
+        serde_json::from_slice(value.bytes()).map_err(|e| Error::Deserialization(e.to_string()))
     }
 
     pub async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<T>> {
@@ -113,7 +72,7 @@ impl<T: Serialize + DeserializeOwned> TypedAdapter<T> {
     pub async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {

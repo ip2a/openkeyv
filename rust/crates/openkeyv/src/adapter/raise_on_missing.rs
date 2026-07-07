@@ -1,8 +1,7 @@
 use crate::error::{Error, Result};
 use crate::protocol::AsyncKeyValue;
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// Wrapper that raises `MissingKey` error when a key is not found.
 pub struct RaiseOnMissingAdapter<T: AsyncKeyValue> {
@@ -21,22 +20,14 @@ impl<T: AsyncKeyValue> RaiseOnMissingAdapter<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for RaiseOnMissingAdapter<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         match self.inner.get(key, collection).await? {
             Some(value) => Ok(Some(value)),
             None => Err(Error::MissingKey(key.to_string())),
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         match self.inner.ttl(key, collection).await? {
             Some((value, ttl)) => Ok(Some((value, ttl))),
             None => Err(Error::MissingKey(key.to_string())),
@@ -46,7 +37,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RaiseOnMissingAdapter<T> {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -61,7 +52,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RaiseOnMissingAdapter<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let results = self.inner.get_many(keys, collection).await?;
         for (key, result) in keys.iter().zip(results.iter()) {
             if result.is_none() {
@@ -75,7 +66,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RaiseOnMissingAdapter<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let results = self.inner.ttl_many(keys, collection).await?;
         for (key, result) in keys.iter().zip(results.iter()) {
             if result.is_none() {
@@ -88,7 +79,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for RaiseOnMissingAdapter<T> {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -108,8 +99,7 @@ mod tests {
     #[tokio::test]
     async fn test_raise_on_missing_found() {
         let mem = MemoryStore::new();
-        let mut value = HashMap::new();
-        value.insert("a".to_string(), Value::String("b".to_string()));
+        let value = Value::utf8("b");
         mem.put("k", value.clone(), None, None).await.unwrap();
 
         let adapter = RaiseOnMissingAdapter::new(mem);

@@ -39,6 +39,7 @@ pub mod error;
 pub mod protocol;
 pub mod store;
 pub mod utils;
+pub mod value;
 pub mod wrapper;
 
 #[cfg(feature = "python")]
@@ -50,3 +51,4 @@ pub use protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+pub use value::{Value, ValueKind};

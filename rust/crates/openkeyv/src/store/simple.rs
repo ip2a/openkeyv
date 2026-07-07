@@ -4,8 +4,8 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
@@ -44,11 +44,7 @@ impl Default for SimpleStore {
 
 #[async_trait]
 impl AsyncKeyValue for SimpleStore {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         let data = self.data.read().await;
         match data.get(cname).and_then(|col| col.get(key)) {
@@ -57,11 +53,7 @@ impl AsyncKeyValue for SimpleStore {
         }
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         let data = self.data.read().await;
         match data.get(cname).and_then(|col| col.get(key)) {
@@ -76,7 +68,7 @@ impl AsyncKeyValue for SimpleStore {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -105,7 +97,7 @@ impl AsyncKeyValue for SimpleStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         let data = self.data.read().await;
         let col = data.get(cname);
@@ -123,7 +115,7 @@ impl AsyncKeyValue for SimpleStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         let data = self.data.read().await;
         let col = data.get(cname);
@@ -143,7 +135,7 @@ impl AsyncKeyValue for SimpleStore {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -239,8 +231,7 @@ mod tests {
     #[tokio::test]
     async fn test_simple_store_roundtrip() {
         let store = SimpleStore::new();
-        let mut value = HashMap::new();
-        value.insert("x".to_string(), Value::Number(1.into()));
+        let value = Value::integer(1);
 
         store.put("k", value.clone(), None, None).await.unwrap();
         let got = store.get("k", None).await.unwrap();
@@ -250,7 +241,7 @@ mod tests {
     #[tokio::test]
     async fn test_simple_store_delete() {
         let store = SimpleStore::new();
-        let value = HashMap::new();
+        let value = Value::null();
         store.put("k", value, None, None).await.unwrap();
         assert!(store.delete("k", None).await.unwrap());
         assert!(!store.delete("k", None).await.unwrap());
@@ -259,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn test_simple_store_destroy() {
         let store = SimpleStore::new();
-        let value = HashMap::new();
+        let value = Value::null();
         store.put("k", value, None, None).await.unwrap();
         assert!(store.destroy().await.unwrap());
         assert_eq!(store.get("k", None).await.unwrap(), None);

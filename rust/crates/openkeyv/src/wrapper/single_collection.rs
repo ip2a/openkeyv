@@ -1,8 +1,7 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// A wrapper that stores all collections within a single backing collection
@@ -46,22 +45,14 @@ impl<T: AsyncKeyValue> SingleCollectionWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for SingleCollectionWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let compound = self.compound_key(collection, key);
         self.inner
             .get(&compound, Some(&self.backing_collection))
             .await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let compound = self.compound_key(collection, key);
         self.inner
             .ttl(&compound, Some(&self.backing_collection))
@@ -71,7 +62,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for SingleCollectionWrapper<T> {
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -92,7 +83,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for SingleCollectionWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         let compounds: Vec<String> = keys
             .iter()
             .map(|k| self.compound_key(collection, k))
@@ -106,7 +97,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for SingleCollectionWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         let compounds: Vec<String> = keys
             .iter()
             .map(|k| self.compound_key(collection, k))
@@ -119,7 +110,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for SingleCollectionWrapper<T> {
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -204,8 +195,7 @@ mod tests {
         let mem = MemoryStore::new();
         let wrapper = SingleCollectionWrapper::new(mem, "all_data");
 
-        let mut value = HashMap::new();
-        value.insert("a".to_string(), Value::String("b".to_string()));
+        let value = Value::utf8("b");
         wrapper
             .put("k", value.clone(), Some("users"), None)
             .await

@@ -1,36 +1,27 @@
 use crate::error::Result;
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// Core async key-value protocol.
 ///
 /// All store implementations and wrappers must implement this trait.
-/// Values are `HashMap<String, Value>` (JSON-compatible dicts) at the protocol level.
-/// Type-safe adapters can be built on top.
+/// Values are Rust-native typed bytes. Language-specific object conversion belongs
+/// at the boundary layer, not in this protocol.
 #[async_trait]
 pub trait AsyncKeyValue: Send + Sync {
     /// Retrieve a value by key from the specified collection.
     /// Returns `None` if the key is not found or has expired.
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>>;
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>>;
 
     /// Retrieve the value and remaining TTL for a key.
     /// Returns `(None, None)` if the key is not found or expired.
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>>;
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>>;
 
     /// Store a key-value pair with optional TTL (in seconds).
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()>;
@@ -43,20 +34,20 @@ pub trait AsyncKeyValue: Send + Sync {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>>;
+    ) -> Result<Vec<Option<Value>>>;
 
     /// Retrieve multiple values and their TTLs.
     async fn ttl_many(
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>>;
+    ) -> Result<Vec<Option<(Value, f64)>>>;
 
     /// Store multiple key-value pairs with the same optional TTL.
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()>;

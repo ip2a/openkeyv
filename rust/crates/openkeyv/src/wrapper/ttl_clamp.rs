@@ -1,8 +1,7 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::value::Value;
 use async_trait::async_trait;
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// A wrapper that clamps TTL values to a configured range.
 pub struct TtlClampWrapper<T: AsyncKeyValue> {
@@ -82,26 +81,18 @@ impl<T: AsyncKeyValue> TtlClampWrapper<T> {
 
 #[async_trait]
 impl<T: AsyncKeyValue> AsyncKeyValue for TtlClampWrapper<T> {
-    async fn get(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<HashMap<String, Value>>> {
+    async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         self.inner.get(key, collection).await
     }
 
-    async fn ttl(
-        &self,
-        key: &str,
-        collection: Option<&str>,
-    ) -> Result<Option<(HashMap<String, Value>, f64)>> {
+    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         self.inner.ttl(key, collection).await
     }
 
     async fn put(
         &self,
         key: &str,
-        value: HashMap<String, Value>,
+        value: Value,
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -117,7 +108,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TtlClampWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<HashMap<String, Value>>>> {
+    ) -> Result<Vec<Option<Value>>> {
         self.inner.get_many(keys, collection).await
     }
 
@@ -125,14 +116,14 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TtlClampWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(HashMap<String, Value>, f64)>>> {
+    ) -> Result<Vec<Option<(Value, f64)>>> {
         self.inner.ttl_many(keys, collection).await
     }
 
     async fn put_many(
         &self,
         keys: &[String],
-        values: &[HashMap<String, Value>],
+        values: &[Value],
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
@@ -175,7 +166,7 @@ mod tests {
         let mem = MemoryStore::new();
         let wrapper = TtlClampWrapper::with_max(mem, 10.0);
 
-        let value = HashMap::new();
+        let value = Value::null();
         wrapper
             .put("k", value.clone(), None, Some(100.0))
             .await
@@ -190,7 +181,7 @@ mod tests {
         let mem = MemoryStore::new();
         let wrapper = TtlClampWrapper::with_min(mem, 10.0);
 
-        let value = HashMap::new();
+        let value = Value::null();
         wrapper
             .put("k", value.clone(), None, Some(1.0))
             .await
@@ -205,7 +196,7 @@ mod tests {
         let mem = MemoryStore::new();
         let wrapper = TtlClampWrapper::with_missing_ttl(mem, 5.0);
 
-        let value = HashMap::new();
+        let value = Value::null();
         wrapper.put("k", value.clone(), None, None).await.unwrap();
 
         let (_, ttl) = wrapper.ttl("k", None).await.unwrap().unwrap();
