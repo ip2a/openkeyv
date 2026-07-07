@@ -1,21 +1,19 @@
+use super::client::SimpleClient;
+use super::config::SimpleConfig;
+use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
 use crate::value::Value;
 use async_trait::async_trait;
-use std::collections::HashMap;
-use tokio::sync::RwLock;
-
-const DEFAULT_COLLECTION: &str = "default_collection";
 
 /// A simple single-threaded in-memory store backed by `HashMap`.
 /// Intended for testing and development — no concurrency optimizations.
 pub struct SimpleStore {
-    data: RwLock<HashMap<String, HashMap<String, ManagedEntry>>>,
-    default_collection: String,
+    client: SimpleClient,
+    config: SimpleConfig,
 }
 
 impl SimpleStore {
@@ -24,15 +22,18 @@ impl SimpleStore {
     }
 
     pub fn with_options(default_collection: Option<String>) -> Self {
+        Self::with_config(SimpleConfig::new(default_collection))
+    }
+
+    pub fn with_config(config: SimpleConfig) -> Self {
         Self {
-            data: RwLock::new(HashMap::new()),
-            default_collection: default_collection
-                .unwrap_or_else(|| DEFAULT_COLLECTION.to_string()),
+            client: SimpleClient::new(),
+            config,
         }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
     }
 }
 
@@ -46,7 +47,7 @@ impl Default for SimpleStore {
 impl AsyncKeyValue for SimpleStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
-        let data = self.data.read().await;
+        let data = self.client.data().read().await;
         match data.get(cname).and_then(|col| col.get(key)) {
             Some(entry) if !entry.is_expired() => Ok(Some(entry.value.clone())),
             _ => Ok(None),
@@ -55,7 +56,7 @@ impl AsyncKeyValue for SimpleStore {
 
     async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
-        let data = self.data.read().await;
+        let data = self.client.data().read().await;
         match data.get(cname).and_then(|col| col.get(key)) {
             Some(entry) if !entry.is_expired() => {
                 let ttl = entry.ttl().unwrap_or(0.0);
@@ -73,7 +74,7 @@ impl AsyncKeyValue for SimpleStore {
         ttl: Option<f64>,
     ) -> Result<()> {
         let cname = self.collection_name(collection);
-        let mut data = self.data.write().await;
+        let mut data = self.client.data().write().await;
         let entry = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds),
             None => ManagedEntry::new(value),
@@ -86,7 +87,7 @@ impl AsyncKeyValue for SimpleStore {
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
-        let mut data = self.data.write().await;
+        let mut data = self.client.data().write().await;
         Ok(data
             .get_mut(cname)
             .map(|col| col.remove(key).is_some())
@@ -99,7 +100,7 @@ impl AsyncKeyValue for SimpleStore {
         collection: Option<&str>,
     ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
-        let data = self.data.read().await;
+        let data = self.client.data().read().await;
         let col = data.get(cname);
         Ok(keys
             .iter()
@@ -117,7 +118,7 @@ impl AsyncKeyValue for SimpleStore {
         collection: Option<&str>,
     ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
-        let data = self.data.read().await;
+        let data = self.client.data().read().await;
         let col = data.get(cname);
         Ok(keys
             .iter()
@@ -146,7 +147,7 @@ impl AsyncKeyValue for SimpleStore {
             });
         }
         let cname = self.collection_name(collection);
-        let mut data = self.data.write().await;
+        let mut data = self.client.data().write().await;
         let col = data.entry(cname.to_string()).or_default();
         for (key, value) in keys.iter().zip(values.iter()) {
             let entry = match ttl {
@@ -160,7 +161,7 @@ impl AsyncKeyValue for SimpleStore {
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
         let cname = self.collection_name(collection);
-        let mut data = self.data.write().await;
+        let mut data = self.client.data().write().await;
         let mut count = 0;
         if let Some(col) = data.get_mut(cname) {
             for key in keys {
@@ -176,7 +177,7 @@ impl AsyncKeyValue for SimpleStore {
 #[async_trait]
 impl AsyncCull for SimpleStore {
     async fn cull(&self) -> Result<()> {
-        let mut data = self.data.write().await;
+        let mut data = self.client.data().write().await;
         for col in data.values_mut() {
             col.retain(|_k, v| !v.is_expired());
         }
@@ -188,7 +189,7 @@ impl AsyncCull for SimpleStore {
 impl AsyncEnumerateKeys for SimpleStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
         let cname = self.collection_name(collection);
-        let data = self.data.read().await;
+        let data = self.client.data().read().await;
         let keys: Vec<String> = data
             .get(cname)
             .map(|col| col.keys().cloned().collect())
@@ -201,7 +202,7 @@ impl AsyncEnumerateKeys for SimpleStore {
 #[async_trait]
 impl AsyncEnumerateCollections for SimpleStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
-        let data = self.data.read().await;
+        let data = self.client.data().read().await;
         let limit = limit.unwrap_or(10_000).min(10_000);
         Ok(data.keys().take(limit).cloned().collect())
     }
@@ -210,7 +211,7 @@ impl AsyncEnumerateCollections for SimpleStore {
 #[async_trait]
 impl AsyncDestroyCollection for SimpleStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let mut data = self.data.write().await;
+        let mut data = self.client.data().write().await;
         Ok(data.remove(collection).is_some())
     }
 }
@@ -218,7 +219,7 @@ impl AsyncDestroyCollection for SimpleStore {
 #[async_trait]
 impl AsyncDestroyStore for SimpleStore {
     async fn destroy(&self) -> Result<bool> {
-        let mut data = self.data.write().await;
+        let mut data = self.client.data().write().await;
         data.clear();
         Ok(true)
     }
