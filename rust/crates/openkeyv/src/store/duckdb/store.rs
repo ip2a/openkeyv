@@ -1,5 +1,7 @@
+use super::client::DuckDBClient;
+use super::config::DuckDBConfig;
+use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -7,40 +9,13 @@ use crate::protocol::{
 use crate::value::Value;
 use async_trait::async_trait;
 
-const DEFAULT_COLLECTION: &str = "default_collection";
-
-fn validate_table_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        return Err(Error::StoreSetup {
-            message: "table name cannot be empty".to_string(),
-        });
-    }
-    if name.len() > 63 {
-        return Err(Error::StoreSetup {
-            message: format!("table name too long (>63): {name}"),
-        });
-    }
-    if name.chars().next().unwrap().is_ascii_digit() {
-        return Err(Error::StoreSetup {
-            message: format!("table name must not start with a digit: {name}"),
-        });
-    }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(Error::StoreSetup {
-            message: format!("table name must be alphanumeric (with underscores): {name}"),
-        });
-    }
-    Ok(())
-}
-
 /// DuckDB-backed key-value store.
 ///
 /// Uses an in-process DuckDB connection (in-memory or file-backed).
 /// Values are stored as JSON strings with TTL metadata.
 pub struct DuckDBStore {
-    conn: tokio::sync::Mutex<duckdb::Connection>,
-    table_name: String,
-    default_collection: String,
+    client: DuckDBClient,
+    config: DuckDBConfig,
 }
 
 impl DuckDBStore {
@@ -56,19 +31,24 @@ impl DuckDBStore {
     }
 
     pub async fn from_conn(conn: duckdb::Connection, table_name: Option<&str>) -> Result<Self> {
-        let table_name = table_name.unwrap_or("kv_entries").to_string();
-        validate_table_name(&table_name)?;
-        let store = Self {
-            conn: tokio::sync::Mutex::new(conn),
-            table_name,
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        };
+        let store = Self::with_config(conn, DuckDBConfig::new(table_name)?);
         store.ensure_table().await?;
         Ok(store)
     }
 
+    pub fn with_config(conn: duckdb::Connection, config: DuckDBConfig) -> Self {
+        Self {
+            client: DuckDBClient::new(conn),
+            config,
+        }
+    }
+
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
+    }
+
+    fn conn(&self) -> &tokio::sync::Mutex<duckdb::Connection> {
+        self.client.conn()
     }
 
     async fn ensure_table(&self) -> Result<()> {
@@ -81,22 +61,22 @@ impl DuckDBStore {
                 expires_at TIMESTAMPTZ,\
                 PRIMARY KEY (collection, key)\
             )",
-            self.table_name
+            self.config.table_name
         );
-        let guard = self.conn.lock().await;
+        let guard = self.conn().lock().await;
         guard
             .execute(&create_sql, [])
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to create table: {e}"),
             })?;
 
-        let idx_collection = format!("idx_{}_collection", self.table_name);
-        let idx_expires = format!("idx_{}_expires_at", self.table_name);
+        let idx_collection = format!("idx_{}_collection", self.config.table_name);
+        let idx_expires = format!("idx_{}_expires_at", self.config.table_name);
         guard
             .execute(
                 &format!(
                     "CREATE INDEX IF NOT EXISTS {} ON {}(collection)",
-                    idx_collection, self.table_name
+                    idx_collection, self.config.table_name
                 ),
                 [],
             )
@@ -107,7 +87,7 @@ impl DuckDBStore {
             .execute(
                 &format!(
                     "CREATE INDEX IF NOT EXISTS {} ON {}(expires_at)",
-                    idx_expires, self.table_name
+                    idx_expires, self.config.table_name
                 ),
                 [],
             )
@@ -120,9 +100,9 @@ impl DuckDBStore {
     async fn get_entry(&self, key: &str, collection: &str) -> Result<Option<ManagedEntry>> {
         let sql = format!(
             "SELECT value, created_at, expires_at FROM {} WHERE collection = ?1 AND key = ?2",
-            self.table_name
+            self.config.table_name
         );
-        let guard = self.conn.lock().await;
+        let guard = self.conn().lock().await;
         let mut stmt = guard.prepare(&sql).map_err(|e| Error::StoreConnection {
             message: format!("failed to prepare get: {e}"),
         })?;
@@ -164,11 +144,11 @@ impl DuckDBStore {
         let sql = format!(
             "INSERT OR REPLACE INTO {} (collection, key, value, created_at, expires_at) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            self.table_name
+            self.config.table_name
         );
         let value_str =
             serde_json::to_string(&entry.value).map_err(|e| Error::Serialization(e.to_string()))?;
-        let guard = self.conn.lock().await;
+        let guard = self.conn().lock().await;
         guard
             .execute(
                 &sql,
@@ -224,9 +204,9 @@ impl AsyncKeyValue for DuckDBStore {
         let cname = self.collection_name(collection);
         let sql = format!(
             "DELETE FROM {} WHERE collection = ?1 AND key = ?2",
-            self.table_name
+            self.config.table_name
         );
-        let guard = self.conn.lock().await;
+        let guard = self.conn().lock().await;
         let affected = guard
             .execute(&sql, duckdb::params![cname, key])
             .map_err(|e| Error::StoreConnection {
@@ -302,9 +282,9 @@ impl AsyncCull for DuckDBStore {
     async fn cull(&self) -> Result<()> {
         let sql = format!(
             "DELETE FROM {} WHERE expires_at IS NOT NULL AND expires_at <= now()",
-            self.table_name
+            self.config.table_name
         );
-        let guard = self.conn.lock().await;
+        let guard = self.conn().lock().await;
         guard
             .execute(&sql, [])
             .map_err(|e| Error::StoreConnection {
@@ -321,9 +301,9 @@ impl AsyncEnumerateKeys for DuckDBStore {
         let limit = limit.unwrap_or(10_000).min(10_000);
         let sql = format!(
             "SELECT key FROM {} WHERE collection = ?1 LIMIT ?2",
-            self.table_name
+            self.config.table_name
         );
-        let guard = self.conn.lock().await;
+        let guard = self.conn().lock().await;
         let mut stmt = guard.prepare(&sql).map_err(|e| Error::StoreConnection {
             message: format!("failed to prepare keys: {e}"),
         })?;
@@ -351,9 +331,9 @@ impl AsyncEnumerateCollections for DuckDBStore {
         let limit = limit.unwrap_or(10_000).min(10_000);
         let sql = format!(
             "SELECT DISTINCT collection FROM {} ORDER BY collection LIMIT ?1",
-            self.table_name
+            self.config.table_name
         );
-        let guard = self.conn.lock().await;
+        let guard = self.conn().lock().await;
         let mut stmt = guard.prepare(&sql).map_err(|e| Error::StoreConnection {
             message: format!("failed to prepare collections: {e}"),
         })?;
@@ -378,8 +358,11 @@ impl AsyncEnumerateCollections for DuckDBStore {
 #[async_trait]
 impl AsyncDestroyCollection for DuckDBStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let sql = format!("DELETE FROM {} WHERE collection = ?1", self.table_name);
-        let guard = self.conn.lock().await;
+        let sql = format!(
+            "DELETE FROM {} WHERE collection = ?1",
+            self.config.table_name
+        );
+        let guard = self.conn().lock().await;
         let affected = guard
             .execute(&sql, duckdb::params![collection])
             .map_err(|e| Error::StoreConnection {
@@ -392,8 +375,8 @@ impl AsyncDestroyCollection for DuckDBStore {
 #[async_trait]
 impl AsyncDestroyStore for DuckDBStore {
     async fn destroy(&self) -> Result<bool> {
-        let sql = format!("DROP TABLE IF EXISTS {}", self.table_name);
-        let guard = self.conn.lock().await;
+        let sql = format!("DROP TABLE IF EXISTS {}", self.config.table_name);
+        let guard = self.conn().lock().await;
         guard
             .execute(&sql, [])
             .map_err(|e| Error::StoreConnection {
