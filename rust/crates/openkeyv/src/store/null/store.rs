@@ -1,4 +1,6 @@
-use crate::error::Result;
+use super::client::NullClient;
+use super::config::NullConfig;
+use super::error::Result;
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -8,11 +10,21 @@ use async_trait::async_trait;
 
 /// A store that accepts all operations but stores nothing.
 /// Useful for testing and as a no-op fallback.
-pub struct NullStore;
+pub struct NullStore {
+    _client: NullClient,
+    _config: NullConfig,
+}
 
 impl NullStore {
     pub fn new() -> Self {
-        Self
+        Self::with_config(NullConfig)
+    }
+
+    pub fn with_config(config: NullConfig) -> Self {
+        Self {
+            _client: NullClient::new(),
+            _config: config,
+        }
     }
 }
 
