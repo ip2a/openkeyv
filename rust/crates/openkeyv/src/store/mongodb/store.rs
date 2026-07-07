@@ -1,5 +1,7 @@
+use super::client::MongoClient;
+use super::config::{DEFAULT_DB, MongoConfig};
+use super::error::{Error, Result, connection_err};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -8,49 +10,51 @@ use crate::value::Value;
 use async_trait::async_trait;
 use futures_util::stream::StreamExt;
 use mongodb::{
-    Client, Database, IndexModel,
+    Client, IndexModel,
     bson::{DateTime as BsonDateTime, Document, doc},
     options::UpdateOptions,
 };
 use std::collections::HashMap;
-
-const DEFAULT_COLLECTION: &str = "default_collection";
-const DEFAULT_DB: &str = "kv_store";
 
 /// MongoDB-backed key-value store.
 ///
 /// Each Rust collection maps to a MongoDB collection.
 /// Documents store `key`, `value` (as BSON), `created_at`, and `expires_at`.
 pub struct MongoStore {
-    db: Database,
-    default_collection: String,
+    client: MongoClient,
+    config: MongoConfig,
 }
 
 impl MongoStore {
     pub async fn new(url: impl AsRef<str>) -> Result<Self> {
-        let client =
-            Client::with_uri_str(url.as_ref())
-                .await
-                .map_err(|e| Error::StoreConnection {
-                    message: format!("failed to connect to mongodb: {e}"),
-                })?;
+        let client = Client::with_uri_str(url.as_ref())
+            .await
+            .map_err(|e| connection_err(format!("failed to connect to mongodb: {e}")))?;
         let db = client.database(DEFAULT_DB);
         Self::from_database(db).await
     }
 
-    pub async fn from_database(db: Database) -> Result<Self> {
-        Ok(Self {
-            db,
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        })
+    pub async fn from_database(db: mongodb::Database) -> Result<Self> {
+        Ok(Self::with_config(db, MongoConfig::new(None)))
+    }
+
+    pub fn with_config(db: mongodb::Database, config: MongoConfig) -> Self {
+        Self {
+            client: MongoClient::new(db),
+            config,
+        }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
+    }
+
+    fn db(&self) -> &mongodb::Database {
+        self.client.db()
     }
 
     async fn get_collection(&self, name: &str) -> Result<mongodb::Collection<Document>> {
-        let coll = self.db.collection::<Document>(name);
+        let coll = self.db().collection::<Document>(name);
 
         let key_index = IndexModel::builder().keys(doc! {"key": 1}).build();
         coll.create_index(key_index)
@@ -357,13 +361,13 @@ impl AsyncEnumerateKeys for MongoStore {
 impl AsyncEnumerateCollections for MongoStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
         let limit = limit.unwrap_or(10_000).min(10_000);
-        let names = self
-            .db
-            .list_collection_names()
-            .await
-            .map_err(|e| Error::StoreConnection {
-                message: format!("failed to list collections: {e}"),
-            })?;
+        let names =
+            self.db()
+                .list_collection_names()
+                .await
+                .map_err(|e| Error::StoreConnection {
+                    message: format!("failed to list collections: {e}"),
+                })?;
         Ok(names.into_iter().take(limit).collect())
     }
 }
@@ -371,7 +375,7 @@ impl AsyncEnumerateCollections for MongoStore {
 #[async_trait]
 impl AsyncDestroyCollection for MongoStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let coll = self.db.collection::<Document>(collection);
+        let coll = self.db().collection::<Document>(collection);
         coll.drop().await.map_err(|e| Error::StoreConnection {
             message: format!("failed to drop collection: {e}"),
         })?;
@@ -382,15 +386,15 @@ impl AsyncDestroyCollection for MongoStore {
 #[async_trait]
 impl AsyncDestroyStore for MongoStore {
     async fn destroy(&self) -> Result<bool> {
-        let names = self
-            .db
-            .list_collection_names()
-            .await
-            .map_err(|e| Error::StoreConnection {
-                message: format!("failed to list collections: {e}"),
-            })?;
+        let names =
+            self.db()
+                .list_collection_names()
+                .await
+                .map_err(|e| Error::StoreConnection {
+                    message: format!("failed to list collections: {e}"),
+                })?;
         for name in names {
-            let coll = self.db.collection::<Document>(&name);
+            let coll = self.db().collection::<Document>(&name);
             coll.drop().await.map_err(|e| Error::StoreConnection {
                 message: format!("failed to drop collection: {e}"),
             })?;
