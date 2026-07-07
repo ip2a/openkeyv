@@ -1,24 +1,19 @@
+use super::client::RedisClient;
+use super::config::RedisConfig;
+use super::error::{Error, Result, map_redis_err};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
 use crate::value::Value;
 use async_trait::async_trait;
-use redis::{AsyncCommands, RedisError};
+use redis::AsyncCommands;
 
-const DEFAULT_COLLECTION: &str = "default_collection";
 const COLLECTION_SEPARATOR: &str = ":";
 
 fn compound_key(collection: &str, key: &str) -> String {
     format!("{}{}{}", collection, COLLECTION_SEPARATOR, key)
-}
-
-fn map_redis_err(e: RedisError) -> Error {
-    Error::StoreConnection {
-        message: e.to_string(),
-    }
 }
 
 /// Redis-backed key-value store.
@@ -26,8 +21,8 @@ fn map_redis_err(e: RedisError) -> Error {
 /// Each collection is represented by a key prefix in Redis.
 /// Values are stored as JSON-serialized `ManagedEntry` strings.
 pub struct RedisStore {
-    conn: redis::aio::MultiplexedConnection,
-    default_collection: String,
+    client: RedisClient,
+    config: RedisConfig,
 }
 
 impl RedisStore {
@@ -37,10 +32,7 @@ impl RedisStore {
             .get_multiplexed_tokio_connection()
             .await
             .map_err(map_redis_err)?;
-        Ok(Self {
-            conn,
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        })
+        Ok(Self::with_config(conn, RedisConfig::default()))
     }
 
     pub async fn from_client(client: redis::Client) -> Result<Self> {
@@ -48,14 +40,22 @@ impl RedisStore {
             .get_multiplexed_tokio_connection()
             .await
             .map_err(map_redis_err)?;
-        Ok(Self {
-            conn,
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        })
+        Ok(Self::with_config(conn, RedisConfig::default()))
+    }
+
+    pub fn with_config(conn: redis::aio::MultiplexedConnection, config: RedisConfig) -> Self {
+        Self {
+            client: RedisClient::new(conn),
+            config,
+        }
+    }
+
+    fn connection(&self) -> redis::aio::MultiplexedConnection {
+        self.client.connection()
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
     }
 }
 
@@ -64,7 +64,7 @@ impl AsyncKeyValue for RedisStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let res: Option<String> = conn.get(&ck).await.map_err(map_redis_err)?;
         match res {
             Some(json) => {
@@ -83,7 +83,7 @@ impl AsyncKeyValue for RedisStore {
     async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let res: Option<String> = conn.get(&ck).await.map_err(map_redis_err)?;
         match res {
             Some(json) => {
@@ -115,7 +115,7 @@ impl AsyncKeyValue for RedisStore {
         };
         let json =
             serde_json::to_string(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         match ttl {
             Some(seconds) => {
                 let secs = seconds as u64;
@@ -131,7 +131,7 @@ impl AsyncKeyValue for RedisStore {
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let res: i64 = conn.del(&ck).await.map_err(map_redis_err)?;
         Ok(res > 0)
     }
@@ -143,7 +143,7 @@ impl AsyncKeyValue for RedisStore {
     ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
         let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let res: Vec<Option<String>> = conn.mget(&cks).await.map_err(map_redis_err)?;
         res.into_iter()
             .map(|opt| match opt {
@@ -168,7 +168,7 @@ impl AsyncKeyValue for RedisStore {
     ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
         let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let res: Vec<Option<String>> = conn.mget(&cks).await.map_err(map_redis_err)?;
         res.into_iter()
             .map(|opt| match opt {
@@ -201,7 +201,7 @@ impl AsyncKeyValue for RedisStore {
             });
         }
         let cname = self.collection_name(collection);
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
 
         if let Some(seconds) = ttl {
             let secs = seconds as u64;
@@ -229,7 +229,7 @@ impl AsyncKeyValue for RedisStore {
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
         let cname = self.collection_name(collection);
         let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let res: i64 = conn.del(&cks).await.map_err(map_redis_err)?;
         Ok(res as usize)
     }
@@ -248,7 +248,7 @@ impl AsyncEnumerateKeys for RedisStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
         let cname = self.collection_name(collection);
         let prefix = format!("{}{}", cname, COLLECTION_SEPARATOR);
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let pattern = format!("{}*", prefix);
         let keys: Vec<String> = redis::cmd("KEYS")
             .arg(&pattern)
@@ -267,7 +267,7 @@ impl AsyncEnumerateKeys for RedisStore {
 #[async_trait]
 impl AsyncEnumerateCollections for RedisStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let keys: Vec<String> = redis::cmd("KEYS")
             .arg("*")
             .query_async(&mut conn)
@@ -288,7 +288,7 @@ impl AsyncEnumerateCollections for RedisStore {
 impl AsyncDestroyCollection for RedisStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
         let prefix = format!("{}{}*", collection, COLLECTION_SEPARATOR);
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let keys: Vec<String> = redis::cmd("KEYS")
             .arg(&prefix)
             .query_async(&mut conn)
@@ -305,7 +305,7 @@ impl AsyncDestroyCollection for RedisStore {
 #[async_trait]
 impl AsyncDestroyStore for RedisStore {
     async fn destroy(&self) -> Result<bool> {
-        let mut conn = self.conn.clone();
+        let mut conn = self.connection();
         let _: () = redis::cmd("FLUSHDB")
             .query_async(&mut conn)
             .await
