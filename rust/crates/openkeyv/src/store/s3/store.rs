@@ -1,5 +1,7 @@
+use super::client::S3Client;
+use super::config::S3Config;
+use super::error::{Error, Result, build_err, is_s3_not_found};
 use crate::entry::ManagedEntry;
-use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -9,53 +11,46 @@ use async_trait::async_trait;
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use std::collections::HashMap;
 
-const DEFAULT_COLLECTION: &str = "default_collection";
-
-fn build_err(e: aws_sdk_s3::error::BuildError) -> Error {
-    Error::StoreSetup {
-        message: e.to_string(),
-    }
-}
-
-fn is_s3_not_found<E, R>(e: &aws_sdk_s3::error::SdkError<E, R>) -> bool {
-    let msg = format!("{}", e);
-    msg.contains("NoSuchKey") || msg.contains("404") || msg.contains("NotFound")
-}
-
 /// AWS S3-backed key-value store.
 ///
 /// Each entry is stored as an S3 object with the path `{collection}/{key}`.
 /// Values are JSON-serialized `ManagedEntry` bytes.
 /// TTL is checked client-side; S3 lifecycle policies can be configured separately.
 pub struct S3Store {
-    client: aws_sdk_s3::Client,
-    bucket_name: String,
-    default_collection: String,
+    client: S3Client,
+    config: S3Config,
 }
 
 impl S3Store {
     pub async fn new(bucket_name: impl Into<String>) -> Result<Self> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_s3::Client::new(&config);
-        let store = Self {
-            client,
-            bucket_name: bucket_name.into(),
-            default_collection: DEFAULT_COLLECTION.to_string(),
-        };
+        let store = Self::with_config(client, S3Config::new(bucket_name, None));
         store.ensure_bucket().await?;
         Ok(store)
     }
 
     pub fn from_client(client: aws_sdk_s3::Client, bucket_name: impl Into<String>) -> Self {
+        Self::with_config(client, S3Config::new(bucket_name, None))
+    }
+
+    pub fn with_config(client: aws_sdk_s3::Client, config: S3Config) -> Self {
         Self {
-            client,
-            bucket_name: bucket_name.into(),
-            default_collection: DEFAULT_COLLECTION.to_string(),
+            client: S3Client::new(client),
+            config,
         }
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.default_collection)
+        collection.unwrap_or(&self.config.default_collection)
+    }
+
+    fn bucket_name(&self) -> &str {
+        &self.config.bucket_name
+    }
+
+    fn client(&self) -> &aws_sdk_s3::Client {
+        self.client.client()
     }
 
     fn s3_key(collection: &str, key: &str) -> String {
@@ -64,16 +59,16 @@ impl S3Store {
 
     async fn ensure_bucket(&self) -> Result<()> {
         let exists = self
-            .client
+            .client()
             .head_bucket()
-            .bucket(&self.bucket_name)
+            .bucket(self.bucket_name())
             .send()
             .await
             .is_ok();
         if !exists {
-            self.client
+            self.client()
                 .create_bucket()
-                .bucket(&self.bucket_name)
+                .bucket(self.bucket_name())
                 .send()
                 .await
                 .map_err(|e| Error::StoreConnection {
@@ -85,9 +80,9 @@ impl S3Store {
 
     async fn get_object_bytes(&self, s3_key: &str) -> Result<Option<Vec<u8>>> {
         match self
-            .client
+            .client()
             .get_object()
-            .bucket(&self.bucket_name)
+            .bucket(self.bucket_name())
             .key(s3_key)
             .send()
             .await
@@ -117,9 +112,9 @@ impl S3Store {
         metadata: Option<HashMap<String, String>>,
     ) -> Result<()> {
         let mut req = self
-            .client
+            .client()
             .put_object()
-            .bucket(&self.bucket_name)
+            .bucket(self.bucket_name())
             .key(s3_key)
             .body(bytes.into());
         if let Some(meta) = metadata {
@@ -145,9 +140,9 @@ impl AsyncKeyValue for S3Store {
                     .map_err(|e| Error::Deserialization(e.to_string()))?;
                 if entry.is_expired() {
                     let _ = self
-                        .client
+                        .client()
                         .delete_object()
-                        .bucket(&self.bucket_name)
+                        .bucket(self.bucket_name())
                         .key(&sk)
                         .send()
                         .await;
@@ -169,9 +164,9 @@ impl AsyncKeyValue for S3Store {
                     .map_err(|e| Error::Deserialization(e.to_string()))?;
                 if entry.is_expired() {
                     let _ = self
-                        .client
+                        .client()
                         .delete_object()
-                        .bucket(&self.bucket_name)
+                        .bucket(self.bucket_name())
                         .key(&sk)
                         .send()
                         .await;
@@ -213,9 +208,9 @@ impl AsyncKeyValue for S3Store {
         let cname = self.collection_name(collection);
         let sk = Self::s3_key(cname, key);
         // S3 delete is idempotent; attempt deletion and treat as success
-        self.client
+        self.client()
             .delete_object()
-            .bucket(&self.bucket_name)
+            .bucket(self.bucket_name())
             .key(&sk)
             .send()
             .await
@@ -302,7 +297,7 @@ impl AsyncCull for S3Store {
     async fn cull(&self) -> Result<()> {
         let mut continuation = None;
         loop {
-            let mut req = self.client.list_objects_v2().bucket(&self.bucket_name);
+            let mut req = self.client().list_objects_v2().bucket(self.bucket_name());
             if let Some(token) = continuation {
                 req = req.continuation_token(token);
             }
@@ -316,9 +311,9 @@ impl AsyncCull for S3Store {
                             if let Ok(entry) = serde_json::from_slice::<ManagedEntry>(&bytes) {
                                 if entry.is_expired() {
                                     let _ = self
-                                        .client
+                                        .client()
                                         .delete_object()
-                                        .bucket(&self.bucket_name)
+                                        .bucket(self.bucket_name())
                                         .key(&key)
                                         .send()
                                         .await;
@@ -347,9 +342,9 @@ impl AsyncEnumerateKeys for S3Store {
         let mut continuation = None;
         loop {
             let mut req = self
-                .client
+                .client()
                 .list_objects_v2()
-                .bucket(&self.bucket_name)
+                .bucket(self.bucket_name())
                 .prefix(&prefix);
             if let Some(token) = continuation {
                 req = req.continuation_token(token);
@@ -383,7 +378,7 @@ impl AsyncEnumerateCollections for S3Store {
         let mut collections = std::collections::HashSet::new();
         let mut continuation = None;
         loop {
-            let mut req = self.client.list_objects_v2().bucket(&self.bucket_name);
+            let mut req = self.client().list_objects_v2().bucket(self.bucket_name());
             if let Some(token) = continuation {
                 req = req.continuation_token(token);
             }
@@ -418,9 +413,9 @@ impl AsyncDestroyCollection for S3Store {
         let mut continuation = None;
         loop {
             let mut req = self
-                .client
+                .client()
                 .list_objects_v2()
-                .bucket(&self.bucket_name)
+                .bucket(self.bucket_name())
                 .prefix(&prefix);
             if let Some(token) = continuation {
                 req = req.continuation_token(token);
@@ -458,9 +453,9 @@ impl AsyncDestroyCollection for S3Store {
                 .set_objects(Some(objects))
                 .build()
                 .map_err(build_err)?;
-            self.client
+            self.client()
                 .delete_objects()
-                .bucket(&self.bucket_name)
+                .bucket(self.bucket_name())
                 .delete(delete)
                 .send()
                 .await
@@ -478,7 +473,7 @@ impl AsyncDestroyStore for S3Store {
         // Delete all objects then the bucket
         let mut continuation = None;
         loop {
-            let mut req = self.client.list_objects_v2().bucket(&self.bucket_name);
+            let mut req = self.client().list_objects_v2().bucket(self.bucket_name());
             if let Some(token) = continuation {
                 req = req.continuation_token(token);
             }
@@ -501,9 +496,9 @@ impl AsyncDestroyStore for S3Store {
                         .set_objects(Some(objects))
                         .build()
                         .map_err(build_err)?;
-                    self.client
+                    self.client()
                         .delete_objects()
-                        .bucket(&self.bucket_name)
+                        .bucket(self.bucket_name())
                         .delete(delete)
                         .send()
                         .await
@@ -517,9 +512,9 @@ impl AsyncDestroyStore for S3Store {
             }
             continuation = res.next_continuation_token;
         }
-        self.client
+        self.client()
             .delete_bucket()
-            .bucket(&self.bucket_name)
+            .bucket(self.bucket_name())
             .send()
             .await
             .map_err(|e| Error::StoreConnection {
