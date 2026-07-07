@@ -51,4 +51,4 @@ pub use protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
-pub use value::{Value, ValueKind};
+pub use value::{StructuredValue, Value, ValueKind};

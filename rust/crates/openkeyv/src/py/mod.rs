@@ -1,5 +1,6 @@
+pub mod error;
 pub mod stores;
-pub mod utils;
+pub mod value;
 
 use pyo3::prelude::*;
 
