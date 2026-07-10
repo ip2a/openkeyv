@@ -8,6 +8,7 @@ use crate::protocol::{
 };
 use crate::value::Value;
 use async_trait::async_trait;
+use bytes::Bytes;
 use std::path::Path;
 
 const COLLECTION_SEPARATOR: &str = ":";
@@ -19,7 +20,7 @@ fn compound_key(collection: &str, key: &str) -> String {
 /// RocksDB-backed key-value store.
 ///
 /// Each collection is represented by a key prefix.
-/// Values are stored as JSON-serialized `ManagedEntry` bytes.
+/// Values are stored as `OKVE1`-encoded `ManagedEntry` bytes.
 pub struct RocksDBStore {
     client: RocksDBClient,
     config: RocksDBConfig,
@@ -56,8 +57,7 @@ impl RocksDBStore {
         let ck = compound_key(collection, key);
         match self.db().get(&ck).map_err(map_rocksdb_err)? {
             Some(bytes) => {
-                let entry: ManagedEntry = serde_json::from_slice(&bytes)
-                    .map_err(|e| Error::Deserialization(e.to_string()))?;
+                let entry = ManagedEntry::decode(Bytes::from(bytes))?;
                 if entry.is_expired() {
                     Ok(None)
                 } else {
@@ -70,8 +70,9 @@ impl RocksDBStore {
 
     fn put_entry(&self, key: &str, collection: &str, entry: &ManagedEntry) -> Result<()> {
         let ck = compound_key(collection, key);
-        let bytes = serde_json::to_vec(entry).map_err(|e| Error::Serialization(e.to_string()))?;
-        self.db().put(&ck, bytes).map_err(map_rocksdb_err)?;
+        self.db()
+            .put(&ck, entry.encode())
+            .map_err(map_rocksdb_err)?;
         Ok(())
     }
 }
@@ -123,11 +124,22 @@ impl AsyncKeyValue for RocksDBStore {
         collection: Option<&str>,
     ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
-        let mut results = Vec::with_capacity(keys.len());
-        for key in keys {
-            results.push(self.get_entry(key, cname)?.map(|e| e.value));
-        }
-        Ok(results)
+        let compound_keys: Vec<String> = keys.iter().map(|key| compound_key(cname, key)).collect();
+        self.db()
+            .multi_get(&compound_keys)
+            .into_iter()
+            .map(|result| match result.map_err(map_rocksdb_err)? {
+                Some(bytes) => {
+                    let entry = ManagedEntry::decode(Bytes::from(bytes))?;
+                    if entry.is_expired() {
+                        Ok(None)
+                    } else {
+                        Ok(Some(entry.value))
+                    }
+                }
+                None => Ok(None),
+            })
+            .collect()
     }
 
     async fn ttl_many(
@@ -136,17 +148,23 @@ impl AsyncKeyValue for RocksDBStore {
         collection: Option<&str>,
     ) -> Result<Vec<Option<(Value, f64)>>> {
         let cname = self.collection_name(collection);
-        let mut results = Vec::with_capacity(keys.len());
-        for key in keys {
-            match self.get_entry(key, cname)? {
-                Some(entry) => {
-                    let ttl = entry.ttl().unwrap_or(0.0);
-                    results.push(Some((entry.value, ttl)));
+        let compound_keys: Vec<String> = keys.iter().map(|key| compound_key(cname, key)).collect();
+        self.db()
+            .multi_get(&compound_keys)
+            .into_iter()
+            .map(|result| match result.map_err(map_rocksdb_err)? {
+                Some(bytes) => {
+                    let entry = ManagedEntry::decode(Bytes::from(bytes))?;
+                    if entry.is_expired() {
+                        Ok(None)
+                    } else {
+                        let ttl = entry.ttl().unwrap_or(0.0);
+                        Ok(Some((entry.value, ttl)))
+                    }
                 }
-                None => results.push(None),
-            }
-        }
-        Ok(results)
+                None => Ok(None),
+            })
+            .collect()
     }
 
     async fn put_many(
@@ -170,9 +188,7 @@ impl AsyncKeyValue for RocksDBStore {
                 None => ManagedEntry::new(value.clone()),
             };
             let ck = compound_key(cname, key);
-            let bytes =
-                serde_json::to_vec(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
-            batch.put(&ck, bytes);
+            batch.put(&ck, entry.encode());
         }
         self.db().write(batch).map_err(map_rocksdb_err)?;
         Ok(())
@@ -201,10 +217,9 @@ impl AsyncCull for RocksDBStore {
         let iter = self.db().iterator(rocksdb::IteratorMode::Start);
         for item in iter {
             let (k, v) = item.map_err(map_rocksdb_err)?;
-            if let Ok(entry) = serde_json::from_slice::<ManagedEntry>(&v) {
-                if entry.is_expired() {
-                    batch.delete(&k);
-                }
+            let entry = ManagedEntry::decode(Bytes::from(v))?;
+            if entry.is_expired() {
+                batch.delete(&k);
             }
         }
         self.db().write(batch).map_err(map_rocksdb_err)?;
@@ -222,11 +237,12 @@ impl AsyncEnumerateKeys for RocksDBStore {
         let iter = self.db().prefix_iterator(prefix.as_bytes());
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
-            if let Ok(s) = std::str::from_utf8(&k) {
-                if let Some(stripped) = s.strip_prefix(&prefix) {
-                    keys.push(stripped.to_string());
-                }
-            }
+            let key = std::str::from_utf8(&k)
+                .map_err(|error| Error::Deserialization(error.to_string()))?;
+            let Some(stripped) = key.strip_prefix(&prefix) else {
+                break;
+            };
+            keys.push(stripped.to_string());
             if keys.len() >= limit {
                 break;
             }
@@ -243,11 +259,12 @@ impl AsyncEnumerateCollections for RocksDBStore {
         let iter = self.db().iterator(rocksdb::IteratorMode::Start);
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
-            if let Ok(s) = std::str::from_utf8(&k) {
-                if let Some(pos) = s.find(COLLECTION_SEPARATOR) {
-                    collections.insert(s[..pos].to_string());
-                }
-            }
+            let key = std::str::from_utf8(&k)
+                .map_err(|error| Error::Deserialization(error.to_string()))?;
+            let separator = key.find(COLLECTION_SEPARATOR).ok_or_else(|| {
+                Error::Deserialization("invalid RocksDB compound key".to_string())
+            })?;
+            collections.insert(key[..separator].to_string());
             if collections.len() >= limit {
                 break;
             }
@@ -302,6 +319,110 @@ mod tests {
         store.put("user1", value.clone(), None, None).await.unwrap();
         let got = store.get("user1", None).await.unwrap();
         assert_eq!(got, Some(value));
+
+        let key = compound_key(store.collection_name(None), "user1");
+        let bytes = store.db().get(key).unwrap().unwrap();
+        assert!(bytes.starts_with(b"OKVE1"));
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_store_batch_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RocksDBStore::new(tmp.path()).unwrap();
+        let keys = vec!["one".to_string(), "two".to_string()];
+        let values = vec![Value::integer(1), Value::integer(2)];
+
+        store.put_many(&keys, &values, None, None).await.unwrap();
+
+        assert_eq!(
+            store.get_many(&keys, None).await.unwrap(),
+            vec![Some(values[0].clone()), Some(values[1].clone()),]
+        );
+        for key in keys {
+            let key = compound_key(store.collection_name(None), &key);
+            let bytes = store.db().get(key).unwrap().unwrap();
+            assert!(bytes.starts_with(b"OKVE1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_batch_reads_preserve_order_and_expiration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RocksDBStore::new(tmp.path()).unwrap();
+        let persistent = Value::utf8("persistent");
+        let expiring = Value::utf8("expiring");
+
+        store
+            .put("persistent", persistent.clone(), None, None)
+            .await
+            .unwrap();
+        store
+            .put("expiring", expiring.clone(), None, Some(60.0))
+            .await
+            .unwrap();
+        store
+            .put("expired", Value::null(), None, Some(-1.0))
+            .await
+            .unwrap();
+
+        let keys = vec![
+            "persistent".to_string(),
+            "missing".to_string(),
+            "expired".to_string(),
+            "expiring".to_string(),
+        ];
+        assert_eq!(
+            store.get_many(&keys, None).await.unwrap(),
+            vec![Some(persistent.clone()), None, None, Some(expiring.clone()),]
+        );
+
+        let results = store.ttl_many(&keys, None).await.unwrap();
+        assert_eq!(results[0], Some((persistent, 0.0)));
+        assert_eq!(results[1], None);
+        assert_eq!(results[2], None);
+        let (value, ttl) = results[3].as_ref().unwrap();
+        assert_eq!(value, &expiring);
+        assert!(*ttl > 0.0 && *ttl <= 60.0);
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_store_rejects_json_entry_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RocksDBStore::new(tmp.path()).unwrap();
+        let key = compound_key(store.collection_name(None), "json-entry");
+        store.db().put(key, br#"{"value":null}"#).unwrap();
+
+        let err = store.get("json-entry", None).await.unwrap_err();
+
+        assert!(err.to_string().contains("invalid OpenKeyV entry magic"));
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_cull_rejects_corrupt_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RocksDBStore::new(tmp.path()).unwrap();
+        let key = compound_key(store.collection_name(None), "corrupt");
+        store.db().put(key, b"corrupt").unwrap();
+
+        let err = store.cull().await.unwrap_err();
+
+        assert!(err.to_string().contains("invalid OpenKeyV entry magic"));
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_enumeration_rejects_invalid_key_encoding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RocksDBStore::new(tmp.path()).unwrap();
+        let mut key =
+            format!("{}{}", store.collection_name(None), COLLECTION_SEPARATOR).into_bytes();
+        key.push(0xff);
+        store
+            .db()
+            .put(key, ManagedEntry::new(Value::null()).encode())
+            .unwrap();
+
+        assert!(store.keys(None, None).await.is_err());
+        assert!(store.collections(None).await.is_err());
     }
 
     #[tokio::test]
