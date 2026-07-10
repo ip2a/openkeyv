@@ -2,6 +2,7 @@ mod codec;
 
 use crate::error::Result;
 use crate::value::Value;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -66,11 +67,11 @@ impl ManagedEntry {
         self.value.len() + std::mem::size_of::<Self>()
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>> {
+    pub fn encode(&self) -> Vec<u8> {
         codec::encode(self)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
+    pub fn decode(bytes: Bytes) -> Result<Self> {
         codec::decode(bytes)
     }
 }

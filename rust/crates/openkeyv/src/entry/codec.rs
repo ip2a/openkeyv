@@ -1,16 +1,17 @@
 use super::ManagedEntry;
 use crate::error::{Error, Result};
 use crate::value::{Value, ValueKind};
+use bytes::Bytes;
 use chrono::{DateTime, TimeZone, Utc};
 
 const MAGIC: &[u8; 5] = b"OKVE1";
 const FLAG_CREATED_AT: u8 = 0b0000_0001;
 const FLAG_EXPIRES_AT: u8 = 0b0000_0010;
+const FIXED_HEADER_LEN: usize = MAGIC.len() + 1 + 1 + 8;
 
-pub(super) fn encode(entry: &ManagedEntry) -> Result<Vec<u8>> {
+pub(super) fn encode(entry: &ManagedEntry) -> Vec<u8> {
     let value_bytes = entry.value.bytes();
-    let value_len = u64::try_from(value_bytes.len())
-        .map_err(|_| Error::Serialization("entry value exceeds u64 length".to_string()))?;
+    let value_len = value_bytes.len() as u64;
 
     let mut flags = 0;
     if entry.created_at.is_some() {
@@ -22,7 +23,7 @@ pub(super) fn encode(entry: &ManagedEntry) -> Result<Vec<u8>> {
 
     let metadata_len =
         usize::from(entry.created_at.is_some()) * 8 + usize::from(entry.expires_at.is_some()) * 8;
-    let mut out = Vec::with_capacity(MAGIC.len() + 1 + 1 + 8 + metadata_len + value_bytes.len());
+    let mut out = Vec::with_capacity(FIXED_HEADER_LEN + metadata_len + value_bytes.len());
 
     out.extend_from_slice(MAGIC);
     out.push(entry.value.kind().tag());
@@ -37,24 +38,24 @@ pub(super) fn encode(entry: &ManagedEntry) -> Result<Vec<u8>> {
     }
 
     out.extend_from_slice(value_bytes);
-    Ok(out)
+    out
 }
 
-pub(super) fn decode(bytes: &[u8]) -> Result<ManagedEntry> {
+pub(super) fn decode(bytes: Bytes) -> Result<ManagedEntry> {
     let mut offset = 0;
-    let magic = read_array::<5>(bytes, &mut offset)?;
+    let magic = read_array::<5>(&bytes, &mut offset)?;
     if &magic != MAGIC {
         return Err(Error::Deserialization(
             "invalid OpenKeyV entry magic".to_string(),
         ));
     }
 
-    let kind_tag = read_u8(bytes, &mut offset)?;
+    let kind_tag = read_u8(&bytes, &mut offset)?;
     let kind = ValueKind::from_tag(kind_tag).ok_or_else(|| {
         Error::Deserialization(format!("invalid OpenKeyV entry value kind: {}", kind_tag))
     })?;
 
-    let flags = read_u8(bytes, &mut offset)?;
+    let flags = read_u8(&bytes, &mut offset)?;
     if flags & !(FLAG_CREATED_AT | FLAG_EXPIRES_AT) != 0 {
         return Err(Error::Deserialization(format!(
             "invalid OpenKeyV entry flags: {}",
@@ -62,14 +63,20 @@ pub(super) fn decode(bytes: &[u8]) -> Result<ManagedEntry> {
         )));
     }
 
-    let value_len = u64::from_le_bytes(read_array::<8>(bytes, &mut offset)?) as usize;
+    let encoded_value_len = u64::from_le_bytes(read_array::<8>(&bytes, &mut offset)?);
+    let value_len = usize::try_from(encoded_value_len).map_err(|_| {
+        Error::Deserialization(format!(
+            "OpenKeyV entry value length does not fit this platform: {}",
+            encoded_value_len
+        ))
+    })?;
     let created_at = if flags & FLAG_CREATED_AT != 0 {
-        Some(read_datetime(bytes, &mut offset)?)
+        Some(read_datetime(&bytes, &mut offset)?)
     } else {
         None
     };
     let expires_at = if flags & FLAG_EXPIRES_AT != 0 {
-        Some(read_datetime(bytes, &mut offset)?)
+        Some(read_datetime(&bytes, &mut offset)?)
     } else {
         None
     };
@@ -84,7 +91,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<ManagedEntry> {
     }
 
     Ok(ManagedEntry {
-        value: Value::new(kind, bytes[offset..end].to_vec()),
+        value: Value::new(kind, bytes.slice(offset..end)),
         created_at,
         expires_at,
     })
@@ -131,29 +138,101 @@ mod tests {
             expires_at: Some(created_at + TimeDelta::seconds(30)),
         };
 
-        let encoded = encode(&entry).unwrap();
-        let decoded = decode(&encoded).unwrap();
+        let encoded = encode(&entry);
+        let decoded = decode(encoded.into()).unwrap();
 
         assert_eq!(decoded, entry);
     }
 
     #[test]
     fn entry_codec_rejects_json_payloads() {
-        let err = decode(br#"{"value":null}"#).unwrap_err();
+        let err = decode(Bytes::from_static(br#"{"value":null}"#)).unwrap_err();
 
         assert!(err.to_string().contains("invalid OpenKeyV entry magic"));
     }
 
     #[test]
     fn entry_codec_rejects_unknown_value_kind() {
-        let mut encoded = encode(&ManagedEntry::new(Value::null())).unwrap();
+        let mut encoded = encode(&ManagedEntry::new(Value::null()));
         encoded[MAGIC.len()] = 250;
 
-        let err = decode(&encoded).unwrap_err();
+        let err = decode(encoded.into()).unwrap_err();
 
         assert!(
             err.to_string()
                 .contains("invalid OpenKeyV entry value kind")
         );
+    }
+
+    #[test]
+    fn entry_codec_roundtrips_every_value_kind() {
+        let values = [
+            Value::binary(Bytes::from_static(&[0, 1, 2])),
+            Value::utf8("hello"),
+            Value::integer(i64::MIN),
+            Value::float(std::f64::consts::PI),
+            Value::bool(true),
+            Value::null(),
+            Value::structured(Bytes::from_static(&[9, 8, 7])),
+        ];
+
+        for value in values {
+            let entry = ManagedEntry {
+                value,
+                created_at: None,
+                expires_at: None,
+            };
+
+            let decoded = decode(encode(&entry).into()).unwrap();
+
+            assert_eq!(decoded, entry);
+        }
+    }
+
+    #[test]
+    fn entry_codec_rejects_unknown_flags() {
+        let mut encoded = encode(&ManagedEntry::new(Value::null()));
+        encoded[MAGIC.len() + 1] = 0b1000_0000;
+
+        let err = decode(encoded.into()).unwrap_err();
+
+        assert!(err.to_string().contains("invalid OpenKeyV entry flags"));
+    }
+
+    #[test]
+    fn entry_codec_rejects_truncated_data() {
+        let encoded = encode(&ManagedEntry::with_ttl(Value::utf8("value"), 30.0));
+
+        for end in 0..encoded.len() {
+            assert!(decode(Bytes::copy_from_slice(&encoded[..end])).is_err());
+        }
+    }
+
+    #[test]
+    fn entry_codec_rejects_trailing_data() {
+        let mut encoded = encode(&ManagedEntry::new(Value::null()));
+        encoded.push(0);
+
+        let err = decode(encoded.into()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("entry length does not match payload")
+        );
+    }
+
+    #[test]
+    fn entry_codec_keeps_value_payload_zero_copy() {
+        let entry = ManagedEntry {
+            value: Value::binary(Bytes::from_static(&[1, 2, 3, 4])),
+            created_at: None,
+            expires_at: None,
+        };
+        let encoded = Bytes::from(encode(&entry));
+        let payload_ptr = encoded[FIXED_HEADER_LEN..].as_ptr();
+
+        let decoded = decode(encoded).unwrap();
+
+        assert_eq!(decoded.value.bytes().as_ptr(), payload_ptr);
     }
 }

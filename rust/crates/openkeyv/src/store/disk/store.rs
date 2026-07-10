@@ -8,14 +8,15 @@ use crate::protocol::{
 };
 use crate::value::Value;
 use async_trait::async_trait;
+use bytes::Bytes;
 use std::path::Path;
 
 fn entry_to_ivec(entry: &ManagedEntry) -> Result<sled::IVec> {
-    Ok(entry.encode()?.into())
+    Ok(entry.encode().into())
 }
 
 fn ivec_to_entry(iv: sled::IVec) -> Result<ManagedEntry> {
-    ManagedEntry::decode(iv.as_ref())
+    ManagedEntry::decode(Bytes::from_owner(iv))
 }
 
 /// Disk-backed store using [sled], an embedded key-value database.
