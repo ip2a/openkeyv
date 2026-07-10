@@ -8,9 +8,9 @@ use crate::protocol::{
 };
 use crate::value::Value;
 use async_trait::async_trait;
+use bytes::Bytes;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
@@ -46,7 +46,7 @@ fn collection_path(base: &Path, collection: &str) -> PathBuf {
 /// Async filesystem-based key-value store.
 ///
 /// Each collection is a directory under `base_path`.
-/// Each key is a file containing a JSON-serialized `ManagedEntry`.
+/// Each key is a file containing an `OKVE1`-encoded `ManagedEntry`.
 pub struct FileTreeStore {
     client: FileTreeClient,
     config: FileTreeConfig,
@@ -87,12 +87,8 @@ impl FileTreeStore {
     }
 
     async fn read_entry(&self, path: &Path) -> Result<Option<ManagedEntry>> {
-        match fs::read_to_string(path).await {
-            Ok(contents) => {
-                let entry: ManagedEntry = serde_json::from_str(&contents)
-                    .map_err(|e| Error::Deserialization(e.to_string()))?;
-                Ok(Some(entry))
-            }
+        match fs::read(path).await {
+            Ok(bytes) => Ok(Some(ManagedEntry::decode(Bytes::from(bytes))?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(Error::StoreConnection {
                 message: format!("failed to read file: {}", e),
@@ -101,14 +97,7 @@ impl FileTreeStore {
     }
 
     async fn write_entry(&self, path: &Path, entry: &ManagedEntry) -> Result<()> {
-        let json =
-            serde_json::to_string_pretty(entry).map_err(|e| Error::Serialization(e.to_string()))?;
-        let mut file = fs::File::create(path)
-            .await
-            .map_err(|e| Error::StoreConnection {
-                message: format!("failed to create file: {}", e),
-            })?;
-        file.write_all(json.as_bytes())
+        fs::write(path, entry.encode())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to write file: {}", e),
@@ -289,7 +278,11 @@ impl AsyncCull for FileTreeStore {
                     let file_path = file.path();
                     if let Some(content) = self.read_entry(&file_path).await? {
                         if content.is_expired() {
-                            fs::remove_file(&file_path).await.ok();
+                            fs::remove_file(&file_path).await.map_err(|e| {
+                                Error::StoreConnection {
+                                    message: format!("failed to remove expired file: {}", e),
+                                }
+                            })?;
                         }
                     }
                 }
@@ -402,6 +395,38 @@ mod tests {
         store.put("user1", value.clone(), None, None).await.unwrap();
         let got = store.get("user1", None).await.unwrap();
         assert_eq!(got, Some(value));
+
+        let path = safe_path(store.base_path(), store.collection_name(None), "user1").unwrap();
+        let bytes = fs::read(path).await.unwrap();
+        assert!(bytes.starts_with(b"OKVE1"));
+    }
+
+    #[tokio::test]
+    async fn test_filetree_store_rejects_json_entry_payload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileTreeStore::new(tmp.path());
+        let collection = store.collection_name(None);
+        store.ensure_collection_dir(collection).await.unwrap();
+        let path = safe_path(store.base_path(), collection, "legacy").unwrap();
+        fs::write(path, br#"{"value":null}"#).await.unwrap();
+
+        let err = store.get("legacy", None).await.unwrap_err();
+
+        assert!(err.to_string().contains("invalid OpenKeyV entry magic"));
+    }
+
+    #[tokio::test]
+    async fn test_filetree_cull_rejects_corrupt_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileTreeStore::new(tmp.path());
+        let collection = store.collection_name(None);
+        store.ensure_collection_dir(collection).await.unwrap();
+        let path = safe_path(store.base_path(), collection, "corrupt").unwrap();
+        fs::write(path, b"corrupt").await.unwrap();
+
+        let err = store.cull().await.unwrap_err();
+
+        assert!(err.to_string().contains("invalid OpenKeyV entry magic"));
     }
 
     #[tokio::test]
