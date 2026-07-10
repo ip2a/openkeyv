@@ -60,11 +60,12 @@ memcached = ["dep:memcache"]
 valkey = ["dep:redis"]
 vault = ["dep:vaultrs"]
 keyring = ["dep:keyring"]
-firestore = ["dep:firestore"]
+firestore = ["dep:firestore", "dep:futures-util"]
 opensearch = ["dep:opensearch"]
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
 python-full = ["python", "disk", "redis", "postgres", "mongodb", "rocksdb", "dynamodb", "s3", "duckdb", "memcached", "valkey", "vault", "keyring", "firestore", "opensearch"]
 
 [dev-dependencies]
+gcloud-sdk = "0.29"
 tokio-test = "0.4"
 tempfile = "3.14"
