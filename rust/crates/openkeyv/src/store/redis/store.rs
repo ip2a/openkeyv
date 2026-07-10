@@ -8,6 +8,7 @@ use crate::protocol::{
 };
 use crate::value::Value;
 use async_trait::async_trait;
+use bytes::Bytes;
 use redis::AsyncCommands;
 
 const COLLECTION_SEPARATOR: &str = ":";
@@ -19,7 +20,7 @@ fn compound_key(collection: &str, key: &str) -> String {
 /// Redis-backed key-value store.
 ///
 /// Each collection is represented by a key prefix in Redis.
-/// Values are stored as JSON-serialized `ManagedEntry` strings.
+/// Values are stored as `OKVE1`-encoded `ManagedEntry` bytes.
 pub struct RedisStore {
     client: RedisClient,
     config: RedisConfig,
@@ -65,11 +66,10 @@ impl AsyncKeyValue for RedisStore {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
         let mut conn = self.connection();
-        let res: Option<String> = conn.get(&ck).await.map_err(map_redis_err)?;
+        let res: Option<Vec<u8>> = conn.get(&ck).await.map_err(map_redis_err)?;
         match res {
-            Some(json) => {
-                let entry: ManagedEntry = serde_json::from_str(&json)
-                    .map_err(|e| Error::Deserialization(e.to_string()))?;
+            Some(bytes) => {
+                let entry = ManagedEntry::decode(Bytes::from(bytes))?;
                 if entry.is_expired() {
                     Ok(None)
                 } else {
@@ -84,11 +84,10 @@ impl AsyncKeyValue for RedisStore {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
         let mut conn = self.connection();
-        let res: Option<String> = conn.get(&ck).await.map_err(map_redis_err)?;
+        let res: Option<Vec<u8>> = conn.get(&ck).await.map_err(map_redis_err)?;
         match res {
-            Some(json) => {
-                let entry: ManagedEntry = serde_json::from_str(&json)
-                    .map_err(|e| Error::Deserialization(e.to_string()))?;
+            Some(bytes) => {
+                let entry = ManagedEntry::decode(Bytes::from(bytes))?;
                 if entry.is_expired() {
                     Ok(None)
                 } else {
@@ -113,16 +112,17 @@ impl AsyncKeyValue for RedisStore {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds),
             None => ManagedEntry::new(value),
         };
-        let json =
-            serde_json::to_string(&entry).map_err(|e| Error::Serialization(e.to_string()))?;
         let mut conn = self.connection();
         match ttl {
             Some(seconds) => {
-                let secs = seconds as u64;
-                let _: () = conn.set_ex(ck, json, secs).await.map_err(map_redis_err)?;
+                let milliseconds = (seconds * 1000.0) as u64;
+                let _: () = conn
+                    .pset_ex(ck, entry.encode(), milliseconds)
+                    .await
+                    .map_err(map_redis_err)?;
             }
             None => {
-                let _: () = conn.set(ck, json).await.map_err(map_redis_err)?;
+                let _: () = conn.set(ck, entry.encode()).await.map_err(map_redis_err)?;
             }
         }
         Ok(())
@@ -144,12 +144,11 @@ impl AsyncKeyValue for RedisStore {
         let cname = self.collection_name(collection);
         let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
         let mut conn = self.connection();
-        let res: Vec<Option<String>> = conn.mget(&cks).await.map_err(map_redis_err)?;
+        let res: Vec<Option<Vec<u8>>> = conn.mget(&cks).await.map_err(map_redis_err)?;
         res.into_iter()
             .map(|opt| match opt {
-                Some(json) => {
-                    let entry: ManagedEntry = serde_json::from_str(&json)
-                        .map_err(|e| Error::Deserialization(e.to_string()))?;
+                Some(bytes) => {
+                    let entry = ManagedEntry::decode(Bytes::from(bytes))?;
                     if entry.is_expired() {
                         Ok(None)
                     } else {
@@ -169,12 +168,11 @@ impl AsyncKeyValue for RedisStore {
         let cname = self.collection_name(collection);
         let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
         let mut conn = self.connection();
-        let res: Vec<Option<String>> = conn.mget(&cks).await.map_err(map_redis_err)?;
+        let res: Vec<Option<Vec<u8>>> = conn.mget(&cks).await.map_err(map_redis_err)?;
         res.into_iter()
             .map(|opt| match opt {
-                Some(json) => {
-                    let entry: ManagedEntry = serde_json::from_str(&json)
-                        .map_err(|e| Error::Deserialization(e.to_string()))?;
+                Some(bytes) => {
+                    let entry = ManagedEntry::decode(Bytes::from(bytes))?;
                     if entry.is_expired() {
                         Ok(None)
                     } else {
@@ -202,27 +200,23 @@ impl AsyncKeyValue for RedisStore {
         }
         let cname = self.collection_name(collection);
         let mut conn = self.connection();
+        let mut pipe = redis::pipe();
 
         if let Some(seconds) = ttl {
-            let secs = seconds as u64;
+            let milliseconds = (seconds * 1000.0) as u64;
             for (key, value) in keys.iter().zip(values.iter()) {
                 let ck = compound_key(cname, key);
                 let entry = ManagedEntry::with_ttl(value.clone(), seconds);
-                let json = serde_json::to_string(&entry)
-                    .map_err(|e| Error::Serialization(e.to_string()))?;
-                let _: () = conn.set_ex(ck, json, secs).await.map_err(map_redis_err)?;
+                pipe.pset_ex(ck, entry.encode(), milliseconds).ignore();
             }
         } else {
-            let mut pipe = redis::pipe();
             for (key, value) in keys.iter().zip(values.iter()) {
                 let ck = compound_key(cname, key);
                 let entry = ManagedEntry::new(value.clone());
-                let json = serde_json::to_string(&entry)
-                    .map_err(|e| Error::Serialization(e.to_string()))?;
-                pipe.set(ck, json).ignore();
+                pipe.set(ck, entry.encode()).ignore();
             }
-            let _: () = pipe.query_async(&mut conn).await.map_err(map_redis_err)?;
         }
+        let _: () = pipe.query_async(&mut conn).await.map_err(map_redis_err)?;
         Ok(())
     }
 
@@ -311,5 +305,93 @@ impl AsyncDestroyStore for RedisStore {
             .await
             .map_err(map_redis_err)?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_store_uses_binary_entries_and_native_ttl() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let store = RedisStore::new(&url).await.unwrap();
+        let collection = format!("openkeyv_binary_test_{}", std::process::id());
+        let _ = store.destroy_collection(&collection).await.unwrap();
+
+        let value = Value::binary(Bytes::from_static(&[0, 255, 1]));
+        store
+            .put("single", value.clone(), Some(&collection), Some(10.5))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("single", Some(&collection)).await.unwrap(),
+            Some(value)
+        );
+
+        let key = compound_key(&collection, "single");
+        let mut conn = store.connection();
+        let bytes: Vec<u8> = conn.get(&key).await.unwrap();
+        assert!(bytes.starts_with(b"OKVE1"));
+        let ttl: i64 = redis::cmd("PTTL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(ttl > 10_000 && ttl <= 10_500);
+
+        let keys = vec!["one".to_string(), "two".to_string()];
+        let values = vec![Value::integer(1), Value::integer(2)];
+        store
+            .put_many(&keys, &values, Some(&collection), Some(10.5))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_many(&keys, Some(&collection)).await.unwrap(),
+            vec![Some(values[0].clone()), Some(values[1].clone())]
+        );
+        for key in keys {
+            let key = compound_key(&collection, &key);
+            let bytes: Vec<u8> = conn.get(&key).await.unwrap();
+            assert!(bytes.starts_with(b"OKVE1"));
+            let ttl: i64 = redis::cmd("PTTL")
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(ttl > 10_000 && ttl <= 10_500);
+        }
+
+        store
+            .put_many(&[], &[], Some(&collection), Some(10.5))
+            .await
+            .unwrap();
+
+        assert!(store.destroy_collection(&collection).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_store_rejects_json_entry_payload() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let store = RedisStore::new(&url).await.unwrap();
+        let collection = format!("openkeyv_json_test_{}", std::process::id());
+        let _ = store.destroy_collection(&collection).await.unwrap();
+
+        let key = compound_key(&collection, "json-entry");
+        let mut conn = store.connection();
+        let _: () = conn
+            .set(key, br#"{"value":null}"#.as_slice())
+            .await
+            .unwrap();
+
+        let error = store
+            .get("json-entry", Some(&collection))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid OpenKeyV entry magic"));
+
+        assert!(store.destroy_collection(&collection).await.unwrap());
     }
 }
