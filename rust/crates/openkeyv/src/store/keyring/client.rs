@@ -1,5 +1,4 @@
-use super::error::{Result, map_keyring_err};
-
+#[derive(Clone)]
 pub struct KeyringClient {
     service_name: String,
 }
@@ -9,12 +8,8 @@ impl KeyringClient {
         Self { service_name }
     }
 
-    pub(crate) fn entry(&self, collection: &str, key: &str) -> Result<keyring::Entry> {
-        let username = compound_key(collection, key);
-        keyring::Entry::new(&self.service_name, &username).map_err(map_keyring_err)
+    pub(crate) fn entry(&self, collection: &str, key: &str) -> keyring::Result<keyring::Entry> {
+        let username = format!("{}:{collection}{key}", collection.len());
+        keyring::Entry::new(&self.service_name, &username)
     }
-}
-
-fn compound_key(collection: &str, key: &str) -> String {
-    format!("{}:{}", collection, key)
 }
