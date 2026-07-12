@@ -33,7 +33,6 @@
 //! | Firestore | `firestore` | Google Firestore |
 //! | OpenSearch | `opensearch` | OpenSearch |
 
-pub mod adapter;
 pub mod entry;
 pub mod error;
 pub mod protocol;

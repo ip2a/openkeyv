@@ -15,8 +15,8 @@ categories = ["database", "caching", "asynchronous"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
@@ -58,10 +58,10 @@ s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 duckdb = ["dep:duckdb"]
 memcached = ["dep:memcache"]
 valkey = ["dep:redis"]
-vault = ["dep:vaultrs", "dep:futures-util"]
+vault = ["dep:vaultrs", "dep:futures-util", "dep:serde", "dep:serde_json"]
 keyring = ["dep:keyring"]
-firestore = ["dep:firestore", "dep:futures-util", "bytes/serde"]
-opensearch = ["dep:opensearch"]
+firestore = ["dep:firestore", "dep:futures-util", "dep:serde", "bytes/serde"]
+opensearch = ["dep:opensearch", "dep:serde", "dep:serde_json"]
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
 python-full = ["python", "disk", "redis", "postgres", "mongodb", "rocksdb", "dynamodb", "s3", "duckdb", "memcached", "valkey", "vault", "keyring", "firestore", "opensearch"]
 
