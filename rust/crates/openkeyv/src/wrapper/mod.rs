@@ -7,7 +7,6 @@ pub mod passthrough_cache;
 pub mod prefix_collections;
 pub mod prefix_keys;
 pub mod readonly;
-pub mod retry;
 pub mod routing;
 pub mod single_collection;
 pub mod statistics;
