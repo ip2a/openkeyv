@@ -40,7 +40,3 @@ else:
     def no_bear_type_check(func: Callable[P, R]) -> Callable[P, R]:
         """Disable beartype checking for a function."""
         return no_bear_type(func)
-
-
-# Legacy alias
-bear_spray = no_bear_type_check

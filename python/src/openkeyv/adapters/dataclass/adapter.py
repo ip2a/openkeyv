@@ -4,7 +4,7 @@ from typing import Any, TypeVar, get_args, get_origin
 
 from pydantic.type_adapter import TypeAdapter
 
-from openkeyv._utils.beartype import bear_spray
+from openkeyv._utils.beartype import no_bear_type_check
 from openkeyv.adapters.pydantic.base import BasePydanticAdapter
 from openkeyv.protocols.key_value import AsyncKeyValue
 
@@ -20,9 +20,8 @@ class DataclassAdapter(BasePydanticAdapter[T]):
 
     _inner_type: type[Any]
 
-    # Beartype cannot handle the parameterized type annotation (type[T]) used here for this generic dataclass adapter.
-    # Using @bear_spray to bypass beartype's runtime checks for this specific method.
-    @bear_spray
+    # Beartype cannot inspect type[T].
+    @no_bear_type_check
     def __init__(
         self,
         key_value: AsyncKeyValue,

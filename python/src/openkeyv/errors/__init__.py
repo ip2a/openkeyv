@@ -1,8 +1,8 @@
 """Error classes for key-value store operations.
 
 This module provides a hierarchy of exception classes used throughout the key-value
-store implementations. The hierarchy allows for fine-grained error handling while
-maintaining backwards compatibility through base classes.
+store implementations. The hierarchy allows callers to handle broad error groups
+through shared base classes or catch specific operation failures.
 
 Exception Hierarchy:
     BaseKeyValueError (base for all KV errors)

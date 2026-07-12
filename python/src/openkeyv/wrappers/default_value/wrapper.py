@@ -19,7 +19,6 @@ class DefaultValueWrapper(BaseWrapper):
     of how the value will be used and if any other wrappers will be used that may rely on the TTL.
     """
 
-    key_value: AsyncKeyValue  # Alias for BaseWrapper compatibility
     _default_ttl: float | None
     _default_value_json: str
 

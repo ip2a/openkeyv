@@ -5,7 +5,7 @@ from pydantic.type_adapter import TypeAdapter
 from pydantic_core import PydanticOmit
 from typing_extensions import TypeForm
 
-from openkeyv._utils.beartype import bear_spray
+from openkeyv._utils.beartype import no_bear_type_check
 from openkeyv.adapters.pydantic.base import BasePydanticAdapter
 from openkeyv.protocols.key_value import AsyncKeyValue
 
@@ -40,9 +40,8 @@ class PydanticAdapter(BasePydanticAdapter[T]):
     Other types are wrapped in {"items": value} to ensure consistent dict-based storage.
     """
 
-    # Beartype cannot handle the parameterized type annotation (TypeForm[T]) used here for this generic adapter.
-    # Using @bear_spray to bypass beartype's runtime checks for this specific method.
-    @bear_spray
+    # Beartype cannot inspect TypeForm[T].
+    @no_bear_type_check
     def __init__(
         self,
         key_value: AsyncKeyValue,
@@ -67,7 +66,7 @@ class PydanticAdapter(BasePydanticAdapter[T]):
         # Determine if this type needs wrapping
         self._needs_wrapping = self._check_needs_wrapping()
 
-    @bear_spray
+    @no_bear_type_check
     def _check_needs_wrapping(self) -> bool:
         """Check if a type needs to be wrapped in {"items": ...} for storage.
 
@@ -79,7 +78,7 @@ class PydanticAdapter(BasePydanticAdapter[T]):
         # Return the negated condition directly (fixes SIM103)
         return not self._serializes_to_dict()
 
-    @bear_spray
+    @no_bear_type_check
     def _serializes_to_dict(self) -> bool:
         """Check if a type serializes to a dict by inspecting the TypeAdapter's JSON schema.
 

@@ -4,7 +4,7 @@ from typing import TypeVar, get_args, get_origin
 from pydantic import BaseModel
 from pydantic.type_adapter import TypeAdapter
 
-from openkeyv._utils.beartype import bear_spray
+from openkeyv._utils.beartype import no_bear_type_check
 from openkeyv.adapters.pydantic.base import BasePydanticAdapter
 from openkeyv.protocols.key_value import AsyncKeyValue
 
@@ -18,9 +18,8 @@ class BaseModelAdapter(BasePydanticAdapter[T]):
     providing a safe, type-checked interface for Pydantic model persistence.
     """
 
-    # Beartype cannot handle the parameterized type annotation (type[T]) used here for this generic adapter.
-    # Using @bear_spray to bypass beartype's runtime checks for this specific method.
-    @bear_spray
+    # Beartype cannot inspect type[T].
+    @no_bear_type_check
     def __init__(
         self,
         key_value: AsyncKeyValue,
