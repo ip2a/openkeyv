@@ -12,6 +12,7 @@ use bytes::Bytes;
 use redis::AsyncCommands;
 
 const COLLECTION_SEPARATOR: &str = ":";
+const SCAN_COUNT: usize = 1_000;
 
 fn compound_key(collection: &str, key: &str) -> String {
     format!("{}{}{}", collection, COLLECTION_SEPARATOR, key)
@@ -240,59 +241,115 @@ impl AsyncCull for ValkeyStore {
 #[async_trait]
 impl AsyncEnumerateKeys for ValkeyStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
+        let limit = limit.unwrap_or(10_000).min(10_000);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let cname = self.collection_name(collection);
         let prefix = format!("{}{}", cname, COLLECTION_SEPARATOR);
-        let mut conn = self.connection();
         let pattern = format!("{}*", prefix);
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&pattern)
-            .query_async(&mut conn)
-            .await
-            .map_err(map_valkey_err)?;
-        let limit = limit.unwrap_or(10_000).min(10_000);
-        Ok(keys
-            .into_iter()
-            .filter_map(|k| k.strip_prefix(&prefix).map(|s| s.to_string()))
-            .take(limit)
-            .collect())
+        let mut conn = self.connection();
+        let mut cursor = 0_u64;
+        let mut keys = std::collections::HashSet::new();
+
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(&mut conn)
+                .await
+                .map_err(map_valkey_err)?;
+
+            for key in batch {
+                if let Some(key) = key.strip_prefix(&prefix) {
+                    keys.insert(key.to_string());
+                    if keys.len() == limit {
+                        return Ok(keys.into_iter().collect());
+                    }
+                }
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                return Ok(keys.into_iter().collect());
+            }
+        }
     }
 }
 
 #[async_trait]
 impl AsyncEnumerateCollections for ValkeyStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
+        let limit = limit.unwrap_or(10_000).min(10_000);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let mut conn = self.connection();
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg("*")
-            .query_async(&mut conn)
-            .await
-            .map_err(map_valkey_err)?;
+        let mut cursor = 0_u64;
         let mut collections = std::collections::HashSet::new();
-        for key in keys {
-            if let Some(pos) = key.find(COLLECTION_SEPARATOR) {
-                collections.insert(key[..pos].to_string());
+
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("*")
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(&mut conn)
+                .await
+                .map_err(map_valkey_err)?;
+
+            for key in keys {
+                if let Some(pos) = key.find(COLLECTION_SEPARATOR) {
+                    collections.insert(key[..pos].to_string());
+                    if collections.len() == limit {
+                        return Ok(collections.into_iter().collect());
+                    }
+                }
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                return Ok(collections.into_iter().collect());
             }
         }
-        let limit = limit.unwrap_or(10_000).min(10_000);
-        Ok(collections.into_iter().take(limit).collect())
     }
 }
 
 #[async_trait]
 impl AsyncDestroyCollection for ValkeyStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let prefix = format!("{}{}*", collection, COLLECTION_SEPARATOR);
+        let pattern = format!("{}{}*", collection, COLLECTION_SEPARATOR);
         let mut conn = self.connection();
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(&prefix)
-            .query_async(&mut conn)
-            .await
-            .map_err(map_valkey_err)?;
-        if keys.is_empty() {
-            return Ok(false);
+        let mut cursor = 0_u64;
+        let mut destroyed = false;
+
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(&mut conn)
+                .await
+                .map_err(map_valkey_err)?;
+
+            if !keys.is_empty() {
+                let _: () = conn.del(&keys).await.map_err(map_valkey_err)?;
+                destroyed = true;
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                return Ok(destroyed);
+            }
         }
-        let _: () = conn.del(&keys).await.map_err(map_valkey_err)?;
-        Ok(true)
     }
 }
 
@@ -369,6 +426,42 @@ mod tests {
             .unwrap();
 
         assert!(store.destroy_collection(&collection).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_VALKEY_URL"]
+    async fn test_valkey_store_scans_and_deletes_multiple_pages() {
+        let url = std::env::var("OPENKEYV_VALKEY_URL").unwrap();
+        let store = ValkeyStore::new(&url).await.unwrap();
+        let collection = format!("openkeyv_scan_test_{}", std::process::id());
+        let _ = store.destroy_collection(&collection).await.unwrap();
+
+        let keys: Vec<String> = (0..1_205).map(|index| format!("key-{index:04}")).collect();
+        let values = vec![Value::null(); keys.len()];
+        store
+            .put_many(&keys, &values, Some(&collection), None)
+            .await
+            .unwrap();
+
+        let scanned = store.keys(Some(&collection), None).await.unwrap();
+        assert_eq!(scanned.len(), keys.len());
+        let scanned: std::collections::HashSet<_> = scanned.into_iter().collect();
+        assert!(keys.iter().all(|key| scanned.contains(key)));
+        assert_eq!(
+            store.keys(Some(&collection), Some(17)).await.unwrap().len(),
+            17
+        );
+        assert!(store.collections(None).await.unwrap().contains(&collection));
+
+        assert!(store.destroy_collection(&collection).await.unwrap());
+        assert!(
+            store
+                .keys(Some(&collection), None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!store.destroy_collection(&collection).await.unwrap());
     }
 
     #[tokio::test]
