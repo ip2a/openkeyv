@@ -1,7 +1,6 @@
 pub mod compression;
 pub mod default_value;
 pub mod encryption;
-pub mod fallback;
 pub mod limit_size;
 pub mod logging;
 pub mod passthrough_cache;
