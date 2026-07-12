@@ -3,7 +3,6 @@ mod kind;
 mod structured;
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 
 pub use kind::ValueKind;
 pub use structured::StructuredValue;
@@ -12,7 +11,7 @@ pub use structured::StructuredValue;
 ///
 /// The core treats values as typed bytes. Structured values are represented by
 /// `StructuredValue` before being encoded into the `Structured` byte kind.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Value {
     kind: ValueKind,
     bytes: Bytes,

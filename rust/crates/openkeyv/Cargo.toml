@@ -26,7 +26,7 @@ tracing.workspace = true
 blake3 = "1.8"
 flate2 = "1.1"
 base64 = "0.22"
-bytes = { version = "1.10", features = ["serde"] }
+bytes = "1.10"
 
 sled = { version = "0.34", optional = true }
 redis = { version = "0.29", features = ["tokio-comp"], optional = true }
@@ -60,7 +60,7 @@ memcached = ["dep:memcache"]
 valkey = ["dep:redis"]
 vault = ["dep:vaultrs", "dep:futures-util"]
 keyring = ["dep:keyring"]
-firestore = ["dep:firestore", "dep:futures-util"]
+firestore = ["dep:firestore", "dep:futures-util", "bytes/serde"]
 opensearch = ["dep:opensearch"]
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
 python-full = ["python", "disk", "redis", "postgres", "mongodb", "rocksdb", "dynamodb", "s3", "duckdb", "memcached", "valkey", "vault", "keyring", "firestore", "opensearch"]

@@ -4,20 +4,17 @@ use crate::error::Result;
 use crate::value::Value;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 
 /// A managed cache entry containing value data and TTL metadata.
 ///
 /// All values stored in backends are wrapped in this structure to enable
 /// consistent TTL tracking and expiration handling.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ManagedEntry {
     pub value: Value,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
 }
 
