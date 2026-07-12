@@ -1,5 +1,5 @@
-use super::client::MongoClient;
-use super::config::{DEFAULT_DB, MongoConfig};
+use super::client::MongoDBClient;
+use super::config::{DEFAULT_DB, MongoDBConfig};
 use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
 use crate::protocol::{
@@ -63,12 +63,12 @@ impl StoredDocument {
 /// a unique string `key`, one generic BSON binary `entry` containing complete
 /// `OKVE1`, and an optional BSON datetime `expires_at` used only by MongoDB's TTL
 /// index.
-pub struct MongoStore {
-    client: MongoClient,
-    config: MongoConfig,
+pub struct MongoDBStore {
+    client: MongoDBClient,
+    config: MongoDBConfig,
 }
 
-impl MongoStore {
+impl MongoDBStore {
     pub async fn new(url: impl AsRef<str>) -> Result<Self> {
         let client =
             Client::with_uri_str(url.as_ref())
@@ -80,12 +80,12 @@ impl MongoStore {
     }
 
     pub async fn from_database(db: mongodb::Database) -> Result<Self> {
-        Ok(Self::with_config(db, MongoConfig::new(None)))
+        Ok(Self::with_config(db, MongoDBConfig::new(None)))
     }
 
-    pub fn with_config(db: mongodb::Database, config: MongoConfig) -> Self {
+    pub fn with_config(db: mongodb::Database, config: MongoDBConfig) -> Self {
         Self {
-            client: MongoClient::new(db),
+            client: MongoDBClient::new(db),
             config,
         }
     }
@@ -408,7 +408,7 @@ impl MongoStore {
 }
 
 #[async_trait]
-impl AsyncKeyValue for MongoStore {
+impl AsyncKeyValue for MongoDBStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let collection = self.collection(self.collection_name(collection)).await?;
         let document = collection
@@ -704,7 +704,7 @@ impl AsyncKeyValue for MongoStore {
 }
 
 #[async_trait]
-impl AsyncCull for MongoStore {
+impl AsyncCull for MongoDBStore {
     async fn cull(&self) -> Result<()> {
         let collection_names =
             self.db()
@@ -748,7 +748,7 @@ impl AsyncCull for MongoStore {
 }
 
 #[async_trait]
-impl AsyncEnumerateKeys for MongoStore {
+impl AsyncEnumerateKeys for MongoDBStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
         if limit == 0 {
@@ -797,7 +797,7 @@ impl AsyncEnumerateKeys for MongoStore {
 }
 
 #[async_trait]
-impl AsyncEnumerateCollections for MongoStore {
+impl AsyncEnumerateCollections for MongoDBStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
         if limit == 0 {
@@ -816,7 +816,7 @@ impl AsyncEnumerateCollections for MongoStore {
 }
 
 #[async_trait]
-impl AsyncDestroyCollection for MongoStore {
+impl AsyncDestroyCollection for MongoDBStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
         let exists = !self
             .db()
@@ -853,7 +853,7 @@ impl AsyncDestroyCollection for MongoStore {
 }
 
 #[async_trait]
-impl AsyncDestroyStore for MongoStore {
+impl AsyncDestroyStore for MongoDBStore {
     async fn destroy(&self) -> Result<bool> {
         let names =
             self.db()
@@ -899,7 +899,7 @@ mod tests {
     }
 
     fn stored_document(entry: &ManagedEntry) -> Document {
-        let mut document = MongoStore::entry_document("key", entry);
+        let mut document = MongoDBStore::entry_document("key", entry);
         document.insert("_id", ObjectId::new());
         document
     }
@@ -924,7 +924,7 @@ mod tests {
         assert!(!document.contains_key("value"));
         assert!(!document.contains_key("created_at"));
 
-        let decoded = MongoStore::decode_document(document, Some("key")).unwrap();
+        let decoded = MongoDBStore::decode_document(document, Some("key")).unwrap();
         assert_eq!(decoded.entry, entry);
     }
 
@@ -936,11 +936,11 @@ mod tests {
             "value": { "bytes": [1, 2, 3] },
             "created_at": BsonDateTime::now(),
         };
-        assert!(MongoStore::decode_document(old, Some("old")).is_err());
+        assert!(MongoDBStore::decode_document(old, Some("old")).is_err());
 
         let mut extra = stored_document(&fixed_entry(None));
         extra.insert("collection", "default");
-        assert!(MongoStore::decode_document(extra, Some("key")).is_err());
+        assert!(MongoDBStore::decode_document(extra, Some("key")).is_err());
 
         let mut wrong_subtype = stored_document(&fixed_entry(None));
         wrong_subtype.insert(
@@ -950,11 +950,11 @@ mod tests {
                 bytes: vec![0; 16],
             }),
         );
-        assert!(MongoStore::decode_document(wrong_subtype, Some("key")).is_err());
+        assert!(MongoDBStore::decode_document(wrong_subtype, Some("key")).is_err());
 
         let mut wrong_id = stored_document(&fixed_entry(None));
         wrong_id.insert("_id", "not-an-object-id");
-        assert!(MongoStore::decode_document(wrong_id, Some("key")).is_err());
+        assert!(MongoDBStore::decode_document(wrong_id, Some("key")).is_err());
     }
 
     #[test]
@@ -962,15 +962,15 @@ mod tests {
         let entry = fixed_entry(Some(1_784_000_030_000));
         let mut missing = stored_document(&entry);
         missing.remove("expires_at");
-        assert!(MongoStore::decode_document(missing, Some("key")).is_err());
+        assert!(MongoDBStore::decode_document(missing, Some("key")).is_err());
 
         let mut different = stored_document(&entry);
         different.insert("expires_at", BsonDateTime::from_millis(1_784_000_030_001));
-        assert!(MongoStore::decode_document(different, Some("key")).is_err());
+        assert!(MongoDBStore::decode_document(different, Some("key")).is_err());
 
         let mut unexpected = stored_document(&fixed_entry(None));
         unexpected.insert("expires_at", BsonDateTime::from_millis(1_784_000_030_000));
-        assert!(MongoStore::decode_document(unexpected, Some("key")).is_err());
+        assert!(MongoDBStore::decode_document(unexpected, Some("key")).is_err());
     }
 
     fn mongodb_url() -> String {
@@ -987,7 +987,7 @@ mod tests {
     #[ignore = "requires MongoDB 8.0 configured by OPENKEYV_MONGODB_URL"]
     async fn mongodb_binary_shape_indexes_and_replacement_are_strict() {
         let db = isolated_database().await;
-        let store = MongoStore::from_database(db.clone()).await.unwrap();
+        let store = MongoDBStore::from_database(db.clone()).await.unwrap();
 
         store
             .put("key", Value::utf8("ttl"), Some("entries"), Some(60.0))
@@ -1011,7 +1011,7 @@ mod tests {
         assert!(ttl_index);
         assert!(
             collection
-                .insert_one(MongoStore::entry_document(
+                .insert_one(MongoDBStore::entry_document(
                     "key",
                     &ManagedEntry::new(Value::utf8("duplicate"))
                 ))
@@ -1043,7 +1043,7 @@ mod tests {
     #[ignore = "requires MongoDB 8.0 configured by OPENKEYV_MONGODB_URL"]
     async fn mongodb_native_batches_cleanup_and_destroy_are_strict() {
         let db = isolated_database().await;
-        let store = MongoStore::from_database(db.clone()).await.unwrap();
+        let store = MongoDBStore::from_database(db.clone()).await.unwrap();
         let keys = vec!["a".to_string(), "b".to_string(), "a".to_string()];
         let values = vec![
             Value::utf8("first"),
@@ -1090,7 +1090,7 @@ mod tests {
         collection
             .replace_one(
                 doc! { "key": "expired" },
-                MongoStore::entry_document("expired", &expired),
+                MongoDBStore::entry_document("expired", &expired),
             )
             .upsert(true)
             .await
@@ -1107,7 +1107,7 @@ mod tests {
         collection
             .replace_one(
                 doc! { "key": "cull" },
-                MongoStore::entry_document("cull", &expired),
+                MongoDBStore::entry_document("cull", &expired),
             )
             .upsert(true)
             .await
@@ -1144,7 +1144,7 @@ mod tests {
     #[ignore = "requires MongoDB 8.0 configured by OPENKEYV_MONGODB_URL"]
     async fn mongodb_conditional_cleanup_preserves_concurrent_replacement() {
         let db = isolated_database().await;
-        let store = MongoStore::from_database(db.clone()).await.unwrap();
+        let store = MongoDBStore::from_database(db.clone()).await.unwrap();
         let collection = store.collection("entries").await.unwrap();
         let expired = ManagedEntry {
             value: Value::utf8("expired"),
@@ -1152,10 +1152,10 @@ mod tests {
             expires_at: Some(Utc::now() - chrono::TimeDelta::seconds(5)),
         };
         collection
-            .insert_one(MongoStore::entry_document("race", &expired))
+            .insert_one(MongoDBStore::entry_document("race", &expired))
             .await
             .unwrap();
-        let observed = MongoStore::decode_document(
+        let observed = MongoDBStore::decode_document(
             collection
                 .find_one(doc! { "key": "race" })
                 .await
@@ -1198,7 +1198,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let store = MongoStore::from_database(db.clone()).await.unwrap();
+        let store = MongoDBStore::from_database(db.clone()).await.unwrap();
 
         let error = store.get("key", Some("entries")).await.unwrap_err();
         assert!(matches!(error, Error::StoreSetup { .. }));

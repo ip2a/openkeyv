@@ -50,7 +50,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "postgres")]
     m.add_class::<postgres::PyPostgresStore>()?;
     #[cfg(feature = "mongodb")]
-    m.add_class::<mongodb::PyMongoStore>()?;
+    m.add_class::<mongodb::PyMongoDBStore>()?;
     #[cfg(feature = "dynamodb")]
     m.add_class::<dynamodb::PyDynamoDBStore>()?;
     #[cfg(feature = "s3")]

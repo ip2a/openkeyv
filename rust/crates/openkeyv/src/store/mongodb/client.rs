@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
-pub struct MongoClient {
+pub struct MongoDBClient {
     db: mongodb::Database,
     initialized_collections: Mutex<HashSet<String>>,
 }
 
-impl MongoClient {
+impl MongoDBClient {
     pub fn new(db: mongodb::Database) -> Self {
         Self {
             db,

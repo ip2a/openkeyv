@@ -19,17 +19,17 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// MongoStore
+// MongoDBStore
 // ---------------------------------------------------------------------------
 #[cfg(feature = "mongodb")]
-#[pyclass(subclass, name = "MongoStore")]
-pub struct PyMongoStore {
-    inner: Arc<crate::store::mongodb::MongoStore>,
+#[pyclass(subclass, name = "MongoDBStore")]
+pub struct PyMongoDBStore {
+    inner: Arc<crate::store::mongodb::MongoDBStore>,
 }
 
 #[cfg(feature = "mongodb")]
 #[pymethods]
-impl PyMongoStore {
+impl PyMongoDBStore {
     #[new]
     #[pyo3(signature = (url))]
     fn new(url: String) -> PyResult<Self> {
@@ -37,7 +37,7 @@ impl PyMongoStore {
             .enable_all()
             .build()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?
-            .block_on(async { crate::store::mongodb::MongoStore::new(&url).await })
+            .block_on(async { crate::store::mongodb::MongoDBStore::new(&url).await })
             .map_err(error_to_py)?;
         Ok(Self {
             inner: Arc::new(store),

@@ -3,11 +3,11 @@ pub const DEFAULT_DB: &str = "kv_store";
 const DEFAULT_COLLECTION: &str = "default_collection";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MongoConfig {
+pub struct MongoDBConfig {
     pub default_collection: String,
 }
 
-impl MongoConfig {
+impl MongoDBConfig {
     pub fn new(default_collection: Option<String>) -> Self {
         Self {
             default_collection: default_collection
