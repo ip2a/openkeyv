@@ -38,20 +38,20 @@ class PassthroughCacheWrapper(BaseWrapper):
         self.cache_key_value = TTLClampWrapper(
             key_value=cache_key_value,
             min_ttl=0,
-            max_ttl=maximum_ttl or DEFAULT_MAX_TTL,
-            missing_ttl=missing_ttl or DEFAULT_MISSING_TTL,
+            max_ttl=DEFAULT_MAX_TTL if maximum_ttl is None else maximum_ttl,
+            missing_ttl=DEFAULT_MISSING_TTL if missing_ttl is None else missing_ttl,
         )
 
         super().__init__()
 
     @override
     async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
-        if managed_entry := await self.cache_key_value.get(collection=collection, key=key):
+        if (managed_entry := await self.cache_key_value.get(collection=collection, key=key)) is not None:
             return managed_entry
 
         uncached_entry, ttl = await self.primary_key_value.ttl(collection=collection, key=key)
 
-        if not uncached_entry:
+        if uncached_entry is None:
             return None
 
         await self.cache_key_value.put(collection=collection, key=key, value=uncached_entry, ttl=ttl)
@@ -88,12 +88,12 @@ class PassthroughCacheWrapper(BaseWrapper):
     async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
         cached_entry, ttl = await self.cache_key_value.ttl(collection=collection, key=key)
 
-        if cached_entry:
+        if cached_entry is not None:
             return cached_entry, ttl
 
         uncached_entry, ttl = await self.primary_key_value.ttl(collection=collection, key=key)
 
-        if not uncached_entry:
+        if uncached_entry is None:
             return (None, None)
 
         await self.cache_key_value.put(collection=collection, key=key, value=uncached_entry, ttl=ttl)
