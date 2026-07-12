@@ -1,4 +1,3 @@
-import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import Any, Generic, SupportsFloat, TypeVar, overload
@@ -9,8 +8,6 @@ from pydantic_core import PydanticSerializationError
 
 from openkeyv.errors import DeserializationError, SerializationError
 from openkeyv.protocols.key_value import AsyncKeyValue
-
-logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -27,7 +24,6 @@ class BasePydanticAdapter(Generic[T], ABC):
     _needs_wrapping: bool
     _type_adapter: TypeAdapter[T]
     _default_collection: str | None
-    _raise_on_validation_error: bool
 
     @abstractmethod
     def _get_model_type_name(self) -> str:
@@ -38,63 +34,34 @@ class BasePydanticAdapter(Generic[T], ABC):
         """
         ...
 
-    def _validate_model(self, value: dict[str, Any]) -> T | None:
+    def _validate_model(self, value: dict[str, Any]) -> T:
         """Validate and deserialize a dict into the configured model type.
 
         This method handles both wrapped and unwrapped values. For types that need wrapping,
         it expects the value to contain an "items" key with the data, following the convention
-        used by `_serialize_model`. If validation fails and `raise_on_validation_error` is False,
-        returns None instead of raising.
+        used by `_serialize_model`.
 
         Args:
             value: The dict to validate and convert to a model.
 
         Returns:
-            The validated model instance, or None if validation fails and errors are suppressed.
+            The validated model instance.
 
         Raises:
-            DeserializationError: If validation fails and `raise_on_validation_error` is True.
+            DeserializationError: If the payload shape or model validation is invalid.
         """
         try:
             if self._needs_wrapping:
                 if "items" not in value:
-                    if self._raise_on_validation_error:
-                        msg = f"Invalid {self._get_model_type_name()} payload: missing 'items' wrapper"
-                        raise DeserializationError(msg)
-
-                    # Log the missing 'items' wrapper when not raising
-                    logger.error(
-                        "Missing 'items' wrapper for %s",
-                        self._get_model_type_name(),
-                        extra={
-                            "model_type": self._get_model_type_name(),
-                            "error": "missing 'items' wrapper",
-                        },
-                        exc_info=False,
-                    )
-                    return None
+                    msg = f"Invalid {self._get_model_type_name()} payload: missing 'items' wrapper"
+                    raise DeserializationError(msg)
                 return self._type_adapter.validate_python(value["items"])
 
             return self._type_adapter.validate_python(value)
         except ValidationError as e:
-            if self._raise_on_validation_error:
-                details = e.errors(include_input=False)
-                msg = f"Invalid {self._get_model_type_name()}: {details}"
-                raise DeserializationError(msg) from e
-
-            # Log the validation error when not raising
-            error_details = e.errors(include_input=False)
-            logger.error(
-                "Validation failed for %s",
-                self._get_model_type_name(),
-                extra={
-                    "model_type": self._get_model_type_name(),
-                    "error_count": len(error_details),
-                    "errors": error_details,
-                },
-                exc_info=True,
-            )
-            return None
+            details = e.errors(include_input=False)
+            msg = f"Invalid {self._get_model_type_name()}: {details}"
+            raise DeserializationError(msg) from e
 
     def _serialize_model(self, value: T) -> dict[str, Any]:
         """Serialize a model to a dict for storage.
@@ -134,26 +101,19 @@ class BasePydanticAdapter(Generic[T], ABC):
         Args:
             key: The key to retrieve.
             collection: The collection to use. If not provided, uses the default collection.
-            default: The default value to return if the key doesn't exist or validation fails.
+            default: The default value to return if the key doesn't exist.
 
         Returns:
-            The parsed model instance if found and valid, or the default value if key doesn't exist or validation fails.
+            The parsed model instance if found, or the default value if the key doesn't exist.
 
         Raises:
-            DeserializationError: If the stored data cannot be validated as the model and the adapter is configured to
-            raise on validation error.
-
-        Note:
-            When raise_on_validation_error=False and validation fails, returns the default value (which may be None).
-            When raise_on_validation_error=True and validation fails, raises DeserializationError.
+            DeserializationError: If the stored data cannot be validated as the model.
         """
         collection = collection or self._default_collection
 
         value = await self._key_value.get(key=key, collection=collection)
         if value is not None:
-            validated = self._validate_model(value=value)
-            if validated is not None:
-                return validated
+            return self._validate_model(value=value)
 
         return default
 
@@ -169,19 +129,13 @@ class BasePydanticAdapter(Generic[T], ABC):
         Args:
             keys: The list of keys to retrieve.
             collection: The collection to use. If not provided, uses the default collection.
-            default: The default value to return for keys that don't exist or fail validation.
+            default: The default value to return for keys that don't exist.
 
         Returns:
-            A list of parsed model instances, with default values for missing keys or validation failures.
+            A list of parsed model instances, with default values for missing keys.
 
         Raises:
-            DeserializationError: If the stored data cannot be validated as the model and the adapter is configured to
-            raise on validation error.
-
-        Note:
-            When raise_on_validation_error=False and validation fails for any key, that position in the returned list
-            will contain the default value (which may be None). The method returns a complete list matching the order
-            and length of the input keys, with defaults substituted for missing or invalid entries.
+            DeserializationError: If any stored value cannot be validated as the model.
         """
         collection = collection or self._default_collection
 
@@ -192,8 +146,7 @@ class BasePydanticAdapter(Generic[T], ABC):
             if value is None:
                 result.append(default)
             else:
-                validated = self._validate_model(value=value)
-                result.append(validated if validated is not None else default)
+                result.append(self._validate_model(value=value))
         return result
 
     async def put(self, key: str, value: T, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
@@ -237,11 +190,10 @@ class BasePydanticAdapter(Generic[T], ABC):
             collection: The collection to use. If not provided, uses the default collection.
 
         Returns:
-            A tuple of (model, ttl_seconds). Returns (None, None) if the key is missing or validation fails.
+            A tuple of (model, ttl_seconds). Returns (None, None) if the key is missing.
 
-        Note:
-            When validation fails and raise_on_validation_error=False, returns (None, None) even if TTL data exists.
-            When validation fails and raise_on_validation_error=True, raises DeserializationError.
+        Raises:
+            DeserializationError: If the stored value cannot be validated as the model.
         """
         collection = collection or self._default_collection
 
@@ -253,11 +205,7 @@ class BasePydanticAdapter(Generic[T], ABC):
         if entry is None:
             return (None, None)
 
-        validated_model = self._validate_model(value=entry)
-        if validated_model is not None:
-            return (validated_model, ttl_info)
-
-        return (None, None)
+        return (self._validate_model(value=entry), ttl_info)
 
     async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[T | None, float | None]]:
         """Batch get models with TTLs. Each element is (model|None, ttl_seconds|None)."""

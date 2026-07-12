@@ -47,7 +47,6 @@ class PydanticAdapter(BasePydanticAdapter[T]):
         key_value: AsyncKeyValue,
         pydantic_model: TypeForm[T],
         default_collection: str | None = None,
-        raise_on_validation_error: bool = False,
     ) -> None:
         """Create a new PydanticAdapter.
 
@@ -55,13 +54,10 @@ class PydanticAdapter(BasePydanticAdapter[T]):
             key_value: The KVStore to use.
             pydantic_model: The type to serialize/deserialize. Can be any pydantic-serializable type.
             default_collection: The default collection to use.
-            raise_on_validation_error: Whether to raise a DeserializationError if validation fails during reads.
-                                       Otherwise, calls will return None if validation fails.
         """
         self._key_value = key_value
         self._type_adapter = TypeAdapter[T](pydantic_model)
         self._default_collection = default_collection
-        self._raise_on_validation_error = raise_on_validation_error
 
         # Determine if this type needs wrapping
         self._needs_wrapping = self._check_needs_wrapping()

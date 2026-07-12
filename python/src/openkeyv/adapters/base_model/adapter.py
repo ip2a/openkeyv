@@ -25,7 +25,6 @@ class BaseModelAdapter(BasePydanticAdapter[T]):
         key_value: AsyncKeyValue,
         pydantic_model: type[T],
         default_collection: str | None = None,
-        raise_on_validation_error: bool = False,
     ) -> None:
         """Create a new BaseModelAdapter.
 
@@ -33,8 +32,6 @@ class BaseModelAdapter(BasePydanticAdapter[T]):
             key_value: The KVStore to use.
             pydantic_model: The Pydantic model to use. Can be a single BaseModel subclass or list[BaseModel].
             default_collection: The default collection to use.
-            raise_on_validation_error: Whether to raise a DeserializationError if validation fails during reads. Otherwise,
-                                       calls will return None if validation fails.
 
         Raises:
             TypeError: If pydantic_model is a sequence type other than list (e.g., tuple is not supported).
@@ -66,7 +63,6 @@ class BaseModelAdapter(BasePydanticAdapter[T]):
 
         self._type_adapter = TypeAdapter[T](pydantic_model)
         self._default_collection = default_collection
-        self._raise_on_validation_error = raise_on_validation_error
 
     def _get_model_type_name(self) -> str:
         """Return the model type name for error messages."""

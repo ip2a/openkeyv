@@ -27,7 +27,6 @@ class DataclassAdapter(BasePydanticAdapter[T]):
         key_value: AsyncKeyValue,
         dataclass_type: type[T],
         default_collection: str | None = None,
-        raise_on_validation_error: bool = False,
     ) -> None:
         """Create a new DataclassAdapter.
 
@@ -35,8 +34,6 @@ class DataclassAdapter(BasePydanticAdapter[T]):
             key_value: The AsyncKeyValue to use.
             dataclass_type: The dataclass type to use. Can be a single dataclass or list[dataclass].
             default_collection: The default collection to use.
-            raise_on_validation_error: Whether to raise a DeserializationError if validation fails during reads. Otherwise,
-                                       calls will return None if validation fails.
 
         Raises:
             TypeError: If dataclass_type is not a dataclass type.
@@ -63,7 +60,6 @@ class DataclassAdapter(BasePydanticAdapter[T]):
 
         self._type_adapter = TypeAdapter[T](dataclass_type)
         self._default_collection = default_collection
-        self._raise_on_validation_error = raise_on_validation_error
 
     def _get_model_type_name(self) -> str:
         """Return the model type name for error messages."""
