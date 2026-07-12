@@ -1,16 +1,18 @@
 import base64
+import binascii
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, SupportsFloat
 
 from typing_extensions import override
 
 from openkeyv._utils.managed_entry import dump_to_json_bytes, load_from_json
-from openkeyv.errors import CorruptedDataError, DecryptionError, EncryptionError, SerializationError
+from openkeyv.errors import CorruptedDataError, DecryptionError, DeserializationError, EncryptionError
 from openkeyv.protocols.key_value import AsyncKeyValue
 from openkeyv.wrappers.base import BaseWrapper
 
 _ENCRYPTED_DATA_KEY = "__encrypted_data__"
 _ENCRYPTION_VERSION_KEY = "__encryption_version__"
+_ENCRYPTION_KEYS = frozenset({_ENCRYPTED_DATA_KEY, _ENCRYPTION_VERSION_KEY})
 
 
 EncryptionFn = Callable[[bytes], bytes]
@@ -31,7 +33,6 @@ class BaseEncryptionWrapper(BaseWrapper):
         encryption_fn: EncryptionFn,
         decryption_fn: DecryptionFn,
         encryption_version: int,
-        raise_on_decryption_error: bool = True,
     ) -> None:
         """Initialize the encryption wrapper.
 
@@ -41,10 +42,12 @@ class BaseEncryptionWrapper(BaseWrapper):
             decryption_fn: The decryption function to use. A callable that takes bytes and an
                            encryption version int and returns decrypted bytes.
             encryption_version: The encryption version to use.
-            raise_on_decryption_error: Whether to raise an exception if decryption fails. Defaults to True.
         """
+        if type(encryption_version) is not int:
+            msg = "Encryption version must be an integer."
+            raise TypeError(msg)
+
         self.key_value: AsyncKeyValue = key_value
-        self.raise_on_decryption_error: bool = raise_on_decryption_error
 
         self.encryption_version: int = encryption_version
 
@@ -63,14 +66,7 @@ class BaseEncryptionWrapper(BaseWrapper):
         }
         """
 
-        # Serialize to compact JSON bytes
-        try:
-            json_bytes: bytes = dump_to_json_bytes(obj=value)
-        except SerializationError:
-            raise
-        except Exception as e:
-            msg: str = f"Failed to serialize object to JSON: {e}"
-            raise SerializationError(msg) from e
+        json_bytes = dump_to_json_bytes(obj=value)
 
         try:
             encrypted_bytes: bytes = self._encryption_fn(json_bytes)
@@ -86,17 +82,13 @@ class BaseEncryptionWrapper(BaseWrapper):
         }
 
     def _validate_encrypted_payload(self, value: dict[str, Any]) -> tuple[int, str]:
-        if _ENCRYPTION_VERSION_KEY not in value:
-            msg = "missing encryption version key"
+        if value.keys() != _ENCRYPTION_KEYS:
+            msg = "Encrypted value must contain exactly the data and version fields."
             raise CorruptedDataError(msg)
 
         encryption_version = value[_ENCRYPTION_VERSION_KEY]
-        if not isinstance(encryption_version, int):
+        if type(encryption_version) is not int:
             msg = f"expected encryption version to be an int, got {type(encryption_version)}"
-            raise CorruptedDataError(msg)
-
-        if _ENCRYPTED_DATA_KEY not in value:
-            msg = "missing encrypted data key"
             raise CorruptedDataError(msg)
 
         encrypted_data = value[_ENCRYPTED_DATA_KEY]
@@ -112,27 +104,27 @@ class BaseEncryptionWrapper(BaseWrapper):
         if value is None:
             return None
 
-        # If the value is not actually encrypted, return it as-is
-        if _ENCRYPTED_DATA_KEY not in value and isinstance(value, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
-            return value
+        encryption_version, encrypted_data = self._validate_encrypted_payload(value)
 
         try:
-            encryption_version, encrypted_data = self._validate_encrypted_payload(value)
+            encrypted_bytes = base64.b64decode(encrypted_data, validate=True)
+        except (binascii.Error, ValueError) as e:
+            msg = "Encrypted data must be a valid Base64 string."
+            raise CorruptedDataError(msg) from e
 
-            encrypted_bytes: bytes = base64.b64decode(encrypted_data, validate=True)
-
-            json_bytes: bytes = self._decryption_fn(encrypted_bytes, encryption_version)
-
-            return load_from_json(json_data=json_bytes)
-        except CorruptedDataError:
-            if self.raise_on_decryption_error:
-                raise
-            return None
+        try:
+            json_bytes = self._decryption_fn(encrypted_bytes, encryption_version)
+        except EncryptionError:
+            raise
         except Exception as e:
-            msg = "Failed to decrypt value"
-            if self.raise_on_decryption_error:
-                raise DecryptionError(msg) from e
-            return None
+            msg = "Failed to decrypt value."
+            raise DecryptionError(msg) from e
+
+        try:
+            return load_from_json(json_str=json_bytes)
+        except (DeserializationError, TypeError) as e:
+            msg = "Decrypted value must contain a JSON object."
+            raise CorruptedDataError(msg) from e
 
     @override
     async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:

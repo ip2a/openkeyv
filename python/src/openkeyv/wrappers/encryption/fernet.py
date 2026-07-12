@@ -19,7 +19,6 @@ class FernetEncryptionWrapper(BaseEncryptionWrapper):
         key_value: AsyncKeyValue,
         *,
         fernet: Fernet | MultiFernet,
-        raise_on_decryption_error: bool = True,
     ) -> None:
         """Initialize the Fernet encryption wrapper.
 
@@ -27,7 +26,6 @@ class FernetEncryptionWrapper(BaseEncryptionWrapper):
             key_value: The key-value store to wrap.
             fernet: The Fernet or MultiFernet instance to use for encryption and decryption MultiFernet is used to support
                     key rotation by allowing you to provide multiple Fernet instances that are attempted in order.
-            raise_on_decryption_error: Whether to raise an exception if decryption fails. Defaults to True.
         """
 
     @overload
@@ -37,7 +35,6 @@ class FernetEncryptionWrapper(BaseEncryptionWrapper):
         *,
         source_material: str,
         salt: str,
-        raise_on_decryption_error: bool = True,
     ) -> None:
         """Initialize the Fernet encryption wrapper.
 
@@ -45,7 +42,6 @@ class FernetEncryptionWrapper(BaseEncryptionWrapper):
             key_value: The key-value store to wrap.
             source_material: A string to use as the source material for the encryption key.
             salt: A string to use as the salt for the encryption key.
-            raise_on_decryption_error: Whether to raise an exception if decryption fails. Defaults to True.
         """
 
     def __init__(
@@ -55,7 +51,6 @@ class FernetEncryptionWrapper(BaseEncryptionWrapper):
         fernet: Fernet | MultiFernet | None = None,
         source_material: str | None = None,
         salt: str | None = None,
-        raise_on_decryption_error: bool = True,
     ) -> None:
         if fernet is not None:  # noqa: SIM102
             if source_material or salt:
@@ -85,7 +80,6 @@ class FernetEncryptionWrapper(BaseEncryptionWrapper):
             encryption_fn=encrypt_with_fernet,
             decryption_fn=decrypt_with_fernet,
             encryption_version=ENCRYPTION_VERSION,
-            raise_on_decryption_error=raise_on_decryption_error,
         )
 
 
