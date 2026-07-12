@@ -31,15 +31,38 @@ fn validate_table_name(name: &str) -> Result<()> {
             message: format!("table name too long (>63): {name}"),
         });
     }
-    if name.chars().next().unwrap().is_ascii_digit() {
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+    {
         return Err(Error::StoreSetup {
-            message: format!("table name must not start with a digit: {name}"),
+            message: format!("table name must start with an ASCII letter or underscore: {name}"),
         });
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    if !name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
         return Err(Error::StoreSetup {
-            message: format!("table name must be alphanumeric (with underscores): {name}"),
+            message: format!(
+                "table name must contain only ASCII letters, digits, and underscores: {name}"
+            ),
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duckdb_table_name_validation_is_ascii_and_sql_safe() {
+        assert!(DuckDBConfig::new(Some("kv_entries_2")).is_ok());
+        assert!(DuckDBConfig::new(Some("_entries")).is_ok());
+        assert!(DuckDBConfig::new(Some("2entries")).is_err());
+        assert!(DuckDBConfig::new(Some("entries-name")).is_err());
+        assert!(DuckDBConfig::new(Some("数据")).is_err());
+    }
 }
