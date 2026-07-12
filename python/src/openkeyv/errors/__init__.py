@@ -20,6 +20,7 @@ Exception Hierarchy:
     │   ├── CompressionError
     │   │   └── DecompressionError
     │   ├── ReadOnlyError
+    │   ├── RoutingError
     │   ├── EntryTooLargeError
     │   └── EntryTooSmallError
     └── KeyValueStoreError (store-level errors)
@@ -48,6 +49,7 @@ from openkeyv.errors.wrappers import (
     EntryTooLargeError,
     EntryTooSmallError,
     ReadOnlyError,
+    RoutingError,
 )
 
 __all__ = [
@@ -69,6 +71,7 @@ __all__ = [
     "MissingKeyError",
     "PathSecurityError",
     "ReadOnlyError",
+    "RoutingError",
     "SerializationError",
     "StoreConnectionError",
     "StoreSetupError",

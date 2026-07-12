@@ -1,12 +1,13 @@
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, SupportsFloat
+from typing import Any, SupportsFloat, cast
 
 from typing_extensions import override
 
+from openkeyv.errors import RoutingError
 from openkeyv.protocols.key_value import AsyncKeyValue
 from openkeyv.wrappers.base import BaseWrapper
 
-RoutingFunction = Callable[[str | None], AsyncKeyValue | None]
+RoutingFunction = Callable[[str | None], AsyncKeyValue]
 
 
 class RoutingWrapper(BaseWrapper):
@@ -17,36 +18,26 @@ class RoutingWrapper(BaseWrapper):
     collection name or other custom logic.
 
     Example:
-        def route_by_collection(collection: str | None) -> AsyncKeyValue | None:
+        def route_by_collection(collection: str | None) -> AsyncKeyValue:
             if collection == "sessions":
                 return redis_store
-            elif collection == "users":
+            if collection == "users":
                 return dynamo_store
-            return None
+            raise RoutingError(collection)
 
-        router = RoutingWrapper(
-            routing_function=route_by_collection,
-            default_store=memory_store
-        )
+        router = RoutingWrapper(routing_function=route_by_collection)
     """
 
     _routing_function: RoutingFunction
-    _default_store: AsyncKeyValue
 
-    def __init__(
-        self,
-        routing_function: RoutingFunction,
-        default_store: AsyncKeyValue,
-    ) -> None:
+    def __init__(self, routing_function: RoutingFunction) -> None:
         """Initialize the routing wrapper.
 
         Args:
             routing_function: Function that takes a collection name and returns the store to use.
-                             Should return None if no specific store is found.
-            default_store: Fallback store if routing_function returns None.
+                It must raise when no store is configured.
         """
         self._routing_function = routing_function
-        self._default_store = default_store
 
         super().__init__()
 
@@ -58,10 +49,13 @@ class RoutingWrapper(BaseWrapper):
 
         Returns:
             The AsyncKeyValue store to use for this collection.
+
+        Raises:
+            RoutingError: The routing function did not return a store.
         """
-        store: AsyncKeyValue | None = self._routing_function(collection)
+        store = cast("AsyncKeyValue | None", self._routing_function(collection))
         if store is None:
-            return self._default_store
+            raise RoutingError(collection)
         return store
 
     @override

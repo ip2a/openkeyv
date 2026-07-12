@@ -37,6 +37,16 @@ class ReadOnlyError(KeyValueOperationError):
         )
 
 
+class RoutingError(KeyValueOperationError):
+    """Raised when no store is configured for a collection."""
+
+    def __init__(self, collection: str | None = None):
+        super().__init__(
+            message="No store is configured for the requested collection.",
+            extra_info={"collection": "default" if collection is None else collection},
+        )
+
+
 class EntryTooLargeError(KeyValueOperationError):
     """Raised when an entry exceeds the maximum allowed size."""
 

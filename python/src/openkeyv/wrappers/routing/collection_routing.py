@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from openkeyv.errors import RoutingError
 from openkeyv.protocols.key_value import AsyncKeyValue
 from openkeyv.wrappers.routing.wrapper import RoutingWrapper
 
@@ -18,34 +19,27 @@ class CollectionRoutingWrapper(RoutingWrapper):
                 "sessions": redis_store,
                 "users": dynamo_store,
                 "cache": memory_store,
-            },
-            default_store=disk_store
+                None: disk_store,
+            }
         )
     """
 
-    _collection_map: MappingProxyType[str, AsyncKeyValue]
+    _collection_map: MappingProxyType[str | None, AsyncKeyValue]
 
-    def __init__(
-        self,
-        collection_map: Mapping[str, AsyncKeyValue],
-        default_store: AsyncKeyValue,
-    ) -> None:
+    def __init__(self, collection_map: Mapping[str | None, AsyncKeyValue]) -> None:
         """Initialize collection-based routing.
 
         Args:
             collection_map: Mapping from collection name to store. Each collection
-                           name is mapped to its corresponding backing store.
-            default_store: Store to use for unmapped collections.
+                name, including None for the default collection, must be mapped
+                explicitly.
         """
         self._collection_map = MappingProxyType(mapping=dict(collection_map))
 
-        def route_by_collection(collection: str | None) -> AsyncKeyValue | None:
-            if collection is not None:
-                return self._collection_map.get(collection)
+        def route_by_collection(collection: str | None) -> AsyncKeyValue:
+            try:
+                return self._collection_map[collection]
+            except KeyError as error:
+                raise RoutingError(collection) from error
 
-            return None
-
-        super().__init__(
-            routing_function=route_by_collection,
-            default_store=default_store,
-        )
+        super().__init__(routing_function=route_by_collection)
