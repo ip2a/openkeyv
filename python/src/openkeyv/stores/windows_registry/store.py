@@ -68,7 +68,7 @@ class WindowsRegistryStore(BaseStore):
             collection_sanitization_strategy: The sanitization strategy to use for collections.
         """
         self._hive = HKEY_LOCAL_MACHINE if hive == "HKEY_LOCAL_MACHINE" else HKEY_CURRENT_USER
-        self._registry_path = registry_path or DEFAULT_REGISTRY_PATH
+        self._registry_path = DEFAULT_REGISTRY_PATH if registry_path is None else registry_path
 
         super().__init__(
             default_collection=default_collection,

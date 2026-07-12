@@ -33,7 +33,11 @@ class ReadOnlyError(KeyValueOperationError):
     def __init__(self, operation: str, collection: str | None = None, key: str | None = None):
         super().__init__(
             message="Write operation not allowed on read-only store.",
-            extra_info={"operation": operation, "collection": collection or "default", "key": key or "N/A"},
+            extra_info={
+                "operation": operation,
+                "collection": "default" if collection is None else collection,
+                "key": "N/A" if key is None else key,
+            },
         )
 
 
@@ -53,7 +57,7 @@ class EntryTooLargeError(KeyValueOperationError):
     def __init__(self, size: int, max_size: int, collection: str | None = None, key: str | None = None):
         super().__init__(
             message="Entry size exceeds the maximum allowed size.",
-            extra_info={"size": size, "max_size": max_size, "collection": collection or "default", "key": key},
+            extra_info={"size": size, "max_size": max_size, "collection": "default" if collection is None else collection, "key": key},
         )
 
 
@@ -63,5 +67,5 @@ class EntryTooSmallError(KeyValueOperationError):
     def __init__(self, size: int, min_size: int, collection: str | None = None, key: str | None = None):
         super().__init__(
             message="Entry size is less than the minimum allowed size.",
-            extra_info={"size": size, "min_size": min_size, "collection": collection or "default", "key": key},
+            extra_info={"size": size, "min_size": min_size, "collection": "default" if collection is None else collection, "key": key},
         )

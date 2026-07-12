@@ -508,7 +508,7 @@ class ElasticsearchStore(
     async def _get_collection_keys(self, *, collection: str, limit: int | None = None) -> list[str]:
         """Get up to 10,000 keys in the specified collection (eventually consistent)."""
 
-        limit = min(limit or DEFAULT_PAGE_SIZE, PAGE_LIMIT)
+        limit = min(DEFAULT_PAGE_SIZE if limit is None else limit, PAGE_LIMIT)
 
         result: ObjectApiResponse[Any] = await self._client.options(ignore_status=404).search(
             index=self._get_index_name(collection=collection),
@@ -541,7 +541,7 @@ class ElasticsearchStore(
     async def _get_collection_names(self, *, limit: int | None = None) -> list[str]:
         """List up to 10,000 collections in the elasticsearch store (eventually consistent)."""
 
-        limit = min(limit or DEFAULT_PAGE_SIZE, PAGE_LIMIT)
+        limit = min(DEFAULT_PAGE_SIZE if limit is None else limit, PAGE_LIMIT)
 
         search_response: ObjectApiResponse[Any] = await self._client.options(ignore_status=404).search(
             index=f"{self._index_prefix}-*",

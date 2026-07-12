@@ -23,7 +23,7 @@ class MissingKeyError(KeyValueOperationError):
     def __init__(self, operation: str, collection: str | None = None, key: str | None = None):
         super().__init__(
             message="A key was requested that was required but not found in the store.",
-            extra_info={"operation": operation, "collection": collection or "default", "key": key},
+            extra_info={"operation": operation, "collection": "default" if collection is None else collection, "key": key},
         )
 
 
@@ -33,7 +33,7 @@ class InvalidTTLError(KeyValueOperationError):
     def __init__(self, ttl: Any, extra_info: ExtraInfoType | None = None):
         super().__init__(
             message="A TTL is invalid.",
-            extra_info={"ttl": str(ttl), **(extra_info or {})},
+            extra_info={"ttl": str(ttl), **({} if extra_info is None else extra_info)},
         )
 
 
@@ -47,5 +47,5 @@ class ValueTooLargeError(KeyValueOperationError):
     def __init__(self, size: int, max_size: int, collection: str | None = None, key: str | None = None):
         super().__init__(
             message="Value size exceeds the maximum allowed size.",
-            extra_info={"size": size, "max_size": max_size, "collection": collection or "default", "key": key},
+            extra_info={"size": size, "max_size": max_size, "collection": "default" if collection is None else collection, "key": key},
         )

@@ -4,8 +4,8 @@ from typing import Any, Literal, SupportsFloat
 
 from typing_extensions import override
 
-from openkeyv._utils.managed_entry import dump_to_json_bytes
 from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
+from openkeyv._utils.managed_entry import dump_to_json_bytes
 from openkeyv.protocols.key_value import AsyncKeyValue
 from openkeyv.wrappers.base import BaseWrapper
 
@@ -42,7 +42,7 @@ class LoggingWrapper(BaseWrapper):
                        If False (default), logs the values as a plain string.
         """
         self.key_value: AsyncKeyValue = key_value
-        self.logger: logging.Logger = logger or logging.getLogger("openkeyv.logging")
+        self.logger: logging.Logger = logging.getLogger("openkeyv.logging") if logger is None else logger
         self.log_level: int = log_level
         self.log_values: bool = log_values
         self.structured_logs: bool = structured_logs
@@ -51,7 +51,7 @@ class LoggingWrapper(BaseWrapper):
 
     def _format_collection(self, collection: str | None) -> str:
         """Format collection name for logging."""
-        return collection or DEFAULT_COLLECTION_NAME
+        return DEFAULT_COLLECTION_NAME if collection is None else collection
 
     def _format_message(
         self,

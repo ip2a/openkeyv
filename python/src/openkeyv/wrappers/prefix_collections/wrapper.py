@@ -22,11 +22,11 @@ class PrefixCollectionsWrapper(BaseWrapper):
         """
         self.key_value: AsyncKeyValue = key_value
         self.prefix: str = prefix
-        self.default_collection: str = default_collection or DEFAULT_COLLECTION_NAME
+        self.default_collection: str = DEFAULT_COLLECTION_NAME if default_collection is None else default_collection
         super().__init__()
 
     def _prefix_collection(self, collection: str | None) -> str:
-        return prefix_collection(prefix=self.prefix, collection=collection or self.default_collection)
+        return prefix_collection(prefix=self.prefix, collection=self.default_collection if collection is None else collection)
 
     def _unprefix_collection(self, collection: str) -> str:
         return unprefix_collection(prefix=self.prefix, collection=collection)

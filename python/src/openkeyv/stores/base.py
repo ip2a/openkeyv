@@ -109,14 +109,16 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         self._setup_collection_locks = defaultdict(Lock)
         self._setup_collection_complete = defaultdict(bool)
 
-        self._seed = _seed_to_frozen_seed_data(seed=seed or {})
+        self._seed = _seed_to_frozen_seed_data(seed={} if seed is None else seed)
 
-        self.default_collection = default_collection or DEFAULT_COLLECTION_NAME
+        self.default_collection = DEFAULT_COLLECTION_NAME if default_collection is None else default_collection
 
-        self._serialization_adapter = serialization_adapter or BasicSerializationAdapter()
+        self._serialization_adapter = BasicSerializationAdapter() if serialization_adapter is None else serialization_adapter
 
-        self._key_sanitization_strategy = key_sanitization_strategy or PassthroughStrategy()
-        self._collection_sanitization_strategy = collection_sanitization_strategy or PassthroughStrategy()
+        self._key_sanitization_strategy = PassthroughStrategy() if key_sanitization_strategy is None else key_sanitization_strategy
+        self._collection_sanitization_strategy = (
+            PassthroughStrategy() if collection_sanitization_strategy is None else collection_sanitization_strategy
+        )
 
         self._stable_api = stable_api
 
@@ -224,7 +226,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         Returns:
             The value associated with the key, or None if not found or expired.
         """
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         managed_entry: ManagedEntry | None = await self._get_managed_entry(collection=collection, key=key)
@@ -240,7 +242,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     @bear_enforce
     @override
     async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         entries = await self._get_managed_entries(keys=keys, collection=collection)
@@ -255,7 +257,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     @bear_enforce
     @override
     async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         managed_entry: ManagedEntry | None = await self._get_managed_entry(collection=collection, key=key)
@@ -278,7 +280,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         Returns a list of tuples of the form (value, ttl_seconds). Missing or expired
         entries are represented as (None, None).
         """
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         entries = await self._get_managed_entries(keys=keys, collection=collection)
@@ -337,7 +339,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     @override
     async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         """Store a key-value pair in the specified collection with optional TTL."""
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         created_at, _, expires_at = prepare_entry_timestamps(ttl=ttl)
@@ -361,7 +363,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     ) -> None:
         """Store multiple key-value pairs in the specified collection."""
 
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         if len(keys) != len(values):
@@ -399,7 +401,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     @bear_enforce
     @override
     async def delete(self, key: str, *, collection: str | None = None) -> bool:
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         return await self._delete_managed_entry(key=key, collection=collection)
@@ -408,7 +410,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     @override
     async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
         """Delete multiple managed entries by key from the specified collection."""
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         return await self._delete_managed_entries(keys=keys, collection=collection)
@@ -434,7 +436,7 @@ class BaseEnumerateKeysStore(BaseStore, AsyncEnumerateKeysProtocol, ABC):
     async def keys(self, collection: str | None = None, *, limit: int | None = None) -> list[str]:
         """List all keys in the specified collection."""
 
-        collection = collection or self.default_collection
+        collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         return await self._get_collection_keys(collection=collection, limit=limit)

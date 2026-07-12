@@ -25,12 +25,15 @@ class SingleCollectionWrapper(BaseWrapper):
         """
         self.key_value: AsyncKeyValue = key_value
         self.single_collection: str = single_collection
-        self.default_collection: str = default_collection or DEFAULT_COLLECTION_NAME
-        self.separator: str = separator or DEFAULT_PREFIX_SEPARATOR
+        self.default_collection: str = DEFAULT_COLLECTION_NAME if default_collection is None else default_collection
+        self.separator: str = DEFAULT_PREFIX_SEPARATOR if separator is None else separator
+        if self.separator == "":
+            msg = "Separator must not be empty"
+            raise ValueError(msg)
         super().__init__()
 
     def _prefix_key(self, key: str, collection: str | None = None) -> str:
-        collection_to_use = collection or self.default_collection
+        collection_to_use = self.default_collection if collection is None else collection
         return prefix_key(prefix=collection_to_use, key=key, separator=self.separator)
 
     def _unprefix_key(self, key: str) -> str:

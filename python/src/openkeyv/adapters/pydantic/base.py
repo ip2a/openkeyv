@@ -109,7 +109,7 @@ class BasePydanticAdapter(Generic[T], ABC):
         Raises:
             DeserializationError: If the stored data cannot be validated as the model.
         """
-        collection = collection or self._default_collection
+        collection = self._default_collection if collection is None else collection
 
         value = await self._key_value.get(key=key, collection=collection)
         if value is not None:
@@ -137,7 +137,7 @@ class BasePydanticAdapter(Generic[T], ABC):
         Raises:
             DeserializationError: If any stored value cannot be validated as the model.
         """
-        collection = collection or self._default_collection
+        collection = self._default_collection if collection is None else collection
 
         values: list[dict[str, Any] | None] = await self._key_value.get_many(keys=keys, collection=collection)
 
@@ -154,7 +154,7 @@ class BasePydanticAdapter(Generic[T], ABC):
 
         Propagates SerializationError if the model cannot be serialized.
         """
-        collection = collection or self._default_collection
+        collection = self._default_collection if collection is None else collection
 
         value_dict: dict[str, Any] = self._serialize_model(value=value)
 
@@ -164,7 +164,7 @@ class BasePydanticAdapter(Generic[T], ABC):
         self, keys: Sequence[str], values: Sequence[T], *, collection: str | None = None, ttl: SupportsFloat | None = None
     ) -> None:
         """Serialize and store multiple models, preserving order alignment with keys."""
-        collection = collection or self._default_collection
+        collection = self._default_collection if collection is None else collection
 
         value_dicts: list[dict[str, Any]] = [self._serialize_model(value=value) for value in values]
 
@@ -172,13 +172,13 @@ class BasePydanticAdapter(Generic[T], ABC):
 
     async def delete(self, key: str, *, collection: str | None = None) -> bool:
         """Delete a model by key. Returns True if a value was deleted, else False."""
-        collection = collection or self._default_collection
+        collection = self._default_collection if collection is None else collection
 
         return await self._key_value.delete(key=key, collection=collection)
 
     async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
         """Delete multiple models by key. Returns the count of deleted entries."""
-        collection = collection or self._default_collection
+        collection = self._default_collection if collection is None else collection
 
         return await self._key_value.delete_many(keys=keys, collection=collection)
 
@@ -195,7 +195,7 @@ class BasePydanticAdapter(Generic[T], ABC):
         Raises:
             DeserializationError: If the stored value cannot be validated as the model.
         """
-        collection = collection or self._default_collection
+        collection = self._default_collection if collection is None else collection
 
         entry: dict[str, Any] | None
         ttl_info: float | None
@@ -209,7 +209,7 @@ class BasePydanticAdapter(Generic[T], ABC):
 
     async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[T | None, float | None]]:
         """Batch get models with TTLs. Each element is (model|None, ttl_seconds|None)."""
-        collection = collection or self._default_collection
+        collection = self._default_collection if collection is None else collection
 
         entries: list[tuple[dict[str, Any] | None, float | None]] = await self._key_value.ttl_many(keys=keys, collection=collection)
 

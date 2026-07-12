@@ -206,7 +206,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
         if client:
             self._client = client
         else:
-            hosts = hosts or [("localhost", 3000)]
+            hosts = [("localhost", 3000)] if hosts is None else hosts
             config = {"hosts": hosts}
             self._client = _create_aerospike_client(config)
 
@@ -290,7 +290,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
 
     @override
     async def _get_collection_keys(self, *, collection: str, limit: int | None = None) -> list[str]:
-        limit = min(limit or DEFAULT_PAGE_SIZE, PAGE_LIMIT)
+        limit = min(DEFAULT_PAGE_SIZE if limit is None else limit, PAGE_LIMIT)
 
         pattern = compound_key(collection=collection, key="")
 
