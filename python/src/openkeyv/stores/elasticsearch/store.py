@@ -267,9 +267,7 @@ class ElasticsearchStore(
         if elasticsearch_client:
             self._client = elasticsearch_client
         elif url:
-            self._client = AsyncElasticsearch(
-                hosts=[url], api_key=api_key, http_compress=True, request_timeout=10, retry_on_timeout=True, max_retries=3
-            )
+            self._client = AsyncElasticsearch(hosts=[url], api_key=api_key, http_compress=True, request_timeout=10, max_retries=0)
         else:
             msg = "Either elasticsearch_client or url must be provided"
             raise ValueError(msg)
@@ -422,8 +420,6 @@ class ElasticsearchStore(
         except ElasticsearchSerializationError as e:
             msg = f"Failed to serialize document: {e}"
             raise SerializationError(message=msg) from e
-        except Exception:
-            raise
 
     @override
     async def _put_managed_entries(
@@ -457,8 +453,6 @@ class ElasticsearchStore(
         except ElasticsearchSerializationError as e:
             msg = f"Failed to serialize bulk operations: {e}"
             raise SerializationError(message=msg) from e
-        except Exception:
-            raise
 
     @override
     async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:
