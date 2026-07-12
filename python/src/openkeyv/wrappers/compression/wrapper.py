@@ -1,4 +1,5 @@
 import base64
+import binascii
 import gzip
 from collections.abc import Mapping, Sequence
 from typing import Any, SupportsFloat
@@ -6,6 +7,7 @@ from typing import Any, SupportsFloat
 from typing_extensions import override
 
 from openkeyv._utils.managed_entry import dump_to_json_bytes, load_from_json
+from openkeyv.errors import DecompressionError, DeserializationError
 from openkeyv.protocols.key_value import AsyncKeyValue
 from openkeyv.wrappers.base import BaseWrapper
 
@@ -14,6 +16,14 @@ _COMPRESSED_DATA_KEY = "__compressed_data__"
 _COMPRESSION_VERSION_KEY = "__compression_version__"
 _COMPRESSION_VERSION = 1
 _COMPRESSION_ALGORITHM_KEY = "__compression_algorithm__"
+_COMPRESSION_ALGORITHM = "gzip"
+_COMPRESSION_KEYS = frozenset(
+    {
+        _COMPRESSED_DATA_KEY,
+        _COMPRESSION_VERSION_KEY,
+        _COMPRESSION_ALGORITHM_KEY,
+    }
+)
 
 
 class CompressionWrapper(BaseWrapper):
@@ -50,8 +60,8 @@ class CompressionWrapper(BaseWrapper):
 
     def _compress_value(self, value: dict[str, Any]) -> dict[str, Any]:
         """Compress a value into the compressed format."""
-        # Do not compress if it is already compressed
         if _COMPRESSED_DATA_KEY in value:
+            self._decompress_value(value)
             return value
 
         # Serialize to compact JSON bytes once and check size
@@ -68,7 +78,7 @@ class CompressionWrapper(BaseWrapper):
         return {
             _COMPRESSED_DATA_KEY: base64_str,
             _COMPRESSION_VERSION_KEY: _COMPRESSION_VERSION,
-            _COMPRESSION_ALGORITHM_KEY: "gzip",
+            _COMPRESSION_ALGORITHM_KEY: _COMPRESSION_ALGORITHM,
         }
 
     def _decompress_value(self, value: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -76,29 +86,35 @@ class CompressionWrapper(BaseWrapper):
         if value is None:
             return None
 
-        # Check if it is compressed
         if _COMPRESSED_DATA_KEY not in value:
             return value
 
-        # Extract compressed data
+        if value.keys() != _COMPRESSION_KEYS:
+            msg = "Compressed value must contain exactly the data, version, and algorithm fields."
+            raise DecompressionError(msg)
+
         base64_str = value[_COMPRESSED_DATA_KEY]
         if not isinstance(base64_str, str):
-            # Corrupted data, return as-is
-            return value
+            msg = "Compressed data must be a Base64 string."
+            raise DecompressionError(msg)
+
+        version = value[_COMPRESSION_VERSION_KEY]
+        if type(version) is not int or version != _COMPRESSION_VERSION:
+            msg = f"Unsupported compression version: {version!r}."
+            raise DecompressionError(msg)
+
+        algorithm = value[_COMPRESSION_ALGORITHM_KEY]
+        if algorithm != _COMPRESSION_ALGORITHM:
+            msg = f"Unsupported compression algorithm: {algorithm!r}."
+            raise DecompressionError(msg)
 
         try:
-            # Decode from base64
-            compressed_bytes = base64.b64decode(base64_str)
-
-            # Decompress with gzip
+            compressed_bytes = base64.b64decode(base64_str, validate=True)
             json_bytes = gzip.decompress(compressed_bytes)
-
-            # Parse JSON
-            return load_from_json(json_str=json_bytes.decode("utf-8"))
-        except Exception:
-            # If decompression fails, return the original value
-            # This handles cases where data might be corrupted
-            return value
+            return load_from_json(json_str=json_bytes)
+        except (binascii.Error, OSError, DeserializationError, TypeError, ValueError) as e:
+            msg = "Failed to decompress stored value."
+            raise DecompressionError(msg) from e
 
     @override
     async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:

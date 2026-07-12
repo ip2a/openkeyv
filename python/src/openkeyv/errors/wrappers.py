@@ -19,6 +19,14 @@ class CorruptedDataError(DecryptionError):
     """Exception raised when the encrypted data is corrupted."""
 
 
+class CompressionError(KeyValueOperationError):
+    """Exception raised when compression or decompression fails."""
+
+
+class DecompressionError(CompressionError):
+    """Exception raised when compressed data cannot be decoded."""
+
+
 class ReadOnlyError(KeyValueOperationError):
     """Raised when a write operation is attempted on a read-only store."""
 

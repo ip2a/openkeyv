@@ -17,6 +17,8 @@ Exception Hierarchy:
     │   │   ├── DecryptionError
     │   │   │   └── CorruptedDataError
     │   │   └── EncryptionVersionError
+    │   ├── CompressionError
+    │   │   └── DecompressionError
     │   ├── ReadOnlyError
     │   ├── EntryTooLargeError
     │   └── EntryTooSmallError
@@ -37,7 +39,9 @@ from openkeyv.errors.key_value import (
 )
 from openkeyv.errors.store import KeyValueStoreError, PathSecurityError, StoreConnectionError, StoreSetupError
 from openkeyv.errors.wrappers import (
+    CompressionError,
     CorruptedDataError,
+    DecompressionError,
     DecryptionError,
     EncryptionError,
     EncryptionVersionError,
@@ -48,7 +52,9 @@ from openkeyv.errors.wrappers import (
 
 __all__ = [
     "BaseKeyValueError",
+    "CompressionError",
     "CorruptedDataError",
+    "DecompressionError",
     "DecryptionError",
     "DeserializationError",
     "EncryptionError",
