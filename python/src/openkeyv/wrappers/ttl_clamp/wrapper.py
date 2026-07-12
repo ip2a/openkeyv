@@ -1,3 +1,4 @@
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any, SupportsFloat, overload
 
@@ -27,10 +28,31 @@ class TTLClampWrapper(BaseWrapper):
             max_ttl: The maximum TTL for puts into the store.
             missing_ttl: The TTL to use for entries that do not have a TTL. Defaults to None.
         """
+        if isinstance(min_ttl, bool) or isinstance(max_ttl, bool) or isinstance(missing_ttl, bool):
+            msg = "TTL clamp values must be finite numbers"
+            raise TypeError(msg)
+
+        min_ttl = float(min_ttl)
+        max_ttl = float(max_ttl)
+        missing_ttl = float(missing_ttl) if missing_ttl is not None else None
+
+        if not math.isfinite(min_ttl) or min_ttl < 0:
+            msg = "min_ttl must be finite and greater than or equal to zero"
+            raise ValueError(msg)
+        if not math.isfinite(max_ttl) or max_ttl <= 0:
+            msg = "max_ttl must be finite and greater than zero"
+            raise ValueError(msg)
+        if min_ttl > max_ttl:
+            msg = "min_ttl must be less than or equal to max_ttl"
+            raise ValueError(msg)
+        if missing_ttl is not None and (not math.isfinite(missing_ttl) or missing_ttl <= 0):
+            msg = "missing_ttl must be finite and greater than zero"
+            raise ValueError(msg)
+
         self.key_value: AsyncKeyValue = key_value
-        self.min_ttl: float = float(min_ttl)
-        self.max_ttl: float = float(max_ttl)
-        self.missing_ttl: float | None = float(missing_ttl) if missing_ttl is not None else None
+        self.min_ttl = min_ttl
+        self.max_ttl = max_ttl
+        self.missing_ttl = missing_ttl
 
         super().__init__()
 
@@ -42,7 +64,9 @@ class TTLClampWrapper(BaseWrapper):
 
     def _ttl_clamp(self, ttl: SupportsFloat | None) -> float | None:
         if ttl is None:
-            return self.missing_ttl
+            ttl = self.missing_ttl
+            if ttl is None:
+                return None
 
         ttl = prepare_ttl(t=ttl)
 

@@ -1,4 +1,5 @@
 import asyncio
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any, SupportsFloat
 
@@ -27,8 +28,17 @@ class TimeoutWrapper(BaseWrapper):
             key_value: The store to wrap.
             timeout: Timeout in seconds for all operations. Defaults to 5.0 seconds.
         """
+        if isinstance(timeout, bool):
+            msg = "Timeout must be a finite number greater than zero"
+            raise TypeError(msg)
+
+        timeout = float(timeout)
+        if not math.isfinite(timeout) or timeout <= 0:
+            msg = "Timeout must be a finite number greater than zero"
+            raise ValueError(msg)
+
         self.key_value: AsyncKeyValue = key_value
-        self.timeout: float = timeout
+        self.timeout = timeout
 
         super().__init__()
 
