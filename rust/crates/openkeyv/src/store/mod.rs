@@ -19,7 +19,7 @@ pub mod null;
 pub mod opensearch;
 #[cfg(feature = "postgres")]
 pub mod postgres;
-#[cfg(any(feature = "redis", feature = "valkey"))]
+#[cfg(feature = "redis")]
 pub mod redis;
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb;
