@@ -9,38 +9,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, SupportsFloat
 
+import orjson
 from typing_extensions import Self
 
 from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.time_to_live import now, now_plus, seconds_to
 from openkeyv.errors import DeserializationError, SerializationError
-
-
-try:
-    import orjson as _json_lib
-
-    def _dump_to_json_impl(obj: dict[str, Any]) -> str:
-        return _json_lib.dumps(obj, option=_json_lib.OPT_SORT_KEYS).decode()
-
-    def _dump_to_json_bytes_impl(obj: dict[str, Any]) -> bytes:
-        return _json_lib.dumps(obj)
-
-    def _load_from_json_impl(json_data: str | bytes) -> Any:
-        return _json_lib.loads(json_data)
-
-except ImportError:
-    import json as _json_lib
-
-    def _dump_to_json_impl(obj: dict[str, Any]) -> str:
-        return _json_lib.dumps(obj, sort_keys=True)
-
-    def _dump_to_json_bytes_impl(obj: dict[str, Any]) -> bytes:
-        return _json_lib.dumps(obj, separators=(",", ":")).encode("utf-8")
-
-    def _load_from_json_impl(json_data: str | bytes) -> Any:
-        if isinstance(json_data, bytes):
-            json_data = json_data.decode("utf-8")
-        return _json_lib.loads(json_data)
 
 
 @dataclass(kw_only=True)
@@ -99,7 +73,7 @@ class ManagedEntry:
 def dump_to_json(obj: dict[str, Any]) -> str:
     """Serialize a dictionary to a sorted JSON string."""
     try:
-        return _dump_to_json_impl(obj)
+        return orjson.dumps(obj, option=orjson.OPT_SORT_KEYS).decode()
     except (ValueError, TypeError) as e:
         msg: str = f"Failed to serialize object to JSON: {e}"
         raise SerializationError(msg) from e
@@ -109,7 +83,7 @@ def dump_to_json(obj: dict[str, Any]) -> str:
 def dump_to_json_bytes(obj: dict[str, Any]) -> bytes:
     """Serialize a dictionary to compact JSON bytes."""
     try:
-        return _dump_to_json_bytes_impl(obj)
+        return orjson.dumps(obj)
     except (ValueError, TypeError) as e:
         msg: str = f"Failed to serialize object to JSON: {e}"
         raise SerializationError(msg) from e
@@ -119,7 +93,7 @@ def dump_to_json_bytes(obj: dict[str, Any]) -> bytes:
 def load_from_json(json_str: str | bytes) -> dict[str, Any]:
     """Deserialize JSON string or bytes to a dictionary."""
     try:
-        loaded = _load_from_json_impl(json_str)
+        loaded = orjson.loads(json_str)
     except (ValueError, TypeError) as e:
         msg: str = f"Failed to deserialize JSON string: {e}"
         raise DeserializationError(msg) from e
