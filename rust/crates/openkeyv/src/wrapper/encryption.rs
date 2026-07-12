@@ -9,14 +9,11 @@ const ENCRYPTION_MAGIC: &[u8] = b"OKVE1";
 ///
 /// Value bytes are encrypted via the provided closure and stored with a small
 /// binary envelope that preserves the original value kind.
-///
-/// Non-encrypted values are passed through transparently.
 pub struct EncryptionWrapper<T, E, D> {
     inner: T,
     encrypt_fn: E,
     decrypt_fn: D,
     version: u32,
-    raise_on_error: bool,
 }
 
 impl<T, E, D> EncryptionWrapper<T, E, D>
@@ -30,23 +27,6 @@ where
             encrypt_fn,
             decrypt_fn,
             version,
-            raise_on_error: true,
-        }
-    }
-
-    pub fn with_options(
-        inner: T,
-        encrypt_fn: E,
-        decrypt_fn: D,
-        version: u32,
-        raise_on_error: bool,
-    ) -> Self {
-        Self {
-            inner,
-            encrypt_fn,
-            decrypt_fn,
-            version,
-            raise_on_error,
         }
     }
 
@@ -66,34 +46,21 @@ where
             None => return Ok(None),
         };
         if !value.bytes().starts_with(ENCRYPTION_MAGIC) {
-            return Ok(Some(value));
+            return Err(Error::CorruptedData);
         }
 
-        let decrypt = || -> Result<Value> {
-            let bytes = value.bytes();
-            let header_len = ENCRYPTION_MAGIC.len() + 5;
-            if bytes.len() < header_len {
-                return Err(Error::CorruptedData);
-            }
-            let mut version = [0_u8; 4];
-            version.copy_from_slice(&bytes[ENCRYPTION_MAGIC.len()..ENCRYPTION_MAGIC.len() + 4]);
-            let version = u32::from_le_bytes(version);
-            let kind = ValueKind::from_tag(bytes[ENCRYPTION_MAGIC.len() + 4])
-                .ok_or(Error::CorruptedData)?;
-            let decrypted = (self.decrypt_fn)(&bytes[header_len..], version)?;
-            Ok(Value::new(kind, decrypted))
-        };
-
-        match decrypt() {
-            Ok(v) => Ok(Some(v)),
-            Err(e) => {
-                if self.raise_on_error {
-                    Err(e)
-                } else {
-                    Ok(None)
-                }
-            }
+        let bytes = value.bytes();
+        let header_len = ENCRYPTION_MAGIC.len() + 5;
+        if bytes.len() < header_len {
+            return Err(Error::CorruptedData);
         }
+        let mut version = [0_u8; 4];
+        version.copy_from_slice(&bytes[ENCRYPTION_MAGIC.len()..ENCRYPTION_MAGIC.len() + 4]);
+        let version = u32::from_le_bytes(version);
+        let kind =
+            ValueKind::from_tag(bytes[ENCRYPTION_MAGIC.len() + 4]).ok_or(Error::CorruptedData)?;
+        let decrypted = (self.decrypt_fn)(&bytes[header_len..], version)?;
+        Ok(Some(Value::new(kind, decrypted)))
     }
 }
 
@@ -216,6 +183,10 @@ mod tests {
         Ok(data.to_vec())
     }
 
+    fn fail_decrypt(_data: &[u8], _version: u32) -> Result<Vec<u8>> {
+        Err(Error::Decryption("failed".to_owned()))
+    }
+
     #[tokio::test]
     async fn test_encryption_wrapper_roundtrip() {
         let inner = MemoryStore::new();
@@ -228,20 +199,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encryption_wrapper_decrypt_error() {
+    async fn test_encryption_wrapper_rejects_unencrypted_value() {
         let inner = MemoryStore::new();
-        let wrapper = EncryptionWrapper::with_options(inner, noop_encrypt, noop_decrypt, 1, false);
+        let wrapper = EncryptionWrapper::new(inner, noop_encrypt, noop_decrypt, 1);
 
-        // Insert a non-encrypted value directly into inner store
-        let plain = Value::integer(42);
         wrapper
             .inner
-            .put("k", plain.clone(), None, None)
+            .put("k", Value::integer(42), None, None)
             .await
             .unwrap();
 
-        // Should pass through transparently
-        let got = wrapper.get("k", None).await.unwrap();
-        assert_eq!(got, Some(plain));
+        assert_eq!(
+            wrapper.get("k", None).await.unwrap_err(),
+            Error::CorruptedData
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encryption_wrapper_propagates_decrypt_error() {
+        let inner = MemoryStore::new();
+        let wrapper = EncryptionWrapper::new(inner, noop_encrypt, fail_decrypt, 1);
+
+        wrapper
+            .put("k", Value::utf8("secret"), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            wrapper.get("k", None).await.unwrap_err(),
+            Error::Decryption("failed".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encryption_wrapper_preserves_missing_value() {
+        let inner = MemoryStore::new();
+        let wrapper = EncryptionWrapper::new(inner, noop_encrypt, noop_decrypt, 1);
+
+        assert_eq!(wrapper.get("missing", None).await.unwrap(), None);
     }
 }
