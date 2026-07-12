@@ -19,21 +19,13 @@ class ReadOnlyWrapper(BaseWrapper):
     - Preventing accidental modifications in certain environments
     """
 
-    def __init__(
-        self,
-        key_value: AsyncKeyValue,
-        raise_on_write: bool = True,
-    ) -> None:
+    def __init__(self, key_value: AsyncKeyValue) -> None:
         """Initialize the read-only wrapper.
 
         Args:
             key_value: The store to wrap.
-            raise_on_write: If True (default), raises ReadOnlyError on write attempts.
-                           If False, silently ignores writes (put/put_many return None,
-                           delete/delete_many return False/0).
         """
         self.key_value: AsyncKeyValue = key_value
-        self.raise_on_write: bool = raise_on_write
 
         super().__init__()
 
@@ -55,8 +47,7 @@ class ReadOnlyWrapper(BaseWrapper):
 
     @override
     async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
-        if self.raise_on_write:
-            raise ReadOnlyError(operation="put", collection=collection, key=key)
+        raise ReadOnlyError(operation="put", collection=collection, key=key)
 
     @override
     async def put_many(
@@ -67,17 +58,12 @@ class ReadOnlyWrapper(BaseWrapper):
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
     ) -> None:
-        if self.raise_on_write:
-            raise ReadOnlyError(operation="put_many", collection=collection, key=f"{len(keys)} keys")
+        raise ReadOnlyError(operation="put_many", collection=collection, key=f"{len(keys)} keys")
 
     @override
     async def delete(self, key: str, *, collection: str | None = None) -> bool:
-        if self.raise_on_write:
-            raise ReadOnlyError(operation="delete", collection=collection, key=key)
-        return False
+        raise ReadOnlyError(operation="delete", collection=collection, key=key)
 
     @override
     async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
-        if self.raise_on_write:
-            raise ReadOnlyError(operation="delete_many", collection=collection, key=f"{len(keys)} keys")
-        return 0
+        raise ReadOnlyError(operation="delete_many", collection=collection, key=f"{len(keys)} keys")
