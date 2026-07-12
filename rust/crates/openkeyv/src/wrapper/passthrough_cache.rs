@@ -6,8 +6,8 @@ use std::collections::HashSet;
 
 /// A two-tier cache wrapper.
 ///
-/// Reads from the cache store first; on miss, falls back to the primary store
-/// and populates the cache with the result (using a clamped TTL if configured).
+/// Reads from the cache store first, then reads the primary store on a cache miss
+/// and populates the cache with the result.
 pub struct PassthroughCacheWrapper<C: AsyncKeyValue, P: AsyncKeyValue> {
     cache: C,
     primary: P,
@@ -42,8 +42,7 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
                 if let Some(ref v) = value {
                     self.cache
                         .put(key, v.clone(), collection, self.cache_ttl)
-                        .await
-                        .ok();
+                        .await?;
                 }
                 Ok(value)
             }
@@ -58,8 +57,7 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
                 if let Some((ref v, _)) = result {
                     self.cache
                         .put(key, v.clone(), collection, self.cache_ttl)
-                        .await
-                        .ok();
+                        .await?;
                 }
                 Ok(result)
             }
@@ -73,12 +71,12 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
-        self.cache.delete(key, collection).await.ok();
+        self.cache.delete(key, collection).await?;
         self.primary.put(key, value, collection, ttl).await
     }
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
-        self.cache.delete(key, collection).await.ok();
+        self.cache.delete(key, collection).await?;
         self.primary.delete(key, collection).await
     }
 
@@ -93,8 +91,7 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
             if let Some(v) = result {
                 self.cache
                     .put(key, v.clone(), collection, self.cache_ttl)
-                    .await
-                    .ok();
+                    .await?;
             }
         }
         Ok(results)
@@ -116,14 +113,14 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         ttl: Option<f64>,
     ) -> Result<()> {
         for key in keys {
-            self.cache.delete(key, collection).await.ok();
+            self.cache.delete(key, collection).await?;
         }
         self.primary.put_many(keys, values, collection, ttl).await
     }
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
         for key in keys {
-            self.cache.delete(key, collection).await.ok();
+            self.cache.delete(key, collection).await?;
         }
         self.primary.delete_many(keys, collection).await
     }
@@ -136,9 +133,21 @@ where
     P: AsyncKeyValue + AsyncEnumerateKeys + Send + Sync,
 {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
-        let cache = self.cache.keys(collection, None).await;
-        let primary = self.primary.keys(collection, None).await;
-        merge_string_results(cache, primary, limit)
+        let cache = self.cache.keys(collection, None).await?;
+        let primary = self.primary.keys(collection, None).await?;
+        let mut seen = HashSet::new();
+        let mut merged = Vec::new();
+
+        for value in cache.into_iter().chain(primary) {
+            if seen.insert(value.clone()) {
+                merged.push(value);
+                if limit.is_some_and(|limit| merged.len() >= limit) {
+                    break;
+                }
+            }
+        }
+
+        Ok(merged)
     }
 }
 
@@ -149,46 +158,29 @@ where
     P: AsyncKeyValue + AsyncEnumerateCollections + Send + Sync,
 {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
-        let cache = self.cache.collections(None).await;
-        let primary = self.primary.collections(None).await;
-        merge_string_results(cache, primary, limit)
-    }
-}
+        let cache = self.cache.collections(None).await?;
+        let primary = self.primary.collections(None).await?;
+        let mut seen = HashSet::new();
+        let mut merged = Vec::new();
 
-fn merge_string_results(
-    first: Result<Vec<String>>,
-    second: Result<Vec<String>>,
-    limit: Option<usize>,
-) -> Result<Vec<String>> {
-    let mut seen = HashSet::new();
-    let mut merged = Vec::new();
-
-    for list in [first, second] {
-        match list {
-            Ok(values) => {
-                for value in values {
-                    if seen.insert(value.clone()) {
-                        merged.push(value);
-                        if let Some(limit) = limit {
-                            if merged.len() >= limit {
-                                return Ok(merged);
-                            }
-                        }
-                    }
+        for value in cache.into_iter().chain(primary) {
+            if seen.insert(value.clone()) {
+                merged.push(value);
+                if limit.is_some_and(|limit| merged.len() >= limit) {
+                    break;
                 }
             }
-            Err(err) if merged.is_empty() => return Err(err),
-            Err(_) => {}
         }
-    }
 
-    Ok(merged)
+        Ok(merged)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
+    use crate::wrapper::readonly::ReadOnlyWrapper;
 
     #[tokio::test]
     async fn test_passthrough_cache() {
@@ -208,5 +200,24 @@ mod tests {
         // (in this test both are in memory, but verifies structure)
         let got2 = wrapper.get("k", None).await.unwrap();
         assert_eq!(got2, Some(value));
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_cache_propagates_cache_write_errors() {
+        let cache = ReadOnlyWrapper::new(MemoryStore::new());
+        let primary = MemoryStore::new();
+        primary
+            .put("k", Value::utf8("v"), None, None)
+            .await
+            .unwrap();
+        let wrapper = PassthroughCacheWrapper::new(cache, primary);
+
+        assert!(wrapper.get("k", None).await.is_err());
+        assert!(
+            wrapper
+                .put("k", Value::utf8("next"), None, None)
+                .await
+                .is_err()
+        );
     }
 }
