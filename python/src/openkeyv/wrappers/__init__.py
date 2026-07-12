@@ -1,11 +1,4 @@
-"""Friendly top-level exports for wrappers.
-
-This module exposes common wrappers via:
-
-    from openkeyv.wrappers import RetryWrapper
-
-without eagerly importing all wrapper modules.
-"""
+"""Top-level wrapper exports."""
 
 from __future__ import annotations
 
@@ -17,7 +10,6 @@ _SYMBOL_TO_MODULE: dict[str, str] = {
     "CollectionRoutingWrapper": "openkeyv.wrappers.routing",
     "CompressionWrapper": "openkeyv.wrappers.compression",
     "DefaultValueWrapper": "openkeyv.wrappers.default_value",
-    "FallbackWrapper": "openkeyv.wrappers.fallback",
     "FernetEncryptionWrapper": "openkeyv.wrappers.encryption",
     "LimitSizeWrapper": "openkeyv.wrappers.limit_size",
     "LoggingWrapper": "openkeyv.wrappers.logging",
@@ -25,7 +17,6 @@ _SYMBOL_TO_MODULE: dict[str, str] = {
     "PrefixCollectionsWrapper": "openkeyv.wrappers.prefix_collections",
     "PrefixKeysWrapper": "openkeyv.wrappers.prefix_keys",
     "ReadOnlyWrapper": "openkeyv.wrappers.read_only",
-    "RetryWrapper": "openkeyv.wrappers.retry",
     "RoutingFunction": "openkeyv.wrappers.routing",
     "RoutingWrapper": "openkeyv.wrappers.routing",
     "SingleCollectionWrapper": "openkeyv.wrappers.single_collection",

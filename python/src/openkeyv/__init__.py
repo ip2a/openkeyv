@@ -5,10 +5,10 @@ implemented in Rust and exposed to Python via PyO3.
 """
 
 from openkeyv._internal import (
-    MemoryStore,
-    SimpleStore,
     FileTreeStore,
+    MemoryStore,
     NullStore,
+    SimpleStore,
 )
 
 try:
@@ -97,67 +97,62 @@ try:
 except ImportError:
     WindowsRegistryStore = None  # type: ignore[misc,assignment]
 
-from openkeyv.adapters.pydantic import PydanticAdapter
 from openkeyv.adapters.dataclass import DataclassAdapter
+from openkeyv.adapters.pydantic import PydanticAdapter
 from openkeyv.adapters.raise_on_missing import RaiseOnMissingAdapter
-
 from openkeyv.wrappers.compression import CompressionWrapper
 from openkeyv.wrappers.default_value import DefaultValueWrapper
 from openkeyv.wrappers.encryption import FernetEncryptionWrapper
-from openkeyv.wrappers.fallback import FallbackWrapper
 from openkeyv.wrappers.limit_size import LimitSizeWrapper
 from openkeyv.wrappers.logging import LoggingWrapper
 from openkeyv.wrappers.passthrough_cache import PassthroughCacheWrapper
 from openkeyv.wrappers.prefix_collections import PrefixCollectionsWrapper
 from openkeyv.wrappers.prefix_keys import PrefixKeysWrapper
 from openkeyv.wrappers.read_only import ReadOnlyWrapper
-from openkeyv.wrappers.retry import RetryWrapper
-from openkeyv.wrappers.routing import RoutingWrapper, CollectionRoutingWrapper
+from openkeyv.wrappers.routing import CollectionRoutingWrapper, RoutingWrapper
 from openkeyv.wrappers.single_collection import SingleCollectionWrapper
 from openkeyv.wrappers.statistics import StatisticsWrapper
 from openkeyv.wrappers.timeout import TimeoutWrapper
 from openkeyv.wrappers.ttl_clamp import TTLClampWrapper
 
 __all__ = [
-    "MemoryStore",
-    "SimpleStore",
-    "FileTreeStore",
-    "NullStore",
-    "DiskStore",
-    "RedisStore",
-    "ValkeyStore",
-    "RocksDBStore",
-    "PostgresStore",
-    "MongoStore",
-    "DynamoDBStore",
-    "S3Store",
-    "DuckDBStore",
-    "MemcachedStore",
-    "VaultStore",
-    "KeyringStore",
-    "FirestoreStore",
-    "OpenSearchStore",
     "AerospikeStore",
-    "ElasticsearchStore",
-    "WindowsRegistryStore",
-    "PydanticAdapter",
-    "DataclassAdapter",
-    "RaiseOnMissingAdapter",
+    "CollectionRoutingWrapper",
     "CompressionWrapper",
+    "DataclassAdapter",
     "DefaultValueWrapper",
+    "DiskStore",
+    "DuckDBStore",
+    "DynamoDBStore",
+    "ElasticsearchStore",
     "FernetEncryptionWrapper",
-    "FallbackWrapper",
+    "FileTreeStore",
+    "FirestoreStore",
+    "KeyringStore",
     "LimitSizeWrapper",
     "LoggingWrapper",
+    "MemcachedStore",
+    "MemoryStore",
+    "MongoStore",
+    "NullStore",
+    "OpenSearchStore",
     "PassthroughCacheWrapper",
+    "PostgresStore",
     "PrefixCollectionsWrapper",
     "PrefixKeysWrapper",
+    "PydanticAdapter",
+    "RaiseOnMissingAdapter",
     "ReadOnlyWrapper",
-    "RetryWrapper",
+    "RedisStore",
+    "RocksDBStore",
     "RoutingWrapper",
-    "CollectionRoutingWrapper",
+    "S3Store",
+    "SimpleStore",
     "SingleCollectionWrapper",
     "StatisticsWrapper",
-    "TimeoutWrapper",
     "TTLClampWrapper",
+    "TimeoutWrapper",
+    "ValkeyStore",
+    "VaultStore",
+    "WindowsRegistryStore",
 ]

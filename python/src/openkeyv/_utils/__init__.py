@@ -6,7 +6,6 @@ This package provides internal utilities used across store implementations:
 - compound: Key/collection compounding and prefixing utilities
 - constants: Default values for TTL, etc.
 - managed_entry: ManagedEntry dataclass for storing values with metadata
-- retry: Async retry operation with exponential backoff
 - sanitization: Key/collection sanitization strategies
 - sanitize: Low-level string sanitization functions
 - serialization: Serialization adapters for ManagedEntry objects
