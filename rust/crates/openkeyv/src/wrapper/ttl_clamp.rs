@@ -85,7 +85,11 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TtlClampWrapper<T> {
         self.inner.get(key, collection).await
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         self.inner.ttl(key, collection).await
     }
 
@@ -116,7 +120,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TtlClampWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         self.inner.ttl_many(keys, collection).await
     }
 
@@ -173,7 +177,7 @@ mod tests {
             .unwrap();
 
         let (_, ttl) = wrapper.ttl("k", None).await.unwrap().unwrap();
-        assert!(ttl <= 10.0);
+        assert!(ttl.unwrap() <= 10.0);
     }
 
     #[tokio::test]
@@ -188,7 +192,7 @@ mod tests {
             .unwrap();
 
         let (_, ttl) = wrapper.ttl("k", None).await.unwrap().unwrap();
-        assert!(ttl > 9.0);
+        assert!(ttl.unwrap() > 9.0);
     }
 
     #[tokio::test]
@@ -200,6 +204,6 @@ mod tests {
         wrapper.put("k", value.clone(), None, None).await.unwrap();
 
         let (_, ttl) = wrapper.ttl("k", None).await.unwrap().unwrap();
-        assert!(ttl > 4.0);
+        assert!(ttl.unwrap() > 4.0);
     }
 }

@@ -26,6 +26,15 @@ async def test_local_store_roundtrip_and_batches(store_type: type[MemoryStore] |
 
 
 @pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore])
+async def test_local_store_preserves_missing_ttl(store_type: type[MemoryStore] | type[SimpleStore]) -> None:
+    store = store_type()
+    await store.put("persistent", "value")
+
+    assert await store.ttl("persistent") == ("value", None)
+    assert await store.ttl_many(["persistent", "missing"]) == [("value", None), (None, None)]
+
+
+@pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore])
 async def test_local_store_ttl_expires(store_type: type[MemoryStore] | type[SimpleStore]) -> None:
     store = store_type()
     await store.put("temporary", "value", ttl=0.01)

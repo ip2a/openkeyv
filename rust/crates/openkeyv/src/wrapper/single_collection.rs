@@ -52,7 +52,11 @@ impl<T: AsyncKeyValue> AsyncKeyValue for SingleCollectionWrapper<T> {
             .await
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let compound = self.compound_key(collection, key);
         self.inner
             .ttl(&compound, Some(&self.backing_collection))
@@ -97,7 +101,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for SingleCollectionWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let compounds: Vec<String> = keys
             .iter()
             .map(|k| self.compound_key(collection, k))

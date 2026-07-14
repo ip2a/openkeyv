@@ -30,7 +30,11 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TimeoutWrapper<T> {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         match timeout(self.duration, self.inner.ttl(key, collection)).await {
             Ok(result) => result,
             Err(_) => Err(Error::InvalidOperation("operation timed out".to_string())),
@@ -72,7 +76,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TimeoutWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         match timeout(self.duration, self.inner.ttl_many(keys, collection)).await {
             Ok(result) => result,
             Err(_) => Err(Error::InvalidOperation("operation timed out".to_string())),

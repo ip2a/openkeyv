@@ -125,14 +125,18 @@ impl AsyncKeyValue for MemoryStore {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
         let col = self.get_collection(cname)?;
         match col.get(key) {
             Some(entry) if !entry.is_expired() => {
-                let ttl = entry.ttl().unwrap_or(0.0);
+                let ttl = entry.ttl();
                 Ok(Some((entry.value.clone(), ttl)))
             }
             _ => Ok(None),
@@ -193,7 +197,7 @@ impl AsyncKeyValue for MemoryStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
@@ -202,7 +206,7 @@ impl AsyncKeyValue for MemoryStore {
             .iter()
             .map(|k| {
                 col.get(k).filter(|e| !e.is_expired()).map(|e| {
-                    let ttl = e.ttl().unwrap_or(0.0);
+                    let ttl = e.ttl();
                     (e.value.clone(), ttl)
                 })
             })
@@ -326,6 +330,24 @@ mod tests {
         store.put("key1", value.clone(), None, None).await.unwrap();
         let result = store.get("key1", None).await.unwrap();
         assert_eq!(result, Some(value));
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_preserves_missing_ttl() {
+        let store = MemoryStore::new();
+        let value = Value::utf8("persistent");
+        let keys = vec!["key1".to_string(), "missing".to_string()];
+
+        store.put("key1", value.clone(), None, None).await.unwrap();
+
+        assert_eq!(
+            store.ttl("key1", None).await.unwrap(),
+            Some((value.clone(), None))
+        );
+        assert_eq!(
+            store.ttl_many(&keys, None).await.unwrap(),
+            vec![Some((value, None)), None]
+        );
     }
 
     #[tokio::test]

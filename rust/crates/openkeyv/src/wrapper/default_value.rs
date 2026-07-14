@@ -31,10 +31,14 @@ impl<T: AsyncKeyValue> AsyncKeyValue for DefaultValueWrapper<T> {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         match self.inner.ttl(key, collection).await? {
             Some((value, ttl)) => Ok(Some((value, ttl))),
-            None => Ok(Some((self.default_value.clone(), 0.0))),
+            None => Ok(Some((self.default_value.clone(), None))),
         }
     }
 
@@ -68,11 +72,11 @@ impl<T: AsyncKeyValue> AsyncKeyValue for DefaultValueWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let results = self.inner.ttl_many(keys, collection).await?;
         Ok(results
             .into_iter()
-            .map(|opt| opt.or_else(|| Some((self.default_value.clone(), 0.0))))
+            .map(|opt| opt.or_else(|| Some((self.default_value.clone(), None))))
             .collect())
     }
 

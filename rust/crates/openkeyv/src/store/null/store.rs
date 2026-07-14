@@ -41,7 +41,11 @@ impl AsyncKeyValue for NullStore {
         Ok(None)
     }
 
-    async fn ttl(&self, _key: &str, _collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        _key: &str,
+        _collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         Ok(None)
     }
 
@@ -74,7 +78,7 @@ impl AsyncKeyValue for NullStore {
         &self,
         keys: &[String],
         _collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         Ok(vec![None; keys.len()])
     }
 

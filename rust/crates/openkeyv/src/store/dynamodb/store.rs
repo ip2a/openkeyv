@@ -723,10 +723,14 @@ impl AsyncKeyValue for DynamoDBStore {
             .map(|entry| entry.value))
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let collection = self.collection_name(collection);
         Ok(self.read_entry(collection, key).await?.map(|entry| {
-            let ttl = entry.ttl().unwrap_or(0.0);
+            let ttl = entry.ttl();
             (entry.value, ttl)
         }))
     }
@@ -788,7 +792,7 @@ impl AsyncKeyValue for DynamoDBStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let collection = self.collection_name(collection);
         let entries = self.read_entries(collection, keys).await?;
         Ok(keys
@@ -796,7 +800,7 @@ impl AsyncKeyValue for DynamoDBStore {
             .map(|key| {
                 entries
                     .get(key)
-                    .map(|entry| (entry.value.clone(), entry.ttl().unwrap_or(0.0)))
+                    .map(|entry| (entry.value.clone(), entry.ttl()))
             })
             .collect())
     }
@@ -1488,7 +1492,8 @@ mod tests {
         );
         let ttl = store.ttl("expiring", None).await.unwrap().unwrap();
         assert_eq!(ttl.0, Value::utf8("expiring"));
-        assert!(ttl.1 > 0.0 && ttl.1 <= 60.0);
+        let ttl = ttl.1.unwrap();
+        assert!(ttl > 0.0 && ttl <= 60.0);
 
         assert!(store.destroy().await.unwrap());
         let missing = DynamoDBStore::from_client(
@@ -1573,7 +1578,7 @@ mod tests {
             ttl_values[0].as_ref().map(|(value, _)| value),
             Some(&Value::utf8("last-key-005"))
         );
-        assert!(ttl_values[0].as_ref().unwrap().1 > 0.0);
+        assert!(ttl_values[0].as_ref().unwrap().1.unwrap() > 0.0);
         assert!(ttl_values[1].is_none());
         assert_eq!(
             ttl_values[2].as_ref().map(|(value, _)| value),

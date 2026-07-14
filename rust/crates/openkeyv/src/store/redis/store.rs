@@ -81,7 +81,11 @@ impl AsyncKeyValue for RedisStore {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
         let mut conn = self.connection();
@@ -92,7 +96,7 @@ impl AsyncKeyValue for RedisStore {
                 if entry.is_expired() {
                     Ok(None)
                 } else {
-                    let ttl = entry.ttl().unwrap_or(0.0);
+                    let ttl = entry.ttl();
                     Ok(Some((entry.value, ttl)))
                 }
             }
@@ -165,7 +169,7 @@ impl AsyncKeyValue for RedisStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let cname = self.collection_name(collection);
         let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
         let mut conn = self.connection();
@@ -177,7 +181,7 @@ impl AsyncKeyValue for RedisStore {
                     if entry.is_expired() {
                         Ok(None)
                     } else {
-                        let ttl = entry.ttl().unwrap_or(0.0);
+                        let ttl = entry.ttl();
                         Ok(Some((entry.value, ttl)))
                     }
                 }

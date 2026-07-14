@@ -162,7 +162,11 @@ impl AsyncKeyValue for S3Store {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
         let sk = Self::s3_key(cname, key);
         match self.get_object_bytes(&sk).await? {
@@ -180,7 +184,7 @@ impl AsyncKeyValue for S3Store {
                         })?;
                     Ok(None)
                 } else {
-                    let ttl = entry.ttl().unwrap_or(0.0);
+                    let ttl = entry.ttl();
                     Ok(Some((entry.value, ttl)))
                 }
             }
@@ -260,7 +264,7 @@ impl AsyncKeyValue for S3Store {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let cname = self.collection_name(collection);
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {

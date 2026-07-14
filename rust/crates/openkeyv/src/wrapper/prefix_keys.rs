@@ -32,7 +32,11 @@ impl<T: AsyncKeyValue> AsyncKeyValue for PrefixKeysWrapper<T> {
         self.inner.get(&self.prefixed(key), collection).await
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         self.inner.ttl(&self.prefixed(key), collection).await
     }
 
@@ -65,7 +69,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for PrefixKeysWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let prefixed: Vec<String> = keys.iter().map(|k| self.prefixed(k)).collect();
         self.inner.ttl_many(&prefixed, collection).await
     }

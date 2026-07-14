@@ -82,7 +82,7 @@ impl PyPostgresStore {
                 let tuple = match result {
                     Some((value, ttl)) => {
                         let dict = optional_value_to_py(py, Some(value))?;
-                        (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
+                        (dict, ttl).into_pyobject(py)?.to_owned().unbind()
                     }
                     None => (py.None(), py.None())
                         .into_pyobject(py)?
@@ -173,7 +173,7 @@ impl PyPostgresStore {
                     let tuple = match item {
                         Some((value, ttl)) => {
                             let dict = optional_value_to_py(py, Some(value))?;
-                            (dict, Some(ttl)).into_pyobject(py)?.to_owned().unbind()
+                            (dict, ttl).into_pyobject(py)?.to_owned().unbind()
                         }
                         None => (py.None(), py.None())
                             .into_pyobject(py)?

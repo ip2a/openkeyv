@@ -118,13 +118,17 @@ impl AsyncKeyValue for FileTreeStore {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
         let path = safe_path(self.base_path(), cname, key)?;
         match self.read_entry(&path).await? {
             Some(entry) if !entry.is_expired() => {
-                let ttl = entry.ttl().unwrap_or(0.0);
+                let ttl = entry.ttl();
                 Ok(Some((entry.value, ttl)))
             }
             _ => Ok(None),
@@ -182,7 +186,7 @@ impl AsyncKeyValue for FileTreeStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
         let mut results = Vec::with_capacity(keys.len());
@@ -190,7 +194,7 @@ impl AsyncKeyValue for FileTreeStore {
             let path = safe_path(self.base_path(), cname, key)?;
             match self.read_entry(&path).await? {
                 Some(entry) if !entry.is_expired() => {
-                    let ttl = entry.ttl().unwrap_or(0.0);
+                    let ttl = entry.ttl();
                     results.push(Some((entry.value, ttl)))
                 }
                 _ => results.push(None),

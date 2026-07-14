@@ -108,7 +108,11 @@ impl AsyncKeyValue for KeyringStore {
         })?
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let client = self.client.clone();
         let collection = self.collection_name(collection).to_owned();
         let key = key.to_owned();
@@ -155,7 +159,7 @@ impl AsyncKeyValue for KeyringStore {
             let managed = ManagedEntry::decode(Bytes::from(secret))?;
 
             if !managed.is_expired() {
-                let ttl = managed.ttl().unwrap_or(0.0);
+                let ttl = managed.ttl();
                 return Ok(Some((managed.value, ttl)));
             }
 
@@ -383,7 +387,7 @@ impl AsyncKeyValue for KeyringStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -461,7 +465,7 @@ impl AsyncKeyValue for KeyringStore {
                         }
                     }
                 } else {
-                    let ttl = managed.ttl().unwrap_or(0.0);
+                    let ttl = managed.ttl();
                     results.push(Some((managed.value, ttl)));
                 }
             }
@@ -661,6 +665,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(value, Value::utf8("single-value"));
+        let ttl = ttl.unwrap();
         assert!(ttl > 0.0 && ttl <= 30.0);
 
         let client = store.client.clone();
@@ -724,7 +729,8 @@ mod tests {
         assert_eq!(ttl_results[2].as_ref().unwrap().0, values[1]);
         assert_eq!(ttl_results[3].as_ref().unwrap().0, values[0]);
         for result in ttl_results.into_iter().flatten() {
-            assert!(result.1 > 0.0 && result.1 <= 30.0);
+            let ttl = result.1.unwrap();
+            assert!(ttl > 0.0 && ttl <= 30.0);
         }
 
         let client = store.client.clone();

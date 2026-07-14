@@ -76,7 +76,11 @@ where
         self.decrypt_value(value)
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         match self.inner.ttl(key, collection).await? {
             Some((value, ttl)) => Ok(self.decrypt_value(Some(value))?.map(|v| (v, ttl))),
             None => Ok(None),
@@ -111,7 +115,7 @@ where
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let results = self.inner.ttl_many(keys, collection).await?;
         results
             .into_iter()

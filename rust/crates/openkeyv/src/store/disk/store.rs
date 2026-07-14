@@ -91,7 +91,11 @@ impl AsyncKeyValue for DiskStore {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
         let tree = self.get_tree(cname)?;
         let res = tree.get(key).map_err(|e| Error::StoreConnection {
@@ -103,7 +107,7 @@ impl AsyncKeyValue for DiskStore {
                 if entry.is_expired() {
                     Ok(None)
                 } else {
-                    let ttl = entry.ttl().unwrap_or(0.0);
+                    let ttl = entry.ttl();
                     Ok(Some((entry.value, ttl)))
                 }
             }
@@ -178,7 +182,7 @@ impl AsyncKeyValue for DiskStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let cname = self.collection_name(collection);
         let tree = self.get_tree(cname)?;
         let mut results = Vec::with_capacity(keys.len());
@@ -194,7 +198,7 @@ impl AsyncKeyValue for DiskStore {
                     if entry.is_expired() {
                         results.push(None);
                     } else {
-                        let ttl = entry.ttl().unwrap_or(0.0);
+                        let ttl = entry.ttl();
                         results.push(Some((entry.value, ttl)));
                     }
                 }

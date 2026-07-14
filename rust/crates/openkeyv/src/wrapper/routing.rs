@@ -39,7 +39,11 @@ impl<F: Fn(Option<&str>, &str) -> usize + Send + Sync> AsyncKeyValue for Routing
         self.route(collection, key)?.get(key, collection).await
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         self.route(collection, key)?.ttl(key, collection).await
     }
 
@@ -89,7 +93,7 @@ impl<F: Fn(Option<&str>, &str) -> usize + Send + Sync> AsyncKeyValue for Routing
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -238,7 +242,11 @@ impl AsyncKeyValue for CollectionRoutingWrapper {
         self.resolve(collection)?.get(key, collection).await
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         self.resolve(collection)?.ttl(key, collection).await
     }
 
@@ -270,7 +278,7 @@ impl AsyncKeyValue for CollectionRoutingWrapper {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         self.resolve(collection)?.ttl_many(keys, collection).await
     }
 

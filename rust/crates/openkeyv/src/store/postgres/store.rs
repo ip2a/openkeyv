@@ -424,7 +424,11 @@ impl AsyncKeyValue for PostgresStore {
         Ok(Some(entry.value))
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let collection = self.collection_name(collection);
         let row = sqlx::query(&format!(
             "SELECT entry, expires_at FROM {} WHERE collection = $1 AND key = $2",
@@ -467,7 +471,7 @@ impl AsyncKeyValue for PostgresStore {
             })?;
             return Ok(None);
         }
-        let ttl = entry.ttl().unwrap_or(0.0);
+        let ttl = entry.ttl();
         Ok(Some((entry.value, ttl)))
     }
 
@@ -618,7 +622,7 @@ impl AsyncKeyValue for PostgresStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -666,7 +670,7 @@ impl AsyncKeyValue for PostgresStore {
                 });
                 continue;
             }
-            let ttl = entry.ttl().unwrap_or(0.0);
+            let ttl = entry.ttl();
             if values.insert(key.clone(), (entry.value, ttl)).is_some() {
                 return Err(Error::Deserialization(format!(
                     "Postgres TTL batch returned duplicate key {key}"
@@ -1137,7 +1141,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.ttl("b", Some("entries")).await.unwrap(),
-            Some((Value::utf8("without-ttl"), 0.0))
+            Some((Value::utf8("without-ttl"), None))
         );
         assert_eq!(
             store.keys(Some("entries"), None).await.unwrap(),

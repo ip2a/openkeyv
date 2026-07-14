@@ -207,10 +207,14 @@ impl AsyncKeyValue for VaultStore {
         Ok(self.read_entry(&path).await?.map(|entry| entry.value))
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let path = secret_path(self.collection_name(collection), key);
         Ok(self.read_entry(&path).await?.map(|entry| {
-            let ttl = entry.ttl().unwrap_or(0.0);
+            let ttl = entry.ttl();
             (entry.value, ttl)
         }))
     }
@@ -279,7 +283,7 @@ impl AsyncKeyValue for VaultStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -311,7 +315,7 @@ impl AsyncKeyValue for VaultStore {
                 entries.get(key).and_then(|entry| {
                     entry
                         .as_ref()
-                        .map(|entry| (entry.value.clone(), entry.ttl().unwrap_or(0.0)))
+                        .map(|entry| (entry.value.clone(), entry.ttl()))
                 })
             })
             .collect())
@@ -448,6 +452,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(value, Value::utf8("single-value"));
+        let ttl = ttl.unwrap();
         assert!(ttl > 0.0 && ttl <= 30.0);
 
         let path = secret_path(&collection, "single");
@@ -523,7 +528,8 @@ mod tests {
             Some(&Value::utf8("last-one"))
         );
         for result in ttl_values.into_iter().flatten() {
-            assert!(result.1 > 0.0 && result.1 <= 30.0);
+            let ttl = result.1.unwrap();
+            assert!(ttl > 0.0 && ttl <= 30.0);
         }
 
         let mut expired = ManagedEntry::new(Value::utf8("expired"));

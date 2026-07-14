@@ -431,7 +431,11 @@ impl AsyncKeyValue for MongoDBStore {
         Ok(Some(document.entry.value))
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let collection = self.collection(self.collection_name(collection)).await?;
         let document = collection
             .find_one(doc! { "key": key })
@@ -450,7 +454,7 @@ impl AsyncKeyValue for MongoDBStore {
             self.delete_observed_expired(&collection, &document).await?;
             return Ok(None);
         }
-        let ttl = document.entry.ttl().unwrap_or(0.0);
+        let ttl = document.entry.ttl();
         Ok(Some((document.entry.value, ttl)))
     }
 
@@ -556,7 +560,7 @@ impl AsyncKeyValue for MongoDBStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -593,7 +597,7 @@ impl AsyncKeyValue for MongoDBStore {
                 expired.push(document);
                 continue;
             }
-            let ttl = document.entry.ttl().unwrap_or(0.0);
+            let ttl = document.entry.ttl();
             if values
                 .insert(document.key.clone(), (document.entry.value.clone(), ttl))
                 .is_some()

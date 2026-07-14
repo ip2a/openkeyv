@@ -49,7 +49,11 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         match self.cache.ttl(key, collection).await? {
             Some((value, ttl)) => Ok(Some((value, ttl))),
             None => {
@@ -101,7 +105,7 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         self.primary.ttl_many(keys, collection).await
     }
 

@@ -84,7 +84,11 @@ impl<T: AsyncKeyValue> AsyncKeyValue for StatisticsWrapper<T> {
         Ok(result)
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         self.inner.ttl(key, collection).await
     }
 
@@ -125,7 +129,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for StatisticsWrapper<T> {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         self.inner.ttl_many(keys, collection).await
     }
 

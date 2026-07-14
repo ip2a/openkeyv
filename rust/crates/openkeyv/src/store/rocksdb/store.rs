@@ -84,11 +84,15 @@ impl AsyncKeyValue for RocksDBStore {
         Ok(self.get_entry(key, cname)?.map(|e| e.value))
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
         match self.get_entry(key, cname)? {
             Some(entry) => {
-                let ttl = entry.ttl().unwrap_or(0.0);
+                let ttl = entry.ttl();
                 Ok(Some((entry.value, ttl)))
             }
             None => Ok(None),
@@ -146,7 +150,7 @@ impl AsyncKeyValue for RocksDBStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let cname = self.collection_name(collection);
         let compound_keys: Vec<String> = keys.iter().map(|key| compound_key(cname, key)).collect();
         self.db()
@@ -158,7 +162,7 @@ impl AsyncKeyValue for RocksDBStore {
                     if entry.is_expired() {
                         Ok(None)
                     } else {
-                        let ttl = entry.ttl().unwrap_or(0.0);
+                        let ttl = entry.ttl();
                         Ok(Some((entry.value, ttl)))
                     }
                 }
@@ -381,12 +385,13 @@ mod tests {
         );
 
         let results = store.ttl_many(&keys, None).await.unwrap();
-        assert_eq!(results[0], Some((persistent, 0.0)));
+        assert_eq!(results[0], Some((persistent, None)));
         assert_eq!(results[1], None);
         assert_eq!(results[2], None);
         let (value, ttl) = results[3].as_ref().unwrap();
         assert_eq!(value, &expiring);
-        assert!(*ttl > 0.0 && *ttl <= 60.0);
+        let ttl = ttl.unwrap();
+        assert!(ttl > 0.0 && ttl <= 60.0);
     }
 
     #[tokio::test]

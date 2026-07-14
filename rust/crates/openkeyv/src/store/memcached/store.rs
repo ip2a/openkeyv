@@ -73,7 +73,11 @@ impl AsyncKeyValue for MemcachedStore {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
         let ck = Self::compound_key(cname, key);
         let guard = self.client().lock().await;
@@ -89,7 +93,7 @@ impl AsyncKeyValue for MemcachedStore {
                     })?;
                     Ok(None)
                 } else {
-                    let ttl = entry.ttl().unwrap_or(0.0);
+                    let ttl = entry.ttl();
                     Ok(Some((entry.value, ttl)))
                 }
             }
@@ -178,7 +182,7 @@ impl AsyncKeyValue for MemcachedStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -216,7 +220,7 @@ impl AsyncKeyValue for MemcachedStore {
             .iter()
             .map(|compound_key| {
                 entries.get(compound_key).map(|entry| {
-                    let ttl = entry.ttl().unwrap_or(0.0);
+                    let ttl = entry.ttl();
                     (entry.value.clone(), ttl)
                 })
             })
@@ -339,6 +343,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ttl_value, single_value);
+        let ttl = ttl.unwrap();
         assert!(ttl > 0.0 && ttl <= 30.0);
 
         let single_key = MemcachedStore::compound_key(&collection, "single");
@@ -371,7 +376,8 @@ mod tests {
         assert_eq!(ttl_results[2].as_ref().unwrap().0, values[1]);
         assert_eq!(ttl_results[3].as_ref().unwrap().0, values[0]);
         for result in ttl_results.into_iter().flatten() {
-            assert!(result.1 > 0.0 && result.1 <= 30.0);
+            let ttl = result.1.unwrap();
+            assert!(ttl > 0.0 && ttl <= 30.0);
         }
 
         let one_key = MemcachedStore::compound_key(&collection, "one");

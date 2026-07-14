@@ -736,10 +736,14 @@ impl AsyncKeyValue for OpenSearchStore {
         Ok(self.read_entry(&index, key).await?.map(|entry| entry.value))
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let index = self.index_name(self.collection_name(collection));
         Ok(self.read_entry(&index, key).await?.map(|entry| {
-            let ttl = entry.ttl().unwrap_or(0.0);
+            let ttl = entry.ttl();
             (entry.value, ttl)
         }))
     }
@@ -798,7 +802,7 @@ impl AsyncKeyValue for OpenSearchStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -819,7 +823,7 @@ impl AsyncKeyValue for OpenSearchStore {
                 entries.get(key).and_then(|entry| {
                     entry
                         .as_ref()
-                        .map(|entry| (entry.value.clone(), entry.ttl().unwrap_or(0.0)))
+                        .map(|entry| (entry.value.clone(), entry.ttl()))
                 })
             })
             .collect())
@@ -1294,7 +1298,8 @@ mod tests {
         );
         let ttl = store.ttl("ttl", None).await.unwrap().unwrap();
         assert_eq!(ttl.0, Value::utf8("ttl"));
-        assert!(ttl.1 > 0.0 && ttl.1 <= 60.0);
+        let ttl = ttl.1.unwrap();
+        assert!(ttl > 0.0 && ttl <= 60.0);
         assert!(store.destroy().await.unwrap());
     }
 
@@ -1341,7 +1346,7 @@ mod tests {
             ttl_values[0].as_ref().map(|(value, _)| value),
             Some(&Value::utf8("last-a"))
         );
-        assert!(ttl_values[0].as_ref().unwrap().1 > 0.0);
+        assert!(ttl_values[0].as_ref().unwrap().1.unwrap() > 0.0);
         assert!(ttl_values[1].is_none());
         assert_eq!(
             ttl_values[2].as_ref().map(|(value, _)| value),

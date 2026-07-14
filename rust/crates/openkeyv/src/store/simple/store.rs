@@ -54,12 +54,16 @@ impl AsyncKeyValue for SimpleStore {
         }
     }
 
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>> {
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
         let data = self.client.data().read().await;
         match data.get(cname).and_then(|col| col.get(key)) {
             Some(entry) if !entry.is_expired() => {
-                let ttl = entry.ttl().unwrap_or(0.0);
+                let ttl = entry.ttl();
                 Ok(Some((entry.value.clone(), ttl)))
             }
             _ => Ok(None),
@@ -116,7 +120,7 @@ impl AsyncKeyValue for SimpleStore {
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>> {
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let cname = self.collection_name(collection);
         let data = self.client.data().read().await;
         let col = data.get(cname);
@@ -126,7 +130,7 @@ impl AsyncKeyValue for SimpleStore {
                 col.and_then(|c| c.get(k))
                     .filter(|e| !e.is_expired())
                     .map(|e| {
-                        let ttl = e.ttl().unwrap_or(0.0);
+                        let ttl = e.ttl();
                         (e.value.clone(), ttl)
                     })
             })

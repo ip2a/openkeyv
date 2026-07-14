@@ -14,8 +14,13 @@ pub trait AsyncKeyValue: Send + Sync {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>>;
 
     /// Retrieve the value and remaining TTL for a key.
-    /// Returns `(None, None)` if the key is not found or expired.
-    async fn ttl(&self, key: &str, collection: Option<&str>) -> Result<Option<(Value, f64)>>;
+    /// Returns `None` if the key is not found or expired. The nested TTL is
+    /// `None` when the value does not expire.
+    async fn ttl(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<(Value, Option<f64>)>>;
 
     /// Store a key-value pair with optional TTL (in seconds).
     async fn put(
@@ -36,12 +41,13 @@ pub trait AsyncKeyValue: Send + Sync {
         collection: Option<&str>,
     ) -> Result<Vec<Option<Value>>>;
 
-    /// Retrieve multiple values and their TTLs.
+    /// Retrieve multiple values and their TTLs. A missing outer value means the
+    /// key is absent; a missing nested TTL means the value does not expire.
     async fn ttl_many(
         &self,
         keys: &[String],
         collection: Option<&str>,
-    ) -> Result<Vec<Option<(Value, f64)>>>;
+    ) -> Result<Vec<Option<(Value, Option<f64>)>>>;
 
     /// Store multiple key-value pairs with the same optional TTL.
     async fn put_many(
