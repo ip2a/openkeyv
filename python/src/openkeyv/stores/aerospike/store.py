@@ -139,20 +139,20 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
             typed_info_response = cast("dict[object, object]", info_response)
             for result in typed_info_response.values():
                 if not isinstance(result, tuple):
-                    msg = "Aerospike namespace result must be an (error_code, response) tuple"
+                    msg = "Aerospike namespace result must be an (error, response) tuple"
                     raise TypeError(msg)
                 try:
-                    error_code, response = cast("tuple[object, ...]", result)
+                    error, response = cast("tuple[object, ...]", result)
                 except ValueError as error:
-                    msg = "Aerospike namespace result must be an (error_code, response) tuple"
+                    msg = "Aerospike namespace result must be an (error, response) tuple"
                     raise TypeError(msg) from error
-                if not isinstance(error_code, int) or not isinstance(response, str):
+                if error is not None:
+                    msg = f"Aerospike namespace query failed: {error!r}"
+                    raise RuntimeError(msg)
+                if not isinstance(response, str):
                     msg = "Aerospike namespace result contains invalid field types"
                     raise TypeError(msg)
-                if error_code != 0:
-                    msg = f"Aerospike namespace query failed with error code {error_code}"
-                    raise RuntimeError(msg)
-                namespaces.update(namespace for namespace in response.split(";") if namespace)
+                namespaces.update(namespace for item in response.split(";") if (namespace := item.strip()))
 
             if self._namespace not in namespaces:
                 msg = (
@@ -226,7 +226,12 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
 
         ttl = managed_entry.ttl
         native_ttl = aerospike.TTL_NEVER_EXPIRE if ttl is None else max(1, ceil(ttl))
-        self._client.put(aerospike_key, {"value": encoded}, meta={"ttl": native_ttl})  # pyright: ignore[reportUnknownMemberType]
+        self._client.put(  # pyright: ignore[reportUnknownMemberType]
+            aerospike_key,
+            {"value": encoded},
+            meta={"ttl": native_ttl},
+            policy={"key": aerospike.POLICY_KEY_SEND},
+        )
 
     @override
     async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:

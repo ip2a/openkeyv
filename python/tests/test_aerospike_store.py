@@ -19,7 +19,8 @@ class FakeAerospikeClient:
     def __init__(self) -> None:
         self.records: dict[tuple[str, str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
         self.put_calls: list[tuple[tuple[str, str, str], dict[str, Any], dict[str, Any]]] = []
-        self.info_response: object = {"node": (0, "test;other")}
+        self.put_policies: list[dict[str, Any] | None] = []
+        self.info_response: object = {"node": (None, "test;other")}
         self.get_result: object | None = None
         self.get_error: Exception | None = None
         self.connected = False
@@ -46,9 +47,17 @@ class FakeAerospikeClient:
             raise aerospike.exception.RecordNotFound from error
         return (key, metadata, bins)
 
-    def put(self, key: tuple[str, str, str], bins: dict[str, Any], *, meta: dict[str, Any]) -> None:
+    def put(
+        self,
+        key: tuple[str, str, str],
+        bins: dict[str, Any],
+        *,
+        meta: dict[str, Any],
+        policy: dict[str, Any] | None = None,
+    ) -> None:
         self.records[key] = (dict(meta), dict(bins))
         self.put_calls.append((key, dict(bins), dict(meta)))
+        self.put_policies.append(None if policy is None else dict(policy))
 
     def remove(self, key: tuple[str, str, str]) -> None:
         try:
@@ -75,6 +84,7 @@ async def test_aerospike_public_roundtrip_uses_binary_entries_and_native_ttl() -
     assert persistent_call[0] == ("test", "entries", "items::persistent")
     assert persistent_call[1]["value"].startswith(b"OKVE1")
     assert persistent_call[2] == {"ttl": aerospike.TTL_NEVER_EXPIRE}
+    assert client.put_policies[-1] == {"key": aerospike.POLICY_KEY_SEND}
     assert await store.ttl("persistent", collection="items") == ({"value": "kept"}, None)
 
     await store.put("temporary", {"value": "short"}, collection="items", ttl=0.1)
@@ -123,8 +133,10 @@ async def test_aerospike_only_maps_record_not_found_to_missing() -> None:
     [
         ([], TypeError, "response must be a dict"),
         ({"node": "bad"}, TypeError, "result must be"),
-        ({"node": (1, "test")}, RuntimeError, "error code 1"),
-        ({"node": (0, "other")}, ValueError, "does not exist"),
+        ({"node": ("error", "test")}, RuntimeError, "namespace query failed"),
+        ({"node": (None, 1)}, TypeError, "invalid field types"),
+        ({"node": (0, "test")}, RuntimeError, "namespace query failed"),
+        ({"node": (None, "other")}, ValueError, "does not exist"),
     ],
 )
 async def test_aerospike_namespace_validation_is_strict(response: object, error: type[Exception], message: str) -> None:
@@ -134,3 +146,11 @@ async def test_aerospike_namespace_validation_is_strict(response: object, error:
 
     with pytest.raises(error, match=message):
         await store._setup()
+
+
+async def test_aerospike_namespace_validation_accepts_real_client_response() -> None:
+    client = FakeAerospikeClient()
+    client.info_response = {"node": (None, "test\n")}
+    store = AerospikeStore(client=client, namespace="test", auto_create=False)  # type: ignore[arg-type]
+
+    await store._setup()
