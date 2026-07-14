@@ -6,16 +6,11 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::utils::compound::{collection_prefix, compound_key, decompound_key};
 use crate::value::Value;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::Path;
-
-const COLLECTION_SEPARATOR: &str = ":";
-
-fn compound_key(collection: &str, key: &str) -> String {
-    format!("{}{}{}", collection, COLLECTION_SEPARATOR, key)
-}
 
 /// RocksDB-backed key-value store.
 ///
@@ -238,18 +233,20 @@ impl AsyncCull for RocksDBStore {
 impl AsyncEnumerateKeys for RocksDBStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
         let cname = self.collection_name(collection);
-        let prefix = format!("{}{}", cname, COLLECTION_SEPARATOR);
+        let prefix = collection_prefix(cname);
         let limit = limit.unwrap_or(10_000).min(10_000);
         let mut keys = Vec::new();
         let iter = self.db().prefix_iterator(prefix.as_bytes());
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
-            let key = std::str::from_utf8(&k)
-                .map_err(|error| Error::Deserialization(error.to_string()))?;
-            let Some(stripped) = key.strip_prefix(&prefix) else {
+            let identity = std::str::from_utf8(&k).map_err(|error| {
+                Error::InvalidKey(format!("RocksDB physical key is not UTF-8: {error}"))
+            })?;
+            let (key_collection, key) = decompound_key(identity)?;
+            if key_collection != cname {
                 break;
-            };
-            keys.push(stripped.to_string());
+            }
+            keys.push(key.to_string());
             if keys.len() >= limit {
                 break;
             }
@@ -266,12 +263,11 @@ impl AsyncEnumerateCollections for RocksDBStore {
         let iter = self.db().iterator(rocksdb::IteratorMode::Start);
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
-            let key = std::str::from_utf8(&k)
-                .map_err(|error| Error::Deserialization(error.to_string()))?;
-            let separator = key.find(COLLECTION_SEPARATOR).ok_or_else(|| {
-                Error::Deserialization("invalid RocksDB compound key".to_string())
+            let identity = std::str::from_utf8(&k).map_err(|error| {
+                Error::InvalidKey(format!("RocksDB physical key is not UTF-8: {error}"))
             })?;
-            collections.insert(key[..separator].to_string());
+            let (collection, _) = decompound_key(identity)?;
+            collections.insert(collection.to_string());
             if collections.len() >= limit {
                 break;
             }
@@ -283,12 +279,19 @@ impl AsyncEnumerateCollections for RocksDBStore {
 #[async_trait]
 impl AsyncDestroyCollection for RocksDBStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let prefix = format!("{}{}", collection, COLLECTION_SEPARATOR);
+        let prefix = collection_prefix(collection);
         let mut batch = rocksdb::WriteBatch::default();
         let mut had_any = false;
         let iter = self.db().prefix_iterator(prefix.as_bytes());
         for item in iter {
             let (k, _) = item.map_err(map_rocksdb_err)?;
+            let identity = std::str::from_utf8(&k).map_err(|error| {
+                Error::InvalidKey(format!("RocksDB physical key is not UTF-8: {error}"))
+            })?;
+            let (key_collection, _) = decompound_key(identity)?;
+            if key_collection != collection {
+                break;
+            }
             batch.delete(&k);
             had_any = true;
         }
@@ -422,8 +425,7 @@ mod tests {
     async fn test_rocksdb_enumeration_rejects_invalid_key_encoding() {
         let tmp = tempfile::tempdir().unwrap();
         let store = RocksDBStore::new(tmp.path()).unwrap();
-        let mut key =
-            format!("{}{}", store.collection_name(None), COLLECTION_SEPARATOR).into_bytes();
+        let mut key = collection_prefix(store.collection_name(None)).into_bytes();
         key.push(0xff);
         store
             .db()
@@ -460,6 +462,54 @@ mod tests {
         let cols = store.collections(None).await.unwrap();
         assert!(cols.contains(&"c1".to_string()));
         assert!(cols.contains(&"c2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn rocksdb_identity_is_collision_free_and_exact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = RocksDBStore::new(tmp.path()).unwrap();
+        let left = Value::utf8("left");
+        let right = Value::utf8("right");
+
+        store
+            .put("c", left.clone(), Some("a:b"), None)
+            .await
+            .unwrap();
+        store
+            .put("b:c", right.clone(), Some("a"), None)
+            .await
+            .unwrap();
+        store
+            .put("键🔑", Value::null(), Some("集合"), None)
+            .await
+            .unwrap();
+        store
+            .put("Key", Value::null(), Some("Users"), None)
+            .await
+            .unwrap();
+        store
+            .put("Key", Value::null(), Some("users"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(store.get("c", Some("a:b")).await.unwrap(), Some(left));
+        assert_eq!(
+            store.get("b:c", Some("a")).await.unwrap(),
+            Some(right.clone())
+        );
+        assert_eq!(store.keys(Some("a:b"), None).await.unwrap(), vec!["c"]);
+        assert_eq!(store.keys(Some("集合"), None).await.unwrap(), vec!["键🔑"]);
+
+        let collections: std::collections::HashSet<_> =
+            store.collections(None).await.unwrap().into_iter().collect();
+        assert!(collections.contains("a:b"));
+        assert!(collections.contains("a"));
+        assert!(collections.contains("集合"));
+        assert!(collections.contains("Users"));
+        assert!(collections.contains("users"));
+
+        assert!(store.destroy_collection("a:b").await.unwrap());
+        assert_eq!(store.get("b:c", Some("a")).await.unwrap(), Some(right));
     }
 
     #[tokio::test]

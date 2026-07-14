@@ -6,16 +6,25 @@ use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::utils::compound::{collection_prefix, compound_key, decompound_key};
 use crate::value::Value;
 use async_trait::async_trait;
 use bytes::Bytes;
 use redis::AsyncCommands;
 
-const COLLECTION_SEPARATOR: &str = ":";
 const SCAN_COUNT: usize = 1_000;
 
-fn compound_key(collection: &str, key: &str) -> String {
-    format!("{}{}{}", collection, COLLECTION_SEPARATOR, key)
+fn collection_scan_pattern(collection: &str) -> String {
+    let prefix = collection_prefix(collection);
+    let mut pattern = String::with_capacity(prefix.len() + 1);
+    for character in prefix.chars() {
+        if matches!(character, '*' | '?' | '[' | ']' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('*');
+    pattern
 }
 
 /// Redis-backed key-value store.
@@ -254,8 +263,7 @@ impl AsyncEnumerateKeys for RedisStore {
         }
 
         let cname = self.collection_name(collection);
-        let prefix = format!("{}{}", cname, COLLECTION_SEPARATOR);
-        let pattern = format!("{}*", prefix);
+        let pattern = collection_scan_pattern(cname);
         let mut conn = self.connection();
         let mut cursor = 0_u64;
         let mut keys = std::collections::HashSet::new();
@@ -271,12 +279,16 @@ impl AsyncEnumerateKeys for RedisStore {
                 .await
                 .map_err(map_redis_err)?;
 
-            for key in batch {
-                if let Some(key) = key.strip_prefix(&prefix) {
-                    keys.insert(key.to_string());
-                    if keys.len() == limit {
-                        return Ok(keys.into_iter().collect());
-                    }
+            for identity in batch {
+                let (key_collection, key) = decompound_key(&identity)?;
+                if key_collection != cname {
+                    return Err(Error::InvalidKey(format!(
+                        "Redis SCAN returned an identity outside collection {cname:?}"
+                    )));
+                }
+                keys.insert(key.to_string());
+                if keys.len() == limit {
+                    return Ok(keys.into_iter().collect());
                 }
             }
 
@@ -311,12 +323,11 @@ impl AsyncEnumerateCollections for RedisStore {
                 .await
                 .map_err(map_redis_err)?;
 
-            for key in keys {
-                if let Some(pos) = key.find(COLLECTION_SEPARATOR) {
-                    collections.insert(key[..pos].to_string());
-                    if collections.len() == limit {
-                        return Ok(collections.into_iter().collect());
-                    }
+            for identity in keys {
+                let (collection, _) = decompound_key(&identity)?;
+                collections.insert(collection.to_string());
+                if collections.len() == limit {
+                    return Ok(collections.into_iter().collect());
                 }
             }
 
@@ -331,7 +342,7 @@ impl AsyncEnumerateCollections for RedisStore {
 #[async_trait]
 impl AsyncDestroyCollection for RedisStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let pattern = format!("{}{}*", collection, COLLECTION_SEPARATOR);
+        let pattern = collection_scan_pattern(collection);
         let mut conn = self.connection();
         let mut cursor = 0_u64;
         let mut destroyed = false;
@@ -347,8 +358,18 @@ impl AsyncDestroyCollection for RedisStore {
                 .await
                 .map_err(map_redis_err)?;
 
-            if !keys.is_empty() {
-                let _: () = conn.del(&keys).await.map_err(map_redis_err)?;
+            let mut matching = Vec::with_capacity(keys.len());
+            for identity in keys {
+                let (key_collection, _) = decompound_key(&identity)?;
+                if key_collection != collection {
+                    return Err(Error::InvalidKey(format!(
+                        "Redis SCAN returned an identity outside collection {collection:?}"
+                    )));
+                }
+                matching.push(identity);
+            }
+            if !matching.is_empty() {
+                let _: () = conn.del(&matching).await.map_err(map_redis_err)?;
                 destroyed = true;
             }
 
@@ -375,6 +396,11 @@ impl AsyncDestroyStore for RedisStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_pattern_escapes_collection_glob_characters() {
+        assert_eq!(collection_scan_pattern("*?[\\]"), r"5:\*\?\[\\\]*");
+    }
 
     #[tokio::test]
     #[ignore = "requires OPENKEYV_REDIS_URL"]
@@ -469,6 +495,66 @@ mod tests {
                 .is_empty()
         );
         assert!(!store.destroy_collection(&collection).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_identity_is_collision_free_and_glob_safe() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let store = RedisStore::new(&url).await.unwrap();
+        let base = format!("openkeyv_identity_*?[\\]_{}", std::process::id());
+        let left_collection = format!("{base}:b");
+        let right_collection = base;
+        let _ = store.destroy_collection(&left_collection).await.unwrap();
+        let _ = store.destroy_collection(&right_collection).await.unwrap();
+
+        let left = Value::utf8("left");
+        let right = Value::utf8("right");
+        store
+            .put("c", left.clone(), Some(&left_collection), None)
+            .await
+            .unwrap();
+        store
+            .put("b:c", right.clone(), Some(&right_collection), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.get("c", Some(&left_collection)).await.unwrap(),
+            Some(left)
+        );
+        assert_eq!(
+            store.get("b:c", Some(&right_collection)).await.unwrap(),
+            Some(right.clone())
+        );
+        assert_eq!(
+            store.keys(Some(&left_collection), None).await.unwrap(),
+            vec!["c"]
+        );
+        assert_eq!(
+            store.keys(Some(&right_collection), None).await.unwrap(),
+            vec!["b:c"]
+        );
+        let collections: std::collections::HashSet<_> =
+            store.collections(None).await.unwrap().into_iter().collect();
+        assert!(collections.contains(&left_collection));
+        assert!(collections.contains(&right_collection));
+
+        assert!(store.destroy_collection(&left_collection).await.unwrap());
+        assert_eq!(
+            store.get("b:c", Some(&right_collection)).await.unwrap(),
+            Some(right)
+        );
+        assert!(store.destroy_collection(&right_collection).await.unwrap());
+
+        let malformed = format!("01:openkeyv-{}", std::process::id());
+        let mut conn = store.connection();
+        let _: () = conn.set(&malformed, b"invalid").await.unwrap();
+        assert!(matches!(
+            store.collections(None).await,
+            Err(Error::InvalidKey(_))
+        ));
+        let _: () = conn.del(&malformed).await.unwrap();
     }
 
     #[tokio::test]

@@ -1,15 +1,15 @@
 use crate::error::Result;
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::utils::compound::{compound_key, decompound_key};
 use crate::value::Value;
 use async_trait::async_trait;
 use std::collections::HashSet;
 
-/// A wrapper that stores all collections within a single backing collection
-/// by prefixing keys with the collection name.
+/// A wrapper that stores all logical collections within one backing collection
+/// using canonical compound identities.
 pub struct SingleCollectionWrapper<T: AsyncKeyValue> {
     inner: T,
     backing_collection: String,
-    separator: String,
 }
 
 impl<T: AsyncKeyValue> SingleCollectionWrapper<T> {
@@ -17,19 +17,6 @@ impl<T: AsyncKeyValue> SingleCollectionWrapper<T> {
         Self {
             inner,
             backing_collection: backing_collection.into(),
-            separator: "::".to_string(),
-        }
-    }
-
-    pub fn with_separator(
-        inner: T,
-        backing_collection: impl Into<String>,
-        separator: impl Into<String>,
-    ) -> Self {
-        Self {
-            inner,
-            backing_collection: backing_collection.into(),
-            separator: separator.into(),
         }
     }
 
@@ -38,8 +25,7 @@ impl<T: AsyncKeyValue> SingleCollectionWrapper<T> {
     }
 
     fn compound_key(&self, collection: Option<&str>, key: &str) -> String {
-        let collection = collection.unwrap_or("default_collection");
-        format!("{}{}{}", collection, self.separator, key)
+        compound_key(collection.unwrap_or("default_collection"), key)
     }
 }
 
@@ -145,15 +131,17 @@ where
 {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
         let collection = collection.unwrap_or("default_collection");
-        let prefix = format!("{}{}", collection, self.separator);
         let keys = self
             .inner
             .keys(Some(&self.backing_collection), None)
             .await?;
-        let mut result: Vec<String> = keys
-            .into_iter()
-            .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
-            .collect();
+        let mut result = Vec::new();
+        for identity in keys {
+            let (key_collection, key) = decompound_key(&identity)?;
+            if key_collection == collection {
+                result.push(key.to_string());
+            }
+        }
         if let Some(limit) = limit {
             result.truncate(limit);
         }
@@ -167,22 +155,23 @@ where
     T: AsyncKeyValue + AsyncEnumerateKeys + Send + Sync,
 {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
+        let limit = limit.unwrap_or(usize::MAX);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let keys = self
             .inner
             .keys(Some(&self.backing_collection), None)
             .await?;
         let mut seen = HashSet::new();
         let mut collections = Vec::new();
-        for key in keys {
-            if let Some((collection, _)) = key.split_once(&self.separator) {
-                if seen.insert(collection.to_string()) {
-                    collections.push(collection.to_string());
-                }
+        for identity in keys {
+            let (collection, _) = decompound_key(&identity)?;
+            if seen.insert(collection.to_string()) {
+                collections.push(collection.to_string());
             }
-            if let Some(limit) = limit {
-                if collections.len() >= limit {
-                    break;
-                }
+            if collections.len() == limit {
+                break;
             }
         }
         Ok(collections)
@@ -193,27 +182,50 @@ where
 mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
+    use crate::utils::compound::compound_key;
 
     #[tokio::test]
-    async fn test_single_collection() {
+    async fn single_collection_uses_canonical_identity() {
         let mem = MemoryStore::new();
         let wrapper = SingleCollectionWrapper::new(mem, "all_data");
+        let left = Value::utf8("left");
+        let right = Value::utf8("right");
 
-        let value = Value::utf8("b");
         wrapper
-            .put("k", value.clone(), Some("users"), None)
+            .put("c", left.clone(), Some("a:b"), None)
+            .await
+            .unwrap();
+        wrapper
+            .put("b:c", right.clone(), Some("a"), None)
             .await
             .unwrap();
 
-        let got = wrapper.get("k", Some("users")).await.unwrap();
-        assert_eq!(got, Some(value));
+        assert_eq!(wrapper.get("c", Some("a:b")).await.unwrap(), Some(left));
+        assert_eq!(wrapper.get("b:c", Some("a")).await.unwrap(), Some(right));
+        assert_eq!(wrapper.keys(Some("a:b"), None).await.unwrap(), vec!["c"]);
+
+        let mut collections = wrapper.collections(None).await.unwrap();
+        collections.sort();
+        assert_eq!(collections, vec!["a", "a:b"]);
 
         let raw = wrapper.into_inner();
         assert!(
-            raw.get("users::k", Some("all_data"))
+            raw.get(&compound_key("a:b", "c"), Some("all_data"))
                 .await
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn single_collection_rejects_malformed_physical_keys() {
+        let mem = MemoryStore::new();
+        mem.put("01:akey", Value::null(), Some("all_data"), None)
+            .await
+            .unwrap();
+        let wrapper = SingleCollectionWrapper::new(mem, "all_data");
+
+        assert!(wrapper.keys(Some("a"), None).await.is_err());
+        assert!(wrapper.collections(None).await.is_err());
     }
 }
