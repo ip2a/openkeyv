@@ -4,7 +4,7 @@ from typing import cast, overload
 
 from typing_extensions import override
 
-from openkeyv._internal import _decode_entry, _encode_entry  # pyright: ignore[reportUnknownVariableType]
+from openkeyv._internal import _decode_entry, _encode_entry
 from openkeyv._utils.compound import compound_key, get_keys_from_compound_keys
 from openkeyv._utils.managed_entry import ManagedEntry
 from openkeyv.stores.base import BaseContextManagerStore, BaseDestroyStore, BaseEnumerateKeysStore, BaseStore
@@ -222,7 +222,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
         aerospike_key = (self._namespace, self._set, combo_key)
         created_at_millis = None if managed_entry.created_at is None else int(managed_entry.created_at.timestamp() * 1000)
         expires_at_millis = None if managed_entry.expires_at is None else int(managed_entry.expires_at.timestamp() * 1000)
-        encoded = cast("bytes", _encode_entry(dict(managed_entry.value), created_at_millis, expires_at_millis))
+        encoded = _encode_entry(dict(managed_entry.value), created_at_millis, expires_at_millis)
 
         ttl = managed_entry.ttl
         native_ttl = aerospike.TTL_NEVER_EXPIRE if ttl is None else max(1, ceil(ttl))

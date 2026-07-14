@@ -5,7 +5,7 @@ from typing import Literal, cast
 
 from typing_extensions import override
 
-from openkeyv._internal import _decode_entry, _encode_entry  # pyright: ignore[reportUnknownVariableType]
+from openkeyv._internal import _decode_entry, _encode_entry
 from openkeyv._utils.managed_entry import ManagedEntry
 from openkeyv._utils.sanitization import HybridSanitizationStrategy, SanitizationStrategy
 from openkeyv._utils.sanitize import ALPHANUMERIC_CHARACTERS
@@ -128,7 +128,7 @@ class WindowsRegistryStore(BaseStore):
         registry_path = self._get_registry_path(collection=collection)
         created_at_millis = None if managed_entry.created_at is None else int(managed_entry.created_at.timestamp() * 1000)
         expires_at_millis = None if managed_entry.expires_at is None else int(managed_entry.expires_at.timestamp() * 1000)
-        encoded = cast("bytes", _encode_entry(dict(managed_entry.value), created_at_millis, expires_at_millis))
+        encoded = _encode_entry(dict(managed_entry.value), created_at_millis, expires_at_millis)
 
         with winreg.OpenKey(self._hive, registry_path, access=winreg.KEY_SET_VALUE) as registry_key:
             winreg.SetValueEx(registry_key, sanitized_key, 0, winreg.REG_BINARY, encoded)
