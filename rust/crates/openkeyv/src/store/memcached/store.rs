@@ -3,14 +3,33 @@ use super::config::MemcachedConfig;
 use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
 use crate::protocol::{AsyncDestroyStore, AsyncKeyValue};
+use crate::utils::compound::compound_key;
 use crate::value::Value;
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
+
+const MEMCACHED_KEY_MAX_BYTES: usize = 250;
+
+fn memcached_key(collection: &str, key: &str) -> Result<String> {
+    let identity = compound_key(collection, key);
+    let encoded = URL_SAFE_NO_PAD.encode(identity.as_bytes());
+
+    if encoded.len() > MEMCACHED_KEY_MAX_BYTES {
+        return Err(Error::InvalidKey(format!(
+            "encoded memcached key is {} bytes (max {MEMCACHED_KEY_MAX_BYTES})",
+            encoded.len()
+        )));
+    }
+
+    Ok(encoded)
+}
 
 /// Memcached-backed key-value store.
 ///
 /// Uses the `memcache` crate (sync client) under a Tokio mutex.
-/// Values are stored as `OKVE1`-encoded `ManagedEntry` bytes by compound key.
+/// Values are stored as `OKVE1`-encoded `ManagedEntry` bytes by transported canonical key.
 pub struct MemcachedStore {
     client: MemcachedClient,
     config: MemcachedConfig,
@@ -42,17 +61,13 @@ impl MemcachedStore {
     fn client(&self) -> &tokio::sync::Mutex<memcache::Client> {
         self.client.client()
     }
-
-    fn compound_key(collection: &str, key: &str) -> String {
-        format!("{}:{}", collection, key)
-    }
 }
 
 #[async_trait]
 impl AsyncKeyValue for MemcachedStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
-        let ck = Self::compound_key(cname, key);
+        let ck = memcached_key(cname, key)?;
         let guard = self.client().lock().await;
         let raw: Option<Vec<u8>> = guard.get(&ck).map_err(|error| Error::StoreConnection {
             message: format!("failed to get memcached key {ck}: {error}"),
@@ -79,7 +94,7 @@ impl AsyncKeyValue for MemcachedStore {
         collection: Option<&str>,
     ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
-        let ck = Self::compound_key(cname, key);
+        let ck = memcached_key(cname, key)?;
         let guard = self.client().lock().await;
         let raw: Option<Vec<u8>> = guard.get(&ck).map_err(|error| Error::StoreConnection {
             message: format!("failed to get memcached key {ck}: {error}"),
@@ -109,7 +124,7 @@ impl AsyncKeyValue for MemcachedStore {
         ttl: Option<f64>,
     ) -> Result<()> {
         let cname = self.collection_name(collection);
-        let ck = Self::compound_key(cname, key);
+        let ck = memcached_key(cname, key)?;
         let entry = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
@@ -127,7 +142,7 @@ impl AsyncKeyValue for MemcachedStore {
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
-        let ck = Self::compound_key(cname, key);
+        let ck = memcached_key(cname, key)?;
         let guard = self.client().lock().await;
         guard.delete(&ck).map_err(|error| Error::StoreConnection {
             message: format!("failed to delete memcached key {ck}: {error}"),
@@ -144,11 +159,11 @@ impl AsyncKeyValue for MemcachedStore {
         }
 
         let cname = self.collection_name(collection);
-        let compound_keys: Vec<String> = keys
+        let memcached_keys: Vec<String> = keys
             .iter()
-            .map(|key| Self::compound_key(cname, key))
-            .collect();
-        let key_refs: Vec<&str> = compound_keys.iter().map(String::as_str).collect();
+            .map(|key| memcached_key(cname, key))
+            .collect::<Result<_>>()?;
+        let key_refs: Vec<&str> = memcached_keys.iter().map(String::as_str).collect();
         let guard = self.client().lock().await;
         let raw_entries: std::collections::HashMap<String, Vec<u8>> = guard
             .gets(&key_refs)
@@ -157,24 +172,24 @@ impl AsyncKeyValue for MemcachedStore {
             })?;
         let mut entries = std::collections::HashMap::with_capacity(raw_entries.len());
 
-        for (compound_key, raw) in raw_entries {
+        for (memcached_key, raw) in raw_entries {
             let entry = ManagedEntry::decode(Bytes::from(raw))?;
             if entry.is_expired() {
                 guard
-                    .delete(&compound_key)
+                    .delete(&memcached_key)
                     .map_err(|error| Error::StoreConnection {
                         message: format!(
-                            "failed to delete expired memcached key {compound_key}: {error}"
+                            "failed to delete expired memcached key {memcached_key}: {error}"
                         ),
                     })?;
             } else {
-                entries.insert(compound_key, entry);
+                entries.insert(memcached_key, entry);
             }
         }
 
-        Ok(compound_keys
+        Ok(memcached_keys
             .iter()
-            .map(|compound_key| entries.get(compound_key).map(|entry| entry.value.clone()))
+            .map(|memcached_key| entries.get(memcached_key).map(|entry| entry.value.clone()))
             .collect())
     }
 
@@ -188,11 +203,11 @@ impl AsyncKeyValue for MemcachedStore {
         }
 
         let cname = self.collection_name(collection);
-        let compound_keys: Vec<String> = keys
+        let memcached_keys: Vec<String> = keys
             .iter()
-            .map(|key| Self::compound_key(cname, key))
-            .collect();
-        let key_refs: Vec<&str> = compound_keys.iter().map(String::as_str).collect();
+            .map(|key| memcached_key(cname, key))
+            .collect::<Result<_>>()?;
+        let key_refs: Vec<&str> = memcached_keys.iter().map(String::as_str).collect();
         let guard = self.client().lock().await;
         let raw_entries: std::collections::HashMap<String, Vec<u8>> = guard
             .gets(&key_refs)
@@ -201,25 +216,25 @@ impl AsyncKeyValue for MemcachedStore {
             })?;
         let mut entries = std::collections::HashMap::with_capacity(raw_entries.len());
 
-        for (compound_key, raw) in raw_entries {
+        for (memcached_key, raw) in raw_entries {
             let entry = ManagedEntry::decode(Bytes::from(raw))?;
             if entry.is_expired() {
                 guard
-                    .delete(&compound_key)
+                    .delete(&memcached_key)
                     .map_err(|error| Error::StoreConnection {
                         message: format!(
-                            "failed to delete expired memcached key {compound_key}: {error}"
+                            "failed to delete expired memcached key {memcached_key}: {error}"
                         ),
                     })?;
             } else {
-                entries.insert(compound_key, entry);
+                entries.insert(memcached_key, entry);
             }
         }
 
-        Ok(compound_keys
+        Ok(memcached_keys
             .iter()
-            .map(|compound_key| {
-                entries.get(compound_key).map(|entry| {
+            .map(|memcached_key| {
+                entries.get(memcached_key).map(|entry| {
                     let ttl = entry.ttl();
                     (entry.value.clone(), ttl)
                 })
@@ -252,7 +267,7 @@ impl AsyncKeyValue for MemcachedStore {
                 Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
-            let ck = Self::compound_key(cname, key);
+            let ck = memcached_key(cname, key)?;
             entries.push((ck, entry.encode()));
         }
 
@@ -269,18 +284,18 @@ impl AsyncKeyValue for MemcachedStore {
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
         let cname = self.collection_name(collection);
-        let compound_keys: Vec<String> = keys
+        let memcached_keys: Vec<String> = keys
             .iter()
-            .map(|key| Self::compound_key(cname, key))
-            .collect();
+            .map(|key| memcached_key(cname, key))
+            .collect::<Result<_>>()?;
         let guard = self.client().lock().await;
         let mut count = 0;
 
-        for compound_key in compound_keys {
+        for memcached_key in memcached_keys {
             if guard
-                .delete(&compound_key)
+                .delete(&memcached_key)
                 .map_err(|error| Error::StoreConnection {
-                    message: format!("failed to delete memcached key {compound_key}: {error}"),
+                    message: format!("failed to delete memcached key {memcached_key}: {error}"),
                 })?
             {
                 count += 1;
@@ -304,7 +319,51 @@ impl AsyncDestroyStore for MemcachedStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::compound::decompound_key;
     use chrono::{TimeDelta, Utc};
+
+    #[test]
+    fn memcached_transport_roundtrips_exact_identities() {
+        let cases = [
+            ("a:b", "c"),
+            ("a", "b:c"),
+            ("Users", "Key"),
+            ("users", "Key"),
+            ("é", "e\u{301}"),
+            ("集合", "键🔑"),
+            ("", ""),
+            ("space collection", "line\nnull\0/:*?[]\\"),
+        ];
+
+        for (collection, key) in cases {
+            let transported = memcached_key(collection, key).unwrap();
+            assert!(
+                transported
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            );
+
+            let identity = URL_SAFE_NO_PAD.decode(&transported).unwrap();
+            let identity = std::str::from_utf8(&identity).unwrap();
+            assert_eq!(decompound_key(identity).unwrap(), (collection, key));
+        }
+
+        assert_ne!(
+            memcached_key("a:b", "c").unwrap(),
+            memcached_key("a", "b:c").unwrap()
+        );
+    }
+
+    #[test]
+    fn memcached_transport_enforces_exact_encoded_length_limit() {
+        let accepted = memcached_key("", &"a".repeat(185)).unwrap();
+        assert_eq!(accepted.len(), MEMCACHED_KEY_MAX_BYTES);
+
+        assert!(matches!(
+            memcached_key("", &"a".repeat(186)),
+            Err(Error::InvalidKey(_))
+        ));
+    }
 
     #[tokio::test]
     #[ignore = "requires OPENKEYV_MEMCACHED_URL"]
@@ -346,7 +405,7 @@ mod tests {
         let ttl = ttl.unwrap();
         assert!(ttl > 0.0 && ttl <= 30.0);
 
-        let single_key = MemcachedStore::compound_key(&collection, "single");
+        let single_key = memcached_key(&collection, "single").unwrap();
         let raw: Option<Vec<u8>> = store.client().lock().await.get(&single_key).unwrap();
         assert!(raw.unwrap().starts_with(b"OKVE1"));
 
@@ -380,11 +439,11 @@ mod tests {
             assert!(ttl > 0.0 && ttl <= 30.0);
         }
 
-        let one_key = MemcachedStore::compound_key(&collection, "one");
+        let one_key = memcached_key(&collection, "one").unwrap();
         let raw: Option<Vec<u8>> = store.client().lock().await.get(&one_key).unwrap();
         assert!(raw.unwrap().starts_with(b"OKVE1"));
 
-        let expired_key = MemcachedStore::compound_key(&collection, "expired");
+        let expired_key = memcached_key(&collection, "expired").unwrap();
         let expired_entry = ManagedEntry {
             value: Value::utf8("expired"),
             created_at: Some(Utc::now() - TimeDelta::seconds(2)),
@@ -420,11 +479,79 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires OPENKEYV_MEMCACHED_URL"]
+    async fn memcached_preserves_canonical_identities_and_key_limits() {
+        let url = std::env::var("OPENKEYV_MEMCACHED_URL").unwrap();
+        let store = MemcachedStore::new(&url).unwrap();
+        let cases = [
+            ("a:b", "c", Value::utf8("left")),
+            ("a", "b:c", Value::utf8("right")),
+            ("Users", "Key", Value::utf8("upper")),
+            ("users", "Key", Value::utf8("lower")),
+            ("é", "e\u{301}", Value::utf8("composed")),
+            ("e\u{301}", "é", Value::utf8("decomposed")),
+            ("集合", "键🔑", Value::utf8("unicode")),
+            ("", "line\nnull\0/:*?[]\\", Value::utf8("special")),
+        ];
+
+        for (collection, key, value) in &cases {
+            store
+                .put(key, value.clone(), Some(collection), None)
+                .await
+                .unwrap();
+        }
+        for (collection, key, value) in &cases {
+            assert_eq!(
+                store.get(key, Some(collection)).await.unwrap(),
+                Some(value.clone())
+            );
+        }
+
+        let accepted_key = "a".repeat(185);
+        store
+            .put(&accepted_key, Value::utf8("boundary"), Some(""), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get(&accepted_key, Some("")).await.unwrap(),
+            Some(Value::utf8("boundary"))
+        );
+
+        let oversized_key = "a".repeat(186);
+        assert!(matches!(
+            store
+                .put(&oversized_key, Value::utf8("oversized"), Some(""), None)
+                .await,
+            Err(Error::InvalidKey(_))
+        ));
+
+        let valid_batch_key = format!("batch-valid-{}", std::process::id());
+        store.delete(&valid_batch_key, Some("")).await.unwrap();
+        assert!(matches!(
+            store
+                .put_many(
+                    &[valid_batch_key.clone(), oversized_key.clone()],
+                    &[Value::integer(1), Value::integer(2)],
+                    Some(""),
+                    None,
+                )
+                .await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert_eq!(store.get(&valid_batch_key, Some("")).await.unwrap(), None);
+
+        for (collection, key, _) in &cases {
+            assert!(store.delete(key, Some(collection)).await.unwrap());
+        }
+        assert!(store.delete(&accepted_key, Some("")).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_MEMCACHED_URL"]
     async fn memcached_rejects_json_entry_payload() {
         let url = std::env::var("OPENKEYV_MEMCACHED_URL").unwrap();
         let store = MemcachedStore::new(&url).unwrap();
         let collection = format!("openkeyv_json_test_{}", std::process::id());
-        let key = MemcachedStore::compound_key(&collection, "json-entry");
+        let key = memcached_key(&collection, "json-entry").unwrap();
 
         store
             .client()
