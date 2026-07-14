@@ -183,18 +183,3 @@ class SerializationAdapter(ABC):
             msg = 'dump_json is incompatible with date_format="datetime"; use date_format="isoformat" or dump_dict().'
             raise SerializationError(msg)
         return dump_to_json(obj=self.dump_dict(entry=entry, exclude_none=exclude_none, key=key, collection=collection, version=version))
-
-
-class BasicSerializationAdapter(SerializationAdapter):
-    """Basic serialization adapter that does not perform any transformations."""
-
-    def __init__(
-        self, *, date_format: Literal["isoformat", "datetime"] | None = "isoformat", value_format: Literal["string", "dict"] | None = "dict"
-    ) -> None:
-        super().__init__(date_format=date_format, value_format=value_format)
-
-    def prepare_load(self, data: dict[str, Any]) -> dict[str, Any]:
-        return data
-
-    def prepare_dump(self, data: dict[str, Any]) -> dict[str, Any]:
-        return data

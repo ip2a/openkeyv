@@ -18,7 +18,6 @@ from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
 from openkeyv._utils.managed_entry import ManagedEntry
 from openkeyv._utils.sanitization import PassthroughStrategy, SanitizationStrategy
-from openkeyv._utils.serialization import BasicSerializationAdapter, SerializationAdapter
 from openkeyv._utils.time_to_live import now, prepare_entry_timestamps
 from openkeyv.errors import StoreSetupError
 from openkeyv.protocols.key_value import (
@@ -71,7 +70,6 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     _setup_collection_locks: defaultdict[str, Lock]
     _setup_collection_complete: defaultdict[str, bool]
 
-    _serialization_adapter: SerializationAdapter
     _key_sanitization_strategy: SanitizationStrategy
     _collection_sanitization_strategy: SanitizationStrategy
 
@@ -82,7 +80,6 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     def __init__(
         self,
         *,
-        serialization_adapter: SerializationAdapter | None = None,
         key_sanitization_strategy: SanitizationStrategy | None = None,
         collection_sanitization_strategy: SanitizationStrategy | None = None,
         default_collection: str | None = None,
@@ -92,7 +89,6 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         """Initialize the managed key-value store.
 
         Args:
-            serialization_adapter: The serialization adapter to use for the store.
             key_sanitization_strategy: The sanitization strategy to use for keys.
             collection_sanitization_strategy: The sanitization strategy to use for collections.
             default_collection: The default collection to use if no collection is provided.
@@ -112,8 +108,6 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         self._seed = _seed_to_frozen_seed_data(seed={} if seed is None else seed)
 
         self.default_collection = DEFAULT_COLLECTION_NAME if default_collection is None else default_collection
-
-        self._serialization_adapter = BasicSerializationAdapter() if serialization_adapter is None else serialization_adapter
 
         self._key_sanitization_strategy = PassthroughStrategy() if key_sanitization_strategy is None else key_sanitization_strategy
         self._collection_sanitization_strategy = (
