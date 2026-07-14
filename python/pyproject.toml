@@ -143,8 +143,7 @@ reportMissingTypeStubs = false
 reportPrivateUsage = false
 reportUnnecessaryTypeIgnoreComment = true
 include = [
-    "python",
-    "tests",
+    "src/openkeyv",
 ]
 exclude = [
     "**/playground/**",

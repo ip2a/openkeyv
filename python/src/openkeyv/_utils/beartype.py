@@ -16,27 +16,22 @@ R = TypeVar(name="R")
 
 _disable_beartype = os.environ.get("OPENKEYV_DISABLE_BEARTYPE", "false").lower() in ("true", "1", "yes")
 
-if _disable_beartype:
+no_bear_type_check_conf = BeartypeConf(strategy=BeartypeStrategy.O0)
+no_bear_type = beartype(conf=no_bear_type_check_conf)
 
-    def bear_enforce(func: Callable[P, R]) -> Callable[P, R]:
-        """Enforce beartype with exceptions instead of warnings."""
+enforce_bear_type_conf = BeartypeConf(strategy=BeartypeStrategy.O1, violation_type=TypeError)
+enforce_bear_type = beartype(conf=enforce_bear_type_conf)
+
+
+def bear_enforce(func: Callable[P, R]) -> Callable[P, R]:
+    """Enforce beartype with exceptions instead of warnings."""
+    if _disable_beartype:
         return func
+    return enforce_bear_type(func)
 
-    def no_bear_type_check(func: Callable[P, R]) -> Callable[P, R]:
-        """Disable beartype checking for a function."""
+
+def no_bear_type_check(func: Callable[P, R]) -> Callable[P, R]:
+    """Disable beartype checking for a function."""
+    if _disable_beartype:
         return func
-
-else:
-    no_bear_type_check_conf = BeartypeConf(strategy=BeartypeStrategy.O0)
-    no_bear_type = beartype(conf=no_bear_type_check_conf)
-
-    enforce_bear_type_conf = BeartypeConf(strategy=BeartypeStrategy.O1, violation_type=TypeError)
-    enforce_bear_type = beartype(conf=enforce_bear_type_conf)
-
-    def bear_enforce(func: Callable[P, R]) -> Callable[P, R]:
-        """Enforce beartype with exceptions instead of warnings."""
-        return enforce_bear_type(func)
-
-    def no_bear_type_check(func: Callable[P, R]) -> Callable[P, R]:
-        """Disable beartype checking for a function."""
-        return no_bear_type(func)
+    return no_bear_type(func)

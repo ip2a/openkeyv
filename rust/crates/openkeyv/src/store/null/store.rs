@@ -9,7 +9,7 @@ use crate::value::Value;
 use async_trait::async_trait;
 
 /// A store that accepts all operations but stores nothing.
-/// Useful for testing and as a no-op fallback.
+/// Useful for testing and as an explicit no-op sink.
 pub struct NullStore {
     _client: NullClient,
     _config: NullConfig,

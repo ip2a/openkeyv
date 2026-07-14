@@ -13,17 +13,6 @@ This package provides internal utilities used across store implementations:
 - wait: Async wait utilities for testing
 """
 
-from __future__ import annotations
-
-from typing import Any
+from openkeyv._utils.managed_entry import ManagedEntry
 
 __all__ = ["ManagedEntry"]
-
-
-def __getattr__(name: str) -> Any:
-    if name == "ManagedEntry":
-        from openkeyv._utils.managed_entry import ManagedEntry
-
-        return ManagedEntry
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)

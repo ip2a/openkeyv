@@ -7,13 +7,13 @@ and expiration time. This allows stores to track TTL information consistently.
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, SupportsFloat
+from typing import Any, SupportsFloat, cast
 
 import orjson
 from typing_extensions import Self
 
 from openkeyv._utils.beartype import bear_enforce
-from openkeyv._utils.time_to_live import now, now_plus, seconds_to
+from openkeyv._utils.time_to_live import now, now_plus, prepare_ttl, seconds_to
 from openkeyv.errors import DeserializationError, SerializationError
 
 
@@ -62,10 +62,11 @@ class ManagedEntry:
 
     @classmethod
     def from_ttl(cls, *, value: Mapping[str, Any], created_at: datetime | None = None, ttl: SupportsFloat) -> Self:
+        ttl_seconds = prepare_ttl(t=ttl)
         return cls(
             value=value,
             created_at=created_at,
-            expires_at=(now_plus(seconds=float(ttl)) if ttl else None),
+            expires_at=now_plus(seconds=ttl_seconds),
         )
 
 
@@ -101,7 +102,7 @@ def load_from_json(json_str: str | bytes) -> dict[str, Any]:
     # JSON parse results from standard loaders are already dict[str, Any].
     # Skip the verify_dict copy for the common path.
     if isinstance(loaded, dict):
-        return loaded
+        return cast("dict[str, Any]", loaded)
 
     return verify_dict(obj=loaded)
 
@@ -117,7 +118,7 @@ def verify_dict(obj: Any) -> dict[str, Any]:
         msg = "Object contains non-string keys"
         raise TypeError(msg)
 
-    return dict(obj)  # pyright: ignore[reportUnknownArgumentType]
+    return dict(cast("Mapping[str, Any]", obj))
 
 
 def estimate_serialized_size(value: Mapping[str, Any]) -> int:

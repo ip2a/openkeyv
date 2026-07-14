@@ -231,7 +231,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
 
         managed_entry: ManagedEntry | None = await self._get_managed_entry(collection=collection, key=key)
 
-        if not managed_entry:
+        if managed_entry is None:
             return None
 
         if managed_entry.is_expired:
@@ -248,9 +248,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         entries = await self._get_managed_entries(keys=keys, collection=collection)
         current_time = now()
         return [
-            dict(entry.value)
-            if entry and (entry.expires_at is None or entry.expires_at > current_time)
-            else None
+            dict(entry.value) if entry is not None and (entry.expires_at is None or entry.expires_at > current_time) else None
             for entry in entries
         ]
 
@@ -262,7 +260,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
 
         managed_entry: ManagedEntry | None = await self._get_managed_entry(collection=collection, key=key)
 
-        if not managed_entry or managed_entry.is_expired:
+        if managed_entry is None or managed_entry.is_expired:
             return (None, None)
 
         return (dict(managed_entry.value), managed_entry.ttl)
@@ -290,7 +288,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
                 dict(entry.value),
                 (entry.expires_at - current_time).total_seconds() if entry.expires_at is not None else None,
             )
-            if entry and (entry.expires_at is None or entry.expires_at > current_time)
+            if entry is not None and (entry.expires_at is None or entry.expires_at > current_time)
             else (None, None)
             for entry in entries
         ]
@@ -326,14 +324,16 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
             created_at: The creation timestamp for all entries
             expires_at: The expiration timestamp for all entries (None if no TTL)
         """
-        await asyncio.gather(*[
-            self._put_managed_entry(
-                collection=collection,
-                key=key,
-                managed_entry=managed_entry,
-            )
-            for key, managed_entry in zip(keys, managed_entries, strict=True)
-        ])
+        await asyncio.gather(
+            *[
+                self._put_managed_entry(
+                    collection=collection,
+                    key=key,
+                    managed_entry=managed_entry,
+                )
+                for key, managed_entry in zip(keys, managed_entries, strict=True)
+            ]
+        )
 
     @bear_enforce
     @override
@@ -391,10 +391,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     async def _delete_managed_entries(self, *, keys: Sequence[str], collection: str) -> int:
         """Delete multiple managed entries by key from the specified collection."""
 
-        results = await asyncio.gather(*[
-            self._delete_managed_entry(key=key, collection=collection)
-            for key in keys
-        ])
+        results = await asyncio.gather(*[self._delete_managed_entry(key=key, collection=collection) for key in keys])
 
         return sum(1 for result in results if result)
 

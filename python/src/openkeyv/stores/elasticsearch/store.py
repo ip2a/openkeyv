@@ -29,7 +29,7 @@ from openkeyv.stores.base import (
     BaseEnumerateKeysStore,
     BaseStore,
 )
-from openkeyv.stores.elasticsearch.utils import LessCapableJsonSerializer, LessCapableNdjsonSerializer
+from openkeyv.stores.elasticsearch.serializers import LessCapableJsonSerializer, LessCapableNdjsonSerializer
 
 try:
     from elastic_transport import ObjectApiResponse

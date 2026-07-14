@@ -3,7 +3,23 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from openkeyv.wrappers.compression import CompressionWrapper
+    from openkeyv.wrappers.default_value import DefaultValueWrapper
+    from openkeyv.wrappers.encryption import BaseEncryptionWrapper, FernetEncryptionWrapper
+    from openkeyv.wrappers.limit_size import LimitSizeWrapper
+    from openkeyv.wrappers.logging import LoggingWrapper
+    from openkeyv.wrappers.passthrough_cache import PassthroughCacheWrapper
+    from openkeyv.wrappers.prefix_collections import PrefixCollectionsWrapper
+    from openkeyv.wrappers.prefix_keys import PrefixKeysWrapper
+    from openkeyv.wrappers.read_only import ReadOnlyWrapper
+    from openkeyv.wrappers.routing import CollectionRoutingWrapper, RoutingFunction, RoutingWrapper
+    from openkeyv.wrappers.single_collection import SingleCollectionWrapper
+    from openkeyv.wrappers.statistics import StatisticsWrapper
+    from openkeyv.wrappers.timeout import TimeoutWrapper
+    from openkeyv.wrappers.ttl_clamp import TTLClampWrapper
 
 _SYMBOL_TO_MODULE: dict[str, str] = {
     "BaseEncryptionWrapper": "openkeyv.wrappers.encryption",
@@ -25,7 +41,25 @@ _SYMBOL_TO_MODULE: dict[str, str] = {
     "TTLClampWrapper": "openkeyv.wrappers.ttl_clamp",
 }
 
-__all__ = sorted(_SYMBOL_TO_MODULE)
+__all__ = [
+    "BaseEncryptionWrapper",
+    "CollectionRoutingWrapper",
+    "CompressionWrapper",
+    "DefaultValueWrapper",
+    "FernetEncryptionWrapper",
+    "LimitSizeWrapper",
+    "LoggingWrapper",
+    "PassthroughCacheWrapper",
+    "PrefixCollectionsWrapper",
+    "PrefixKeysWrapper",
+    "ReadOnlyWrapper",
+    "RoutingFunction",
+    "RoutingWrapper",
+    "SingleCollectionWrapper",
+    "StatisticsWrapper",
+    "TTLClampWrapper",
+    "TimeoutWrapper",
+]
 
 
 def __getattr__(name: str) -> Any:
