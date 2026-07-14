@@ -76,6 +76,23 @@ impl PyNullStore {
     }
 
     #[pyo3(signature = (key, collection = None))]
+    fn delete<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        collection: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = store
+                .delete(&key, collection.as_deref())
+                .await
+                .map_err(error_to_py)?;
+            with_gil(|py| Ok(result.into_pyobject(py)?.to_owned().unbind()))
+        })
+    }
+
+    #[pyo3(signature = (key, collection = None))]
     fn ttl<'py>(
         &self,
         py: Python<'py>,
