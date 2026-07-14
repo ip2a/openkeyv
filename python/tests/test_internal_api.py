@@ -3,7 +3,7 @@ import inspect
 from pathlib import Path
 
 import openkeyv
-from openkeyv import _internal
+from openkeyv import _internal, stores
 
 STUB_PATH = Path(__file__).parents[1] / "src" / "openkeyv" / "_internal.pyi"
 
@@ -24,6 +24,13 @@ def _runtime_signature(target: object) -> list[tuple[str, bool]]:
         for parameter in inspect.signature(target).parameters.values()
         if parameter.name != "self"
     ]
+
+
+def test_public_store_facades_match() -> None:
+    assert stores.__all__ == openkeyv.__all__
+
+    for class_name in openkeyv.__all__:
+        assert getattr(openkeyv, class_name) is getattr(stores, class_name) is getattr(_internal, class_name)
 
 
 def test_runtime_api_matches_type_stub() -> None:

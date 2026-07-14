@@ -31,6 +31,8 @@ module-name = "openkeyv._internal"
 features = ["python-full"]
 python-source = "src"
 compatibility = "manylinux_2_31"
+auditwheel = "repair"
+exclude = ["**/__pycache__/**", "**/*.py[cod]"]
 
 [project.optional-dependencies]
 elasticsearch = ["elasticsearch>=8.0.0", "aiohttp>=3.12"]
