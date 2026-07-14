@@ -8,14 +8,176 @@ use crate::protocol::{
 };
 use crate::value::Value;
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use bytes::Bytes;
 use opensearch::indices::{IndicesDeleteParts, IndicesGetParts};
 use opensearch::params::{Conflicts, Refresh};
-use opensearch::{BulkOperation, BulkParts, DeleteByQueryParts, GetParts, MgetParts, SearchParts};
+use opensearch::{
+    BulkOperation, BulkParts, ClearScrollParts, DeleteByQueryParts, GetParts, MgetParts,
+    ScrollParts, SearchParts,
+};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+const INDEX_MARKER: &str = "-okv1-";
+const DOCUMENT_ID_MARKER: &str = "okv1-";
+const MAX_INDEX_BYTES: usize = 255;
+const MAX_DOCUMENT_ID_BYTES: usize = 512;
+
+fn validate_index_prefix(prefix: &str) -> Result<()> {
+    let Some(first) = prefix.bytes().next() else {
+        return Err(Error::InvalidKey(
+            "OpenSearch index prefix must not be empty".to_string(),
+        ));
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch index prefix must start with a lowercase ASCII letter or digit: {prefix:?}"
+        )));
+    }
+    if !prefix.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+    }) {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch index prefix contains unsupported characters: {prefix:?}"
+        )));
+    }
+    if prefix.len() + INDEX_MARKER.len() > MAX_INDEX_BYTES {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch index prefix is too long: empty collection index would be {} bytes (max {MAX_INDEX_BYTES})",
+            prefix.len() + INDEX_MARKER.len()
+        )));
+    }
+    Ok(())
+}
+
+fn encode_index_name(prefix: &str, collection: &str) -> Result<String> {
+    validate_index_prefix(prefix)?;
+    let final_len = prefix.len() + INDEX_MARKER.len() + collection.len() * 2;
+    if final_len > MAX_INDEX_BYTES {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch collection identity encodes to {final_len} index bytes (max {MAX_INDEX_BYTES})"
+        )));
+    }
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut index = String::with_capacity(final_len);
+    index.push_str(prefix);
+    index.push_str(INDEX_MARKER);
+    for byte in collection.as_bytes() {
+        index.push(HEX[(byte >> 4) as usize] as char);
+        index.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(index)
+}
+
+fn decode_index_name(prefix: &str, index: &str) -> Result<String> {
+    validate_index_prefix(prefix)?;
+    if index.len() > MAX_INDEX_BYTES {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch index name is {} bytes (max {MAX_INDEX_BYTES}): {index:?}",
+            index.len()
+        )));
+    }
+
+    let encoded_prefix = format!("{prefix}{INDEX_MARKER}");
+    let encoded = index.strip_prefix(&encoded_prefix).ok_or_else(|| {
+        Error::InvalidKey(format!(
+            "OpenSearch index is not a canonical OpenKeyV collection identity: {index:?}"
+        ))
+    })?;
+    if encoded.len() % 2 != 0 {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch index has odd-length collection hex: {index:?}"
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().chunks_exact(2) {
+        let high = match pair[0] {
+            b'0'..=b'9' => pair[0] - b'0',
+            b'a'..=b'f' => pair[0] - b'a' + 10,
+            _ => {
+                return Err(Error::InvalidKey(format!(
+                    "OpenSearch index contains non-lowercase-hex collection data: {index:?}"
+                )));
+            }
+        };
+        let low = match pair[1] {
+            b'0'..=b'9' => pair[1] - b'0',
+            b'a'..=b'f' => pair[1] - b'a' + 10,
+            _ => {
+                return Err(Error::InvalidKey(format!(
+                    "OpenSearch index contains non-lowercase-hex collection data: {index:?}"
+                )));
+            }
+        };
+        bytes.push((high << 4) | low);
+    }
+
+    let collection = String::from_utf8(bytes).map_err(|error| {
+        Error::InvalidKey(format!(
+            "OpenSearch index contains invalid UTF-8 collection data {index:?}: {error}"
+        ))
+    })?;
+    if encode_index_name(prefix, &collection)? != index {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch index is not canonical: {index:?}"
+        )));
+    }
+    Ok(collection)
+}
+
+fn index_pattern(prefix: &str) -> Result<String> {
+    validate_index_prefix(prefix)?;
+    Ok(format!("{prefix}-*"))
+}
+
+fn encode_document_id(key: &str) -> Result<String> {
+    let encoded = URL_SAFE_NO_PAD.encode(key.as_bytes());
+    let final_len = DOCUMENT_ID_MARKER.len() + encoded.len();
+    if final_len > MAX_DOCUMENT_ID_BYTES {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch key identity encodes to {final_len} document ID bytes (max {MAX_DOCUMENT_ID_BYTES})"
+        )));
+    }
+    Ok(format!("{DOCUMENT_ID_MARKER}{encoded}"))
+}
+
+fn decode_document_id(document_id: &str) -> Result<String> {
+    if document_id.len() > MAX_DOCUMENT_ID_BYTES {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch document ID is {} bytes (max {MAX_DOCUMENT_ID_BYTES}): {document_id:?}",
+            document_id.len()
+        )));
+    }
+    let encoded = document_id
+        .strip_prefix(DOCUMENT_ID_MARKER)
+        .ok_or_else(|| {
+            Error::InvalidKey(format!(
+                "OpenSearch document ID is not a canonical OpenKeyV key identity: {document_id:?}"
+            ))
+        })?;
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|error| {
+        Error::InvalidKey(format!(
+            "OpenSearch document ID contains invalid unpadded Base64URL {document_id:?}: {error}"
+        ))
+    })?;
+    if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+        return Err(Error::InvalidKey(format!(
+            "OpenSearch document ID is not canonical unpadded Base64URL: {document_id:?}"
+        )));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        Error::InvalidKey(format!(
+            "OpenSearch document ID contains invalid UTF-8 key data {document_id:?}: {error}"
+        ))
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +303,22 @@ struct SearchResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct ScrollSearchResponse {
+    #[serde(rename = "_scroll_id")]
+    scroll_id: String,
+    timed_out: bool,
+    #[serde(rename = "_shards")]
+    shards: ShardSummary,
+    hits: SearchHits,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClearScrollResponse {
+    succeeded: bool,
+    num_freed: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct SearchHits {
     hits: Vec<SearchHit>,
 }
@@ -168,7 +346,7 @@ struct AcknowledgedResponse {
 
 /// OpenSearch-backed key-value store.
 ///
-/// Each collection maps to an index named `{index_prefix}-{collection}`.
+/// Each collection maps to a lowercase, reversible OpenSearch index transport.
 /// Each document stores one canonical Base64 `OKVE1` entry and optional
 /// numeric expiration metadata used only for indexed expiration queries.
 pub struct OpenSearchStore {
@@ -206,8 +384,12 @@ impl OpenSearchStore {
         collection.unwrap_or(&self.config.default_collection)
     }
 
-    fn index_name(&self, collection: &str) -> String {
-        format!("{}-{}", self.config.index_prefix, collection)
+    fn index_name(&self, collection: &str) -> Result<String> {
+        encode_index_name(&self.config.index_prefix, collection)
+    }
+
+    fn index_pattern(&self) -> Result<String> {
+        index_pattern(&self.config.index_prefix)
     }
 
     fn os(&self) -> &opensearch::OpenSearch {
@@ -249,6 +431,249 @@ impl OpenSearchStore {
             )));
         }
         Ok(entry)
+    }
+
+    async fn owned_indices(&self) -> Result<Vec<(String, String)>> {
+        let pattern = self.index_pattern()?;
+        let response = self
+            .os()
+            .indices()
+            .get(IndicesGetParts::Index(&[&pattern]))
+            .allow_no_indices(true)
+            .ignore_unavailable(true)
+            .send()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to enumerate OpenSearch indices for {pattern}: {error}"),
+            })?;
+        let status = response.status_code();
+        if !status.is_success() {
+            let error = response
+                .json::<OpenSearchErrorResponse>()
+                .await
+                .map_err(|decode_error| Error::Deserialization(format!(
+                    "failed to decode OpenSearch index-enumeration error response for {pattern}: {decode_error}"
+                )))?;
+            if status.as_u16() == 404 && error.status == 404 && error.error.is_index_not_found() {
+                return Ok(Vec::new());
+            }
+            return Err(Error::StoreConnection {
+                message: format!(
+                    "OpenSearch index enumeration for {pattern} failed with HTTP {} / body status {}: {}: {}",
+                    status.as_u16(),
+                    error.status,
+                    error.error.kind,
+                    error.error.reason
+                ),
+            });
+        }
+
+        let indices = response
+            .json::<BTreeMap<String, IgnoredAny>>()
+            .await
+            .map_err(|error| {
+                Error::Deserialization(format!(
+                    "failed to decode OpenSearch index-enumeration response for {pattern}: {error}"
+                ))
+            })?;
+        indices
+            .into_keys()
+            .map(|index| {
+                let collection = decode_index_name(&self.config.index_prefix, &index)?;
+                Ok((index, collection))
+            })
+            .collect()
+    }
+
+    async fn clear_scroll(&self, scroll_id: &str) -> Result<()> {
+        let response = self
+            .os()
+            .clear_scroll(ClearScrollParts::None)
+            .body(serde_json::json!({ "scroll_id": scroll_id }))
+            .send()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to clear OpenSearch scroll {scroll_id}: {error}"),
+            })?;
+        let status = response.status_code();
+        if !status.is_success() {
+            let error = response
+                .json::<OpenSearchErrorResponse>()
+                .await
+                .map_err(|decode_error| Error::Deserialization(format!(
+                    "failed to decode OpenSearch clear-scroll error response for {scroll_id}: {decode_error}"
+                )))?;
+            return Err(Error::StoreConnection {
+                message: format!(
+                    "OpenSearch clear-scroll for {scroll_id} failed with HTTP {} / body status {}: {}: {}",
+                    status.as_u16(),
+                    error.status,
+                    error.error.kind,
+                    error.error.reason
+                ),
+            });
+        }
+
+        let body = response
+            .json::<ClearScrollResponse>()
+            .await
+            .map_err(|error| {
+                Error::Deserialization(format!(
+                    "failed to decode OpenSearch clear-scroll response for {scroll_id}: {error}"
+                ))
+            })?;
+        if !body.succeeded {
+            return Err(Error::StoreConnection {
+                message: format!(
+                    "OpenSearch did not clear scroll {scroll_id}; num_freed={}",
+                    body.num_freed
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    async fn validate_document_ids(&self, index: &str) -> Result<bool> {
+        let response = self
+            .os()
+            .search(SearchParts::Index(&[index]))
+            .scroll("1m")
+            .body(serde_json::json!({
+                "query": { "match_all": {} },
+                "sort": ["_doc"],
+                "size": PAGE_LIMIT,
+                "_source": false
+            }))
+            .send()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!(
+                    "failed to start OpenSearch document-ID validation for {index}: {error}"
+                ),
+            })?;
+        let status = response.status_code();
+        if !status.is_success() {
+            let error = response
+                .json::<OpenSearchErrorResponse>()
+                .await
+                .map_err(|decode_error| Error::Deserialization(format!(
+                    "failed to decode OpenSearch document-ID validation error response for {index}: {decode_error}"
+                )))?;
+            if status.as_u16() == 404 && error.status == 404 && error.error.is_index_not_found() {
+                return Ok(false);
+            }
+            return Err(Error::StoreConnection {
+                message: format!(
+                    "OpenSearch document-ID validation for {index} failed with HTTP {} / body status {}: {}: {}",
+                    status.as_u16(),
+                    error.status,
+                    error.error.kind,
+                    error.error.reason
+                ),
+            });
+        }
+
+        let mut page = response
+            .json::<ScrollSearchResponse>()
+            .await
+            .map_err(|error| {
+                Error::Deserialization(format!(
+                    "failed to decode OpenSearch document-ID validation response for {index}: {error}"
+                ))
+            })?;
+        if page.scroll_id.is_empty() {
+            return Err(Error::Deserialization(format!(
+                "OpenSearch document-ID validation for {index} returned an empty scroll ID"
+            )));
+        }
+        let mut scroll_id = page.scroll_id.clone();
+
+        let scan_result = async {
+            loop {
+                if page.timed_out
+                    || page.shards.failed != 0
+                    || page.shards.successful + page.shards.skipped > page.shards.total
+                {
+                    return Err(Error::StoreConnection {
+                        message: format!(
+                            "OpenSearch document-ID validation for {index} was incomplete: timed_out={}, shards total={}, successful={}, skipped={}, failed={}",
+                            page.timed_out,
+                            page.shards.total,
+                            page.shards.successful,
+                            page.shards.skipped,
+                            page.shards.failed
+                        ),
+                    });
+                }
+                for hit in &page.hits.hits {
+                    decode_document_id(&hit.id)?;
+                }
+                if page.hits.hits.is_empty() {
+                    break;
+                }
+
+                let response = self
+                    .os()
+                    .scroll(ScrollParts::None)
+                    .body(serde_json::json!({
+                        "scroll": "1m",
+                        "scroll_id": scroll_id
+                    }))
+                    .send()
+                    .await
+                    .map_err(|error| Error::StoreConnection {
+                        message: format!(
+                            "failed to continue OpenSearch document-ID validation for {index}: {error}"
+                        ),
+                    })?;
+                let status = response.status_code();
+                if !status.is_success() {
+                    let error = response
+                        .json::<OpenSearchErrorResponse>()
+                        .await
+                        .map_err(|decode_error| Error::Deserialization(format!(
+                            "failed to decode OpenSearch scroll error response for {index}: {decode_error}"
+                        )))?;
+                    return Err(Error::StoreConnection {
+                        message: format!(
+                            "OpenSearch scroll for {index} failed with HTTP {} / body status {}: {}: {}",
+                            status.as_u16(),
+                            error.status,
+                            error.error.kind,
+                            error.error.reason
+                        ),
+                    });
+                }
+                page = response
+                    .json::<ScrollSearchResponse>()
+                    .await
+                    .map_err(|error| {
+                        Error::Deserialization(format!(
+                            "failed to decode OpenSearch scroll response for {index}: {error}"
+                        ))
+                    })?;
+                if page.scroll_id.is_empty() {
+                    return Err(Error::Deserialization(format!(
+                        "OpenSearch document-ID validation for {index} returned an empty scroll ID"
+                    )));
+                }
+                scroll_id = page.scroll_id.clone();
+            }
+            Ok(())
+        }
+        .await;
+
+        let clear_result = self.clear_scroll(&scroll_id).await;
+        match (scan_result, clear_result) {
+            (Ok(()), Ok(())) => Ok(true),
+            (Err(scan_error), Ok(())) => Err(scan_error),
+            (Ok(()), Err(clear_error)) => Err(clear_error),
+            (Err(scan_error), Err(clear_error)) => Err(Error::StoreConnection {
+                message: format!(
+                    "OpenSearch document-ID validation for {index} failed: {scan_error}; scroll cleanup also failed: {clear_error}"
+                ),
+            }),
+        }
     }
 
     async fn read_entry(&self, index: &str, key: &str) -> Result<Option<ManagedEntry>> {
@@ -335,7 +760,7 @@ impl OpenSearchStore {
             return Ok(Some(entry));
         }
 
-        self.bulk_delete(index, &[key]).await?;
+        self.bulk_delete(index, &[key.to_string()]).await?;
         Ok(None)
     }
 
@@ -449,7 +874,7 @@ impl OpenSearchStore {
             };
 
             if entry.as_ref().is_some_and(ManagedEntry::is_expired) {
-                expired.push(expected_key.as_str());
+                expired.push(expected_key.clone());
                 entries.insert(expected_key.clone(), None);
             } else {
                 entries.insert(expected_key.clone(), entry);
@@ -462,12 +887,12 @@ impl OpenSearchStore {
         Ok(entries)
     }
 
-    async fn bulk_index(&self, index: &str, documents: Vec<(&str, OpenSearchDoc)>) -> Result<()> {
+    async fn bulk_index(&self, index: &str, documents: Vec<(String, OpenSearchDoc)>) -> Result<()> {
         if documents.is_empty() {
             return Ok(());
         }
 
-        let expected_keys: Vec<_> = documents.iter().map(|(key, _)| *key).collect();
+        let expected_keys: Vec<_> = documents.iter().map(|(key, _)| key.clone()).collect();
         let operations: Vec<BulkOperation<OpenSearchDoc>> = documents
             .into_iter()
             .map(|(key, document)| BulkOperation::index(document).id(key).into())
@@ -584,14 +1009,14 @@ impl OpenSearchStore {
         Ok(())
     }
 
-    async fn bulk_delete(&self, index: &str, keys: &[&str]) -> Result<usize> {
+    async fn bulk_delete(&self, index: &str, keys: &[String]) -> Result<usize> {
         if keys.is_empty() {
             return Ok(0);
         }
 
         let operations: Vec<BulkOperation<OpenSearchDoc>> = keys
             .iter()
-            .map(|key| BulkOperation::delete(*key).into())
+            .map(|key| BulkOperation::delete(key.clone()).into())
             .collect();
         let response = self
             .os()
@@ -732,8 +1157,12 @@ impl OpenSearchStore {
 #[async_trait]
 impl AsyncKeyValue for OpenSearchStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
-        let index = self.index_name(self.collection_name(collection));
-        Ok(self.read_entry(&index, key).await?.map(|entry| entry.value))
+        let index = self.index_name(self.collection_name(collection))?;
+        let document_id = encode_document_id(key)?;
+        Ok(self
+            .read_entry(&index, &document_id)
+            .await?
+            .map(|entry| entry.value))
     }
 
     async fn ttl(
@@ -741,8 +1170,9 @@ impl AsyncKeyValue for OpenSearchStore {
         key: &str,
         collection: Option<&str>,
     ) -> Result<Option<(Value, Option<f64>)>> {
-        let index = self.index_name(self.collection_name(collection));
-        Ok(self.read_entry(&index, key).await?.map(|entry| {
+        let index = self.index_name(self.collection_name(collection))?;
+        let document_id = encode_document_id(key)?;
+        Ok(self.read_entry(&index, &document_id).await?.map(|entry| {
             let ttl = entry.ttl();
             (entry.value, ttl)
         }))
@@ -755,18 +1185,20 @@ impl AsyncKeyValue for OpenSearchStore {
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
-        let index = self.index_name(self.collection_name(collection));
+        let index = self.index_name(self.collection_name(collection))?;
+        let document_id = encode_document_id(key)?;
         let entry = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
-        self.bulk_index(&index, vec![(key, Self::entry_to_doc(&entry))])
+        self.bulk_index(&index, vec![(document_id, Self::entry_to_doc(&entry))])
             .await
     }
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
-        let index = self.index_name(self.collection_name(collection));
-        Ok(self.bulk_delete(&index, &[key]).await? == 1)
+        let index = self.index_name(self.collection_name(collection))?;
+        let document_id = encode_document_id(key)?;
+        Ok(self.bulk_delete(&index, &[document_id]).await? == 1)
     }
 
     async fn get_many(
@@ -774,25 +1206,29 @@ impl AsyncKeyValue for OpenSearchStore {
         keys: &[String],
         collection: Option<&str>,
     ) -> Result<Vec<Option<Value>>> {
-        if keys.is_empty() {
+        let index = self.index_name(self.collection_name(collection))?;
+        let document_ids = keys
+            .iter()
+            .map(|key| encode_document_id(key))
+            .collect::<Result<Vec<_>>>()?;
+        if document_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut seen = HashSet::with_capacity(keys.len());
-        let mut unique_keys = Vec::with_capacity(keys.len());
-        for key in keys {
-            if seen.insert(key.as_str()) {
-                unique_keys.push(key.clone());
+        let mut seen = HashSet::with_capacity(document_ids.len());
+        let mut unique_ids = Vec::with_capacity(document_ids.len());
+        for document_id in &document_ids {
+            if seen.insert(document_id.as_str()) {
+                unique_ids.push(document_id.clone());
             }
         }
 
-        let index = self.index_name(self.collection_name(collection));
-        let entries = self.read_entries(&index, &unique_keys).await?;
-        Ok(keys
+        let entries = self.read_entries(&index, &unique_ids).await?;
+        Ok(document_ids
             .iter()
-            .map(|key| {
+            .map(|document_id| {
                 entries
-                    .get(key)
+                    .get(document_id)
                     .and_then(|entry| entry.as_ref().map(|entry| entry.value.clone()))
             })
             .collect())
@@ -803,24 +1239,28 @@ impl AsyncKeyValue for OpenSearchStore {
         keys: &[String],
         collection: Option<&str>,
     ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
-        if keys.is_empty() {
+        let index = self.index_name(self.collection_name(collection))?;
+        let document_ids = keys
+            .iter()
+            .map(|key| encode_document_id(key))
+            .collect::<Result<Vec<_>>>()?;
+        if document_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut seen = HashSet::with_capacity(keys.len());
-        let mut unique_keys = Vec::with_capacity(keys.len());
-        for key in keys {
-            if seen.insert(key.as_str()) {
-                unique_keys.push(key.clone());
+        let mut seen = HashSet::with_capacity(document_ids.len());
+        let mut unique_ids = Vec::with_capacity(document_ids.len());
+        for document_id in &document_ids {
+            if seen.insert(document_id.as_str()) {
+                unique_ids.push(document_id.clone());
             }
         }
 
-        let index = self.index_name(self.collection_name(collection));
-        let entries = self.read_entries(&index, &unique_keys).await?;
-        Ok(keys
+        let entries = self.read_entries(&index, &unique_ids).await?;
+        Ok(document_ids
             .iter()
-            .map(|key| {
-                entries.get(key).and_then(|entry| {
+            .map(|document_id| {
+                entries.get(document_id).and_then(|entry| {
                     entry
                         .as_ref()
                         .map(|entry| (entry.value.clone(), entry.ttl()))
@@ -842,63 +1282,81 @@ impl AsyncKeyValue for OpenSearchStore {
                 values: values.len(),
             });
         }
+
+        let index = self.index_name(self.collection_name(collection))?;
+        let document_ids = keys
+            .iter()
+            .map(|key| encode_document_id(key))
+            .collect::<Result<Vec<_>>>()?;
         if let Some(seconds) = ttl {
             ManagedEntry::validate_ttl(seconds)?;
         }
-        if keys.is_empty() {
+
+        let entries = values
+            .iter()
+            .cloned()
+            .map(|value| match ttl {
+                Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+                None => Ok(ManagedEntry::new(value)),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if document_ids.is_empty() {
             return Ok(());
         }
 
-        let mut positions = HashMap::with_capacity(keys.len());
-        let mut unique_values: Vec<(&str, &Value)> = Vec::with_capacity(keys.len());
-        for (key, value) in keys.iter().zip(values) {
-            if let Some(position) = positions.get(key.as_str()).copied() {
-                unique_values[position] = (key.as_str(), value);
+        let mut positions = HashMap::with_capacity(document_ids.len());
+        let mut documents = Vec::with_capacity(document_ids.len());
+        for (document_id, entry) in document_ids.into_iter().zip(entries) {
+            let document = Self::entry_to_doc(&entry);
+            if let Some(position) = positions.get(&document_id).copied() {
+                documents[position] = (document_id, document);
             } else {
-                positions.insert(key.as_str(), unique_values.len());
-                unique_values.push((key.as_str(), value));
+                positions.insert(document_id.clone(), documents.len());
+                documents.push((document_id, document));
             }
         }
 
-        let mut documents = Vec::with_capacity(unique_values.len());
-        for (key, value) in unique_values {
-            let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
-                None => ManagedEntry::new(value.clone()),
-            };
-            documents.push((key, Self::entry_to_doc(&entry)));
-        }
-
-        let index = self.index_name(self.collection_name(collection));
         self.bulk_index(&index, documents).await
     }
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
-        if keys.is_empty() {
+        let index = self.index_name(self.collection_name(collection))?;
+        let document_ids = keys
+            .iter()
+            .map(|key| encode_document_id(key))
+            .collect::<Result<Vec<_>>>()?;
+        if document_ids.is_empty() {
             return Ok(0);
         }
 
-        let mut seen = HashSet::with_capacity(keys.len());
-        let mut unique_keys = Vec::with_capacity(keys.len());
-        for key in keys {
-            if seen.insert(key.as_str()) {
-                unique_keys.push(key.as_str());
+        let mut seen = HashSet::with_capacity(document_ids.len());
+        let mut unique_ids = Vec::with_capacity(document_ids.len());
+        for document_id in document_ids {
+            if seen.insert(document_id.clone()) {
+                unique_ids.push(document_id);
             }
         }
 
-        let index = self.index_name(self.collection_name(collection));
-        self.bulk_delete(&index, &unique_keys).await
+        self.bulk_delete(&index, &unique_ids).await
     }
 }
 
 #[async_trait]
 impl AsyncCull for OpenSearchStore {
     async fn cull(&self) -> Result<()> {
-        let pattern = format!("{}-*", self.config.index_prefix);
+        let indices = self.owned_indices().await?;
+        for (index, _) in &indices {
+            self.validate_document_ids(index).await?;
+        }
+        if indices.is_empty() {
+            return Ok(());
+        }
+
+        let index_names: Vec<_> = indices.iter().map(|(index, _)| index.as_str()).collect();
         let now = chrono::Utc::now().timestamp_millis();
         let response = self
             .os()
-            .delete_by_query(DeleteByQueryParts::Index(&[&pattern]))
+            .delete_by_query(DeleteByQueryParts::Index(&index_names))
             .allow_no_indices(true)
             .ignore_unavailable(true)
             .conflicts(Conflicts::Abort)
@@ -914,7 +1372,7 @@ impl AsyncCull for OpenSearchStore {
             .await
             .map_err(|error| Error::StoreConnection {
                 message: format!(
-                    "failed to cull expired OpenSearch documents for {pattern}: {error}"
+                    "failed to cull expired OpenSearch documents from exact indices {index_names:?}: {error}"
                 ),
             })?;
         let status = response.status_code();
@@ -923,14 +1381,14 @@ impl AsyncCull for OpenSearchStore {
                 .json::<OpenSearchErrorResponse>()
                 .await
                 .map_err(|decode_error| Error::Deserialization(format!(
-                    "failed to decode OpenSearch cull error response for {pattern}: {decode_error}"
+                    "failed to decode OpenSearch cull error response for exact indices {index_names:?}: {decode_error}"
                 )))?;
             if status.as_u16() == 404 && error.status == 404 && error.error.is_index_not_found() {
                 return Ok(());
             }
             return Err(Error::StoreConnection {
                 message: format!(
-                    "OpenSearch cull for {pattern} failed with HTTP {} / body status {}: {}: {}",
+                    "OpenSearch cull for exact indices {index_names:?} failed with HTTP {} / body status {}: {}: {}",
                     status.as_u16(),
                     error.status,
                     error.error.kind,
@@ -944,7 +1402,7 @@ impl AsyncCull for OpenSearchStore {
             .await
             .map_err(|error| {
                 Error::Deserialization(format!(
-                    "failed to decode OpenSearch cull response for {pattern}: {error}"
+                    "failed to decode OpenSearch cull response for exact indices {index_names:?}: {error}"
                 ))
             })?;
         if body.timed_out
@@ -955,7 +1413,7 @@ impl AsyncCull for OpenSearchStore {
         {
             return Err(Error::StoreConnection {
                 message: format!(
-                    "OpenSearch cull for {pattern} was incomplete: timed_out={}, total={}, deleted={}, version_conflicts={}, noops={}, failures={}",
+                    "OpenSearch cull for exact indices {index_names:?} was incomplete: timed_out={}, total={}, deleted={}, version_conflicts={}, noops={}, failures={}",
                     body.timed_out,
                     body.total,
                     body.deleted,
@@ -972,12 +1430,16 @@ impl AsyncCull for OpenSearchStore {
 #[async_trait]
 impl AsyncEnumerateKeys for OpenSearchStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
+        let index = self.index_name(self.collection_name(collection))?;
+        if !self.validate_document_ids(&index).await? {
+            return Ok(Vec::new());
+        }
+
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
         if limit == 0 {
             return Ok(Vec::new());
         }
 
-        let index = self.index_name(self.collection_name(collection));
         let now = chrono::Utc::now().timestamp_millis();
         let response = self
             .os()
@@ -1052,83 +1514,35 @@ impl AsyncEnumerateKeys for OpenSearchStore {
                 ),
             });
         }
-        Ok(body.hits.hits.into_iter().map(|hit| hit.id).collect())
+        body.hits
+            .hits
+            .into_iter()
+            .map(|hit| decode_document_id(&hit.id))
+            .collect()
     }
 }
 
 #[async_trait]
 impl AsyncEnumerateCollections for OpenSearchStore {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
+        let indices = self.owned_indices().await?;
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        let pattern = format!("{}-*", self.config.index_prefix);
-        let response = self
-            .os()
-            .indices()
-            .get(IndicesGetParts::Index(&[&pattern]))
-            .allow_no_indices(true)
-            .ignore_unavailable(true)
-            .send()
-            .await
-            .map_err(|error| Error::StoreConnection {
-                message: format!("failed to enumerate OpenSearch indices for {pattern}: {error}"),
-            })?;
-        let status = response.status_code();
-        if !status.is_success() {
-            let error = response
-                .json::<OpenSearchErrorResponse>()
-                .await
-                .map_err(|decode_error| Error::Deserialization(format!(
-                    "failed to decode OpenSearch index-enumeration error response for {pattern}: {decode_error}"
-                )))?;
-            if status.as_u16() == 404 && error.status == 404 && error.error.is_index_not_found() {
-                return Ok(Vec::new());
-            }
-            return Err(Error::StoreConnection {
-                message: format!(
-                    "OpenSearch index enumeration for {pattern} failed with HTTP {} / body status {}: {}: {}",
-                    status.as_u16(),
-                    error.status,
-                    error.error.kind,
-                    error.error.reason
-                ),
-            });
-        }
-
-        let indices = response
-            .json::<BTreeMap<String, IgnoredAny>>()
-            .await
-            .map_err(|error| {
-                Error::Deserialization(format!(
-                    "failed to decode OpenSearch index-enumeration response for {pattern}: {error}"
-                ))
-            })?;
-        let prefix = format!("{}-", self.config.index_prefix);
-        let mut collections = Vec::with_capacity(indices.len().min(limit));
-        for index in indices.keys() {
-            let collection = index.strip_prefix(&prefix).ok_or_else(|| {
-                Error::StoreConnection {
-                    message: format!(
-                        "OpenSearch index enumeration for {pattern} returned unrelated index {index}"
-                    ),
-                }
-            })?;
-            collections.push(collection.to_string());
-            if collections.len() == limit {
-                break;
-            }
-        }
-        Ok(collections)
+        Ok(indices
+            .into_iter()
+            .take(limit)
+            .map(|(_, collection)| collection)
+            .collect())
     }
 }
 
 #[async_trait]
 impl AsyncDestroyCollection for OpenSearchStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let index = self.index_name(collection);
+        let index = self.index_name(collection)?;
+        if !self.validate_document_ids(&index).await? {
+            return Ok(false);
+        }
+
         let response = self
             .os()
             .indices()
@@ -1180,17 +1594,27 @@ impl AsyncDestroyCollection for OpenSearchStore {
 #[async_trait]
 impl AsyncDestroyStore for OpenSearchStore {
     async fn destroy(&self) -> Result<bool> {
-        let pattern = format!("{}-*", self.config.index_prefix);
+        let indices = self.owned_indices().await?;
+        for (index, _) in &indices {
+            self.validate_document_ids(index).await?;
+        }
+        if indices.is_empty() {
+            return Ok(true);
+        }
+
+        let index_names: Vec<_> = indices.iter().map(|(index, _)| index.as_str()).collect();
         let response = self
             .os()
             .indices()
-            .delete(IndicesDeleteParts::Index(&[&pattern]))
+            .delete(IndicesDeleteParts::Index(&index_names))
             .allow_no_indices(true)
             .ignore_unavailable(true)
             .send()
             .await
             .map_err(|error| Error::StoreConnection {
-                message: format!("failed to destroy OpenSearch store {pattern}: {error}"),
+                message: format!(
+                    "failed to destroy exact OpenSearch store indices {index_names:?}: {error}"
+                ),
             })?;
         let status = response.status_code();
         if !status.is_success() {
@@ -1198,14 +1622,14 @@ impl AsyncDestroyStore for OpenSearchStore {
                 .json::<OpenSearchErrorResponse>()
                 .await
                 .map_err(|decode_error| Error::Deserialization(format!(
-                    "failed to decode OpenSearch store-destroy error response for {pattern}: {decode_error}"
+                    "failed to decode OpenSearch store-destroy error response for exact indices {index_names:?}: {decode_error}"
                 )))?;
             if status.as_u16() == 404 && error.status == 404 && error.error.is_index_not_found() {
                 return Ok(true);
             }
             return Err(Error::StoreConnection {
                 message: format!(
-                    "OpenSearch store destruction for {pattern} failed with HTTP {} / body status {}: {}: {}",
+                    "OpenSearch store destruction for exact indices {index_names:?} failed with HTTP {} / body status {}: {}: {}",
                     status.as_u16(),
                     error.status,
                     error.error.kind,
@@ -1219,12 +1643,14 @@ impl AsyncDestroyStore for OpenSearchStore {
             .await
             .map_err(|error| {
                 Error::Deserialization(format!(
-                    "failed to decode OpenSearch store-destroy response for {pattern}: {error}"
+                    "failed to decode OpenSearch store-destroy response for exact indices {index_names:?}: {error}"
                 ))
             })?;
         if !body.acknowledged {
             return Err(Error::StoreConnection {
-                message: format!("OpenSearch did not acknowledge store destruction for {pattern}"),
+                message: format!(
+                    "OpenSearch did not acknowledge destruction for exact indices {index_names:?}"
+                ),
             });
         }
         Ok(true)
@@ -1242,6 +1668,125 @@ mod tests {
     struct RawGetResponse {
         #[serde(rename = "_source")]
         source: serde_json::Value,
+    }
+
+    #[test]
+    fn opensearch_identity_transport_is_reversible_and_bounded() {
+        let collections = ["", "Users", "users", "é", "e\u{301}", "a/b:*?[x]\\\0值"];
+        for collection in collections {
+            let index = encode_index_name("p", collection).unwrap();
+            assert_eq!(decode_index_name("p", &index).unwrap(), collection);
+            assert!(
+                index
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            );
+        }
+        assert_ne!(
+            encode_index_name("p", "Users").unwrap(),
+            encode_index_name("p", "users").unwrap()
+        );
+        assert_ne!(
+            encode_index_name("p", "é").unwrap(),
+            encode_index_name("p", "e\u{301}").unwrap()
+        );
+
+        let max_collection = "a".repeat(124);
+        let max_index = encode_index_name("p", &max_collection).unwrap();
+        assert_eq!(max_index.len(), 255);
+        assert_eq!(decode_index_name("p", &max_index).unwrap(), max_collection);
+        assert!(matches!(
+            encode_index_name("p", &"a".repeat(125)),
+            Err(Error::InvalidKey(_))
+        ));
+
+        let keys = ["", "Key", "key", "é", "e\u{301}", "a/b:*?[x]\\\0值"];
+        for key in keys {
+            let document_id = encode_document_id(key).unwrap();
+            assert_eq!(decode_document_id(&document_id).unwrap(), key);
+            assert!(
+                document_id
+                    .bytes()
+                    .all(|byte| { byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' })
+            );
+        }
+        assert_ne!(
+            encode_document_id("Key").unwrap(),
+            encode_document_id("key").unwrap()
+        );
+        assert_ne!(
+            encode_document_id("é").unwrap(),
+            encode_document_id("e\u{301}").unwrap()
+        );
+
+        let max_key = "a".repeat(380);
+        let max_document_id = encode_document_id(&max_key).unwrap();
+        assert_eq!(max_document_id.len(), 512);
+        assert_eq!(decode_document_id(&max_document_id).unwrap(), max_key);
+        assert!(matches!(
+            encode_document_id(&"a".repeat(381)),
+            Err(Error::InvalidKey(_))
+        ));
+    }
+
+    #[test]
+    fn opensearch_identity_transport_rejects_noncanonical_names() {
+        for prefix in [
+            "", "Upper", "-prefix", "_prefix", "+prefix", "prefix*", "prefix?", "prefix ",
+            "prefix:", "前缀",
+        ] {
+            assert!(
+                matches!(
+                    encode_index_name(prefix, "collection"),
+                    Err(Error::InvalidKey(_))
+                ),
+                "accepted invalid prefix {prefix:?}"
+            );
+        }
+        assert!(matches!(
+            encode_index_name(&"a".repeat(250), ""),
+            Err(Error::InvalidKey(_))
+        ));
+
+        for index in [
+            "p-users",
+            "p-okv2-",
+            "p-okv1-0",
+            "p-okv1-4A",
+            "p-okv1-gg",
+            "p-okv1-ff",
+            "q-okv1-61",
+        ] {
+            assert!(
+                matches!(decode_index_name("p", index), Err(Error::InvalidKey(_))),
+                "accepted invalid index {index:?}"
+            );
+        }
+        let oversized_index = format!("p-okv1-{}", "61".repeat(125));
+        assert!(matches!(
+            decode_index_name("p", &oversized_index),
+            Err(Error::InvalidKey(_))
+        ));
+
+        for document_id in [
+            "raw-key",
+            "okv2-",
+            "okv1-YQ==",
+            "okv1-*",
+            "okv1-YR",
+            "okv1-_w",
+        ] {
+            assert!(
+                matches!(decode_document_id(document_id), Err(Error::InvalidKey(_))),
+                "accepted invalid document id {document_id:?}"
+            );
+        }
+        let oversized_document_id = format!("okv1-{}", "a".repeat(508));
+        assert_eq!(oversized_document_id.len(), 513);
+        assert!(matches!(
+            decode_document_id(&oversized_document_id),
+            Err(Error::InvalidKey(_))
+        ));
     }
 
     #[tokio::test]
@@ -1266,10 +1811,11 @@ mod tests {
             .unwrap();
 
         for (key, expected_fields) in [("plain", 1), ("ttl", 2)] {
-            let index = store.index_name(store.collection_name(None));
+            let index = store.index_name(store.collection_name(None)).unwrap();
+            let document_id = encode_document_id(key).unwrap();
             let response = store
                 .os()
-                .get(GetParts::IndexId(&index, key))
+                .get(GetParts::IndexId(&index, &document_id))
                 .send()
                 .await
                 .unwrap();
@@ -1359,11 +1905,14 @@ mod tests {
 
         let mut expired = ManagedEntry::new(Value::utf8("expired"));
         expired.expires_at = Some(Utc::now() - chrono::TimeDelta::seconds(1));
-        let index = store.index_name(store.collection_name(None));
+        let index = store.index_name(store.collection_name(None)).unwrap();
         store
             .bulk_index(
                 &index,
-                vec![("expired-read", OpenSearchStore::entry_to_doc(&expired))],
+                vec![(
+                    encode_document_id("expired-read").unwrap(),
+                    OpenSearchStore::entry_to_doc(&expired),
+                )],
             )
             .await
             .unwrap();
@@ -1379,7 +1928,10 @@ mod tests {
         store
             .bulk_index(
                 &index,
-                vec![("expired-cull", OpenSearchStore::entry_to_doc(&expired))],
+                vec![(
+                    encode_document_id("expired-cull").unwrap(),
+                    OpenSearchStore::entry_to_doc(&expired),
+                )],
             )
             .await
             .unwrap();
@@ -1408,7 +1960,7 @@ mod tests {
             Utc::now().timestamp_millis()
         );
         let store = OpenSearchStore::from_url(url, prefix).await.unwrap();
-        let empty_index = store.index_name("empty");
+        let empty_index = store.index_name("empty").unwrap();
         let response = store
             .os()
             .indices()
@@ -1438,6 +1990,328 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires OPENKEYV_OPENSEARCH_URL"]
+    async fn opensearch_roundtrips_logical_identities_and_prevalidates_batches() {
+        let url = std::env::var("OPENKEYV_OPENSEARCH_URL")
+            .expect("OPENKEYV_OPENSEARCH_URL must point to OpenSearch");
+        let prefix = format!(
+            "openkeyv-identity-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        );
+        let store = OpenSearchStore::from_url(url, prefix).await.unwrap();
+        let identities = [
+            ("", ""),
+            ("Users", "Key"),
+            ("users", "key"),
+            ("é", "é"),
+            ("e\u{301}", "e\u{301}"),
+            ("a/b:*?[x]\\\0值", "a/b:*?[x]\\\0值"),
+        ];
+
+        for (position, (collection, key)) in identities.iter().enumerate() {
+            store
+                .put(
+                    key,
+                    Value::unsigned_integer(position as u64),
+                    Some(collection),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                store.get(key, Some(collection)).await.unwrap(),
+                Some(Value::unsigned_integer(position as u64))
+            );
+            assert_eq!(
+                store.keys(Some(collection), None).await.unwrap(),
+                vec![(*key).to_string()]
+            );
+        }
+
+        let collections: HashSet<_> = store.collections(None).await.unwrap().into_iter().collect();
+        assert_eq!(
+            collections,
+            identities
+                .iter()
+                .map(|(collection, _)| (*collection).to_string())
+                .collect()
+        );
+
+        let max_key = "k".repeat(380);
+        store
+            .put(&max_key, Value::utf8("max-key"), Some("boundary"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get(&max_key, Some("boundary")).await.unwrap(),
+            Some(Value::utf8("max-key"))
+        );
+
+        let first = "first".to_string();
+        let too_long = "k".repeat(381);
+        let error = store
+            .put_many(
+                &[first.clone(), too_long],
+                &[Value::utf8("first"), Value::utf8("too-long")],
+                Some("batch"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::InvalidKey(_)));
+        assert_eq!(store.get(&first, Some("batch")).await.unwrap(), None);
+
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_OPENSEARCH_URL"]
+    async fn opensearch_enumeration_rejects_all_malformed_physical_identities() {
+        let url = std::env::var("OPENKEYV_OPENSEARCH_URL")
+            .expect("OPENKEYV_OPENSEARCH_URL must point to OpenSearch");
+        let prefix = format!(
+            "openkeyv-enumeration-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        );
+        let store = OpenSearchStore::from_url(url, prefix.clone())
+            .await
+            .unwrap();
+        store
+            .put("valid", Value::utf8("value"), Some("valid"), None)
+            .await
+            .unwrap();
+
+        let malformed_index = format!("{prefix}-zz-invalid");
+        let response = store
+            .os()
+            .indices()
+            .create(IndicesCreateParts::Index(&malformed_index))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(matches!(
+            store.collections(Some(1)).await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.collections(Some(0)).await,
+            Err(Error::InvalidKey(_))
+        ));
+
+        let response = store
+            .os()
+            .indices()
+            .delete(IndicesDeleteParts::Index(&[&malformed_index]))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+
+        let index = store.index_name("valid").unwrap();
+        let response = store
+            .os()
+            .index(IndexParts::IndexId(&index, "raw-key"))
+            .refresh(Refresh::WaitFor)
+            .body(OpenSearchStore::entry_to_doc(&ManagedEntry::new(
+                Value::utf8("malformed-id"),
+            )))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(matches!(
+            store.keys(Some("valid"), Some(1)).await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.keys(Some("valid"), Some(0)).await,
+            Err(Error::InvalidKey(_))
+        ));
+
+        let response = store
+            .os()
+            .indices()
+            .delete(IndicesDeleteParts::Index(&[&index]))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_OPENSEARCH_URL"]
+    async fn opensearch_mutations_reject_malformed_identities_without_partial_changes() {
+        let url = std::env::var("OPENKEYV_OPENSEARCH_URL")
+            .expect("OPENKEYV_OPENSEARCH_URL must point to OpenSearch");
+        let prefix = format!(
+            "openkeyv-mutation-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        );
+        let store = OpenSearchStore::from_url(url, prefix.clone())
+            .await
+            .unwrap();
+
+        let cull_index = store.index_name("cull").unwrap();
+        let expired_id = encode_document_id("expired-valid").unwrap();
+        let mut expired = ManagedEntry::new(Value::utf8("expired"));
+        expired.expires_at = Some(Utc::now() - chrono::TimeDelta::seconds(1));
+        store
+            .bulk_index(
+                &cull_index,
+                vec![(expired_id.clone(), OpenSearchStore::entry_to_doc(&expired))],
+            )
+            .await
+            .unwrap();
+        let response = store
+            .os()
+            .index(IndexParts::IndexId(&cull_index, "raw-key"))
+            .refresh(Refresh::WaitFor)
+            .body(OpenSearchStore::entry_to_doc(&ManagedEntry::new(
+                Value::utf8("malformed-id"),
+            )))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(matches!(store.cull().await, Err(Error::InvalidKey(_))));
+        let response = store
+            .os()
+            .get(GetParts::IndexId(&cull_index, &expired_id))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        let response = store
+            .os()
+            .indices()
+            .delete(IndicesDeleteParts::Index(&[&cull_index]))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+
+        store
+            .put(
+                "valid",
+                Value::utf8("value"),
+                Some("destroy-collection"),
+                None,
+            )
+            .await
+            .unwrap();
+        let collection_index = store.index_name("destroy-collection").unwrap();
+        let valid_id = encode_document_id("valid").unwrap();
+        let response = store
+            .os()
+            .index(IndexParts::IndexId(&collection_index, "raw-key"))
+            .refresh(Refresh::WaitFor)
+            .body(OpenSearchStore::entry_to_doc(&ManagedEntry::new(
+                Value::utf8("malformed-id"),
+            )))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(matches!(
+            store.destroy_collection("destroy-collection").await,
+            Err(Error::InvalidKey(_))
+        ));
+        let response = store
+            .os()
+            .get(GetParts::IndexId(&collection_index, &valid_id))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        let response = store
+            .os()
+            .indices()
+            .delete(IndicesDeleteParts::Index(&[&collection_index]))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+
+        store
+            .put("valid", Value::utf8("keep"), Some("keep-index"), None)
+            .await
+            .unwrap();
+        let keep_index = store.index_name("keep-index").unwrap();
+        let keep_id = encode_document_id("valid").unwrap();
+        let malformed_index = format!("{prefix}-zz-invalid");
+        let response = store
+            .os()
+            .indices()
+            .create(IndicesCreateParts::Index(&malformed_index))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(matches!(store.destroy().await, Err(Error::InvalidKey(_))));
+        let response = store
+            .os()
+            .get(GetParts::IndexId(&keep_index, &keep_id))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        let response = store
+            .os()
+            .indices()
+            .delete(IndicesDeleteParts::Index(&[&malformed_index]))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(store.destroy().await.unwrap());
+
+        store
+            .put("valid", Value::utf8("bad"), Some("bad-document"), None)
+            .await
+            .unwrap();
+        store
+            .put("valid", Value::utf8("keep"), Some("keep-document"), None)
+            .await
+            .unwrap();
+        let bad_index = store.index_name("bad-document").unwrap();
+        let keep_index = store.index_name("keep-document").unwrap();
+        let keep_id = encode_document_id("valid").unwrap();
+        let response = store
+            .os()
+            .index(IndexParts::IndexId(&bad_index, "raw-key"))
+            .refresh(Refresh::WaitFor)
+            .body(OpenSearchStore::entry_to_doc(&ManagedEntry::new(
+                Value::utf8("malformed-id"),
+            )))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(matches!(store.destroy().await, Err(Error::InvalidKey(_))));
+        let response = store
+            .os()
+            .get(GetParts::IndexId(&keep_index, &keep_id))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        let response = store
+            .os()
+            .indices()
+            .delete(IndicesDeleteParts::Index(&[&bad_index]))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status_code().is_success());
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_OPENSEARCH_URL"]
     async fn opensearch_rejects_noncanonical_and_corrupt_documents() {
         let url = std::env::var("OPENKEYV_OPENSEARCH_URL")
             .expect("OPENKEYV_OPENSEARCH_URL must point to OpenSearch");
@@ -1447,7 +2321,7 @@ mod tests {
             Utc::now().timestamp_millis()
         );
         let store = OpenSearchStore::from_url(url, prefix).await.unwrap();
-        let index = store.index_name(store.collection_name(None));
+        let index = store.index_name(store.collection_name(None)).unwrap();
         let valid_entry = ManagedEntry::with_ttl(Value::utf8("value"), 60.0).unwrap();
         let valid_encoded = STANDARD.encode(valid_entry.encode());
         let unpadded = valid_encoded.trim_end_matches('=').to_string();
@@ -1490,7 +2364,10 @@ mod tests {
         for (key, document) in invalid_documents {
             let response = store
                 .os()
-                .index(IndexParts::IndexId(&index, key))
+                .index(IndexParts::IndexId(
+                    &index,
+                    &encode_document_id(key).unwrap(),
+                ))
                 .refresh(Refresh::WaitFor)
                 .body(document)
                 .send()
