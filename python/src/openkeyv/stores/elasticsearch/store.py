@@ -1,7 +1,7 @@
-import logging
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any, overload
+from http import HTTPStatus
+from typing import Any, cast, overload
 
 from typing_extensions import override
 
@@ -20,7 +20,7 @@ from openkeyv._utils.sanitize import (
 )
 from openkeyv._utils.serialization import SerializationAdapter
 from openkeyv._utils.time_to_live import now_as_epoch
-from openkeyv.errors import DeserializationError, SerializationError
+from openkeyv.errors import DeserializationError, SerializationError, StoreConnectionError
 from openkeyv.stores.base import (
     BaseContextManagerStore,
     BaseCullStore,
@@ -29,52 +29,15 @@ from openkeyv.stores.base import (
     BaseEnumerateKeysStore,
     BaseStore,
 )
-from openkeyv.stores.elasticsearch.utils import LessCapableJsonSerializer, LessCapableNdjsonSerializer, new_bulk_action
+from openkeyv.stores.elasticsearch.utils import LessCapableJsonSerializer, LessCapableNdjsonSerializer
 
 try:
     from elastic_transport import ObjectApiResponse
     from elastic_transport import SerializationError as ElasticsearchSerializationError
     from elasticsearch import AsyncElasticsearch
-    from elasticsearch.exceptions import BadRequestError
-
-    from openkeyv.stores.elasticsearch.utils import (
-        get_aggregations_from_body,
-        get_body_from_response,
-        get_first_value_from_field_in_hit,
-        get_hits_from_response,
-        get_source_from_body,
-    )
 except ImportError as e:
     msg = "ElasticsearchStore requires openkeyv[elasticsearch]"
     raise ImportError(msg) from e
-
-
-logger = logging.getLogger(__name__)
-
-
-# Private helper functions to encapsulate Elasticsearch client operations with type ignore comments
-# These are module-level functions (not methods) so they are not exported with the store class
-
-
-async def _elasticsearch_bulk(
-    client: AsyncElasticsearch,
-    operations: list[dict[str, Any]],
-    *,
-    refresh: bool = False,
-) -> ObjectApiResponse[Any]:
-    """Execute a bulk operation on Elasticsearch."""
-    return await client.bulk(operations=operations, refresh=refresh)
-
-
-def _get_aggregation_buckets(aggregations: dict[str, Any], agg_name: str) -> list[Any]:
-    """Get buckets from an aggregation result."""
-    return aggregations[agg_name]["buckets"]
-
-
-def _get_bucket_key(bucket: Any) -> str:
-    """Get the key from an aggregation bucket."""
-    return bucket["key"]
-
 
 DEFAULT_INDEX_PREFIX = "kv_store"
 
@@ -137,7 +100,34 @@ class ElasticsearchSerializationAdapter(SerializationAdapter):
 
     @override
     def prepare_load(self, data: dict[str, Any]) -> dict[str, Any]:
-        data["value"] = data.pop("value").get("flattened")
+        if data.get("version") != 1:
+            msg = "Elasticsearch document version must be 1"
+            raise DeserializationError(msg)
+
+        if not isinstance(data.get("created_at"), str):
+            msg = "Elasticsearch document created_at must be an ISO datetime string"
+            raise DeserializationError(msg)
+
+        if "expires_at" in data and not isinstance(data["expires_at"], str):
+            msg = "Elasticsearch document expires_at must be an ISO datetime string"
+            raise DeserializationError(msg)
+
+        value = data.get("value")
+        if not isinstance(value, dict):
+            msg = "Elasticsearch document value must be an object"
+            raise DeserializationError(msg)
+        value = cast("dict[str, Any]", value)
+
+        flattened = value.get("flattened")
+        if not isinstance(flattened, dict):
+            msg = "Elasticsearch document value.flattened must be an object with string keys"
+            raise DeserializationError(msg)
+        flattened = cast("dict[Any, Any]", flattened)
+        if not all(isinstance(key, str) for key in flattened):
+            msg = "Elasticsearch document value.flattened must be an object with string keys"
+            raise DeserializationError(msg)
+
+        data["value"] = cast("dict[str, Any]", flattened)
 
         return data
 
@@ -296,8 +286,28 @@ class ElasticsearchStore(
             self._exit_stack.push_async_callback(self._client.close)
 
         cluster_info = await self._client.options(ignore_status=404).info()
+        body = cluster_info.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch info response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(key, str) for key in body):
+            msg = "Elasticsearch info response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
 
-        self._is_serverless = cluster_info.get("version", {}).get("build_flavor") == "serverless"
+        version = body.get("version")
+        if not isinstance(version, dict):
+            msg = "Elasticsearch info response version must be an object"
+            raise StoreConnectionError(msg)
+        version = cast("dict[str, Any]", version)
+
+        build_flavor = version.get("build_flavor")
+        if not isinstance(build_flavor, str):
+            msg = "Elasticsearch info response version.build_flavor must be a string"
+            raise StoreConnectionError(msg)
+
+        self._is_serverless = build_flavor == "serverless"
 
     @override
     async def _setup_collection(self, *, collection: str) -> None:
@@ -310,12 +320,19 @@ class ElasticsearchStore(
             msg = f"Index '{index_name}' does not exist. Either create the index manually or set auto_create=True."
             raise ValueError(msg)
 
-        try:
-            _ = await self._client.options(ignore_status=404).indices.create(index=index_name, mappings=DEFAULT_MAPPING, settings={})
-        except BadRequestError as e:
-            if "index_already_exists_exception" in str(e).lower():
-                return
-            raise
+        response = await self._client.indices.create(index=index_name, mappings=DEFAULT_MAPPING, settings={})
+        body = response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch create-index response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(key, str) for key in body):
+            msg = "Elasticsearch create-index response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
+        if body.get("acknowledged") is not True or body.get("index") != index_name:
+            msg = f"Elasticsearch did not acknowledge creation of index '{index_name}'"
+            raise StoreConnectionError(msg)
 
     def _get_index_name(self, collection: str) -> str:
         # The Sanitization Strategy ensures that we do not have conflicts between upper and lower case
@@ -337,19 +354,46 @@ class ElasticsearchStore(
         index_name, document_id = self._get_destination(collection=collection, key=key)
 
         elasticsearch_response = await self._client.options(ignore_status=404).get(index=index_name, id=document_id)
+        body = elasticsearch_response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch get response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch get response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
 
-        body: dict[str, Any] = get_body_from_response(response=elasticsearch_response)
+        if body.get("_id") != document_id:
+            msg = "Elasticsearch get response document ID does not match the requested key"
+            raise StoreConnectionError(msg)
 
-        if not (source := get_source_from_body(body=body)):
+        found = body.get("found")
+        if found is False:
             return None
+        if found is not True:
+            msg = "Elasticsearch get response found field must be a boolean"
+            raise StoreConnectionError(msg)
 
-        try:
-            return self._serializer.load_dict(data=source)
-        except DeserializationError:
-            return None
+        source = body.get("_source")
+        if not isinstance(source, dict):
+            msg = "Elasticsearch document _source must be an object with string keys"
+            raise DeserializationError(msg)
+        source = cast("dict[Any, Any]", source)
+        if not all(isinstance(field, str) for field in source):
+            msg = "Elasticsearch document _source must be an object with string keys"
+            raise DeserializationError(msg)
+        source = cast("dict[str, Any]", source)
+        if source.get("key") != key or source.get("collection") != collection:
+            msg = "Elasticsearch document identity does not match the requested key and collection"
+            raise DeserializationError(msg)
+
+        return self._serializer.load_dict(data=source)
 
     @override
-    async def _get_managed_entries(self, *, collection: str, keys: Sequence[str]) -> list[ManagedEntry | None]:
+    async def _get_managed_entries(  # noqa: PLR0912, PLR0915
+        self, *, collection: str, keys: Sequence[str]
+    ) -> list[ManagedEntry | None]:
         if not keys:
             return []
 
@@ -359,39 +403,63 @@ class ElasticsearchStore(
         docs = [{"_id": document_id} for document_id in document_ids]
 
         elasticsearch_response = await self._client.options(ignore_status=404).mget(index=index_name, docs=docs)
+        body = elasticsearch_response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch mget response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch mget response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
 
-        body: dict[str, Any] = get_body_from_response(response=elasticsearch_response)
-        docs_result = body.get("docs", [])
+        docs_result = body.get("docs")
+        if not isinstance(docs_result, list):
+            msg = "Elasticsearch mget response must contain one document result per requested key"
+            raise StoreConnectionError(msg)
+        docs_result = cast("list[Any]", docs_result)
+        if len(docs_result) != len(keys):
+            msg = "Elasticsearch mget response must contain one document result per requested key"
+            raise StoreConnectionError(msg)
 
-        entries_by_id: dict[str, ManagedEntry | None] = {}
-        for doc in docs_result:
-            if not (doc_id := doc.get("_id")):
+        entries: list[ManagedEntry | None] = []
+        for key, document_id, doc in zip(keys, document_ids, docs_result, strict=True):
+            if not isinstance(doc, dict):
+                msg = "Elasticsearch mget document result must be an object with string keys"
+                raise StoreConnectionError(msg)
+            doc = cast("dict[Any, Any]", doc)
+            if not all(isinstance(field, str) for field in doc):
+                msg = "Elasticsearch mget document result must be an object with string keys"
+                raise StoreConnectionError(msg)
+            doc = cast("dict[str, Any]", doc)
+            if doc.get("_id") != document_id:
+                msg = "Elasticsearch mget response document ID does not match the requested key"
+                raise StoreConnectionError(msg)
+
+            found = doc.get("found")
+            if found is False:
+                entries.append(None)
                 continue
+            if found is not True:
+                msg = "Elasticsearch mget document found field must be a boolean"
+                raise StoreConnectionError(msg)
 
-            if "found" not in doc:
-                entries_by_id[doc_id] = None
-                continue
+            source = doc.get("_source")
+            if not isinstance(source, dict):
+                msg = "Elasticsearch mget document _source must be an object with string keys"
+                raise DeserializationError(msg)
+            source = cast("dict[Any, Any]", source)
+            if not all(isinstance(field, str) for field in source):
+                msg = "Elasticsearch mget document _source must be an object with string keys"
+                raise DeserializationError(msg)
+            source = cast("dict[str, Any]", source)
+            if source.get("key") != key or source.get("collection") != collection:
+                msg = "Elasticsearch mget document identity does not match the requested key and collection"
+                raise DeserializationError(msg)
 
-            if not (source := doc.get("_source")):
-                entries_by_id[doc_id] = None
-                continue
+            entries.append(self._serializer.load_dict(data=source))
 
-            try:
-                entries_by_id[doc_id] = self._serializer.load_dict(data=source)
-            except DeserializationError as e:
-                logger.error(
-                    "Failed to deserialize Elasticsearch document in batch operation",
-                    extra={
-                        "collection": collection,
-                        "document_id": doc_id,
-                        "error": str(e),
-                    },
-                    exc_info=True,
-                )
-                entries_by_id[doc_id] = None
-
-        # Return entries in the same order as input keys
-        return [entries_by_id.get(document_id) for document_id in document_ids]
+        return entries
 
     @property
     def _should_refresh_on_put(self) -> bool:
@@ -411,7 +479,7 @@ class ElasticsearchStore(
         document: dict[str, Any] = self._serializer.dump_dict(entry=managed_entry, key=key, collection=collection)
 
         try:
-            _ = await self._client.index(
+            response = await self._client.index(
                 index=index_name,
                 id=document_id,
                 body=document,
@@ -421,8 +489,30 @@ class ElasticsearchStore(
             msg = f"Failed to serialize document: {e}"
             raise SerializationError(message=msg) from e
 
+        body = response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch index response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch index response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
+        if body.get("_id") != document_id or body.get("result") not in {"created", "updated"}:
+            msg = "Elasticsearch index response did not confirm the requested write"
+            raise StoreConnectionError(msg)
+
+        shards = body.get("_shards")
+        if not isinstance(shards, dict):
+            msg = "Elasticsearch index response reported failed shards"
+            raise StoreConnectionError(msg)
+        shards = cast("dict[Any, Any]", shards)
+        if type(shards.get("failed")) is not int or shards["failed"] != 0:
+            msg = "Elasticsearch index response reported failed shards"
+            raise StoreConnectionError(msg)
+
     @override
-    async def _put_managed_entries(
+    async def _put_managed_entries(  # noqa: PLR0912, PLR0915
         self,
         *,
         collection: str,
@@ -442,17 +532,62 @@ class ElasticsearchStore(
         for key, managed_entry in zip(keys, managed_entries, strict=True):
             document_id: str = self._get_document_id(key=key)
 
-            index_action: dict[str, Any] = new_bulk_action(action="index", index=index_name, document_id=document_id)
+            index_action = {"index": {"_index": index_name, "_id": document_id}}
 
             document: dict[str, Any] = self._serializer.dump_dict(entry=managed_entry, key=key, collection=collection)
 
             operations.extend([index_action, document])
 
         try:
-            _ = await _elasticsearch_bulk(self._client, operations, refresh=self._should_refresh_on_put)
+            response = await self._client.bulk(operations=operations, refresh=self._should_refresh_on_put)
         except ElasticsearchSerializationError as e:
             msg = f"Failed to serialize bulk operations: {e}"
             raise SerializationError(message=msg) from e
+
+        body = response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch bulk-index response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch bulk-index response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
+        if body.get("errors") is not False:
+            msg = "Elasticsearch bulk-index response reported one or more failed writes"
+            raise StoreConnectionError(msg)
+
+        items = body.get("items")
+        if not isinstance(items, list):
+            msg = "Elasticsearch bulk-index response must contain one item per requested key"
+            raise StoreConnectionError(msg)
+        items = cast("list[Any]", items)
+        if len(items) != len(keys):
+            msg = "Elasticsearch bulk-index response must contain one item per requested key"
+            raise StoreConnectionError(msg)
+
+        for key, item in zip(keys, items, strict=True):
+            if not isinstance(item, dict):
+                msg = "Elasticsearch bulk-index item must contain exactly one index result"
+                raise StoreConnectionError(msg)
+            item = cast("dict[Any, Any]", item)
+            if set(item) != {"index"}:
+                msg = "Elasticsearch bulk-index item must contain exactly one index result"
+                raise StoreConnectionError(msg)
+            item = cast("dict[str, Any]", item)
+
+            result = item["index"]
+            document_id = self._get_document_id(key=key)
+            if not isinstance(result, dict):
+                msg = "Elasticsearch bulk-index result must be an object"
+                raise StoreConnectionError(msg)
+            result = cast("dict[str, Any]", result)
+            if result.get("_id") != document_id or result.get("result") not in {"created", "updated"}:
+                msg = "Elasticsearch bulk-index item did not confirm the requested write"
+                raise StoreConnectionError(msg)
+            if type(result.get("status")) is not int or result["status"] not in {HTTPStatus.OK, HTTPStatus.CREATED}:
+                msg = "Elasticsearch bulk-index item returned an invalid status"
+                raise StoreConnectionError(msg)
 
     @override
     async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:
@@ -462,16 +597,32 @@ class ElasticsearchStore(
         elasticsearch_response: ObjectApiResponse[Any] = await self._client.options(ignore_status=404).delete(
             index=index_name, id=document_id
         )
+        body = elasticsearch_response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch delete response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch delete response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
+        if body.get("_id") != document_id:
+            msg = "Elasticsearch delete response document ID does not match the requested key"
+            raise StoreConnectionError(msg)
 
-        body: dict[str, Any] = get_body_from_response(response=elasticsearch_response)
-
-        if not (result := body.get("result")) or not isinstance(result, str):
+        result = body.get("result")
+        if result == "not_found":
             return False
+        if result != "deleted":
+            msg = "Elasticsearch delete response result must be deleted or not_found"
+            raise StoreConnectionError(msg)
 
-        return result == "deleted"
+        return True
 
     @override
-    async def _delete_managed_entries(self, *, keys: Sequence[str], collection: str) -> int:
+    async def _delete_managed_entries(  # noqa: PLR0912
+        self, *, keys: Sequence[str], collection: str
+    ) -> int:
         if not keys:
             return 0
 
@@ -479,22 +630,60 @@ class ElasticsearchStore(
 
         for key in keys:
             index_name, document_id = self._get_destination(collection=collection, key=key)
+            operations.append({"delete": {"_index": index_name, "_id": document_id}})
 
-            delete_action: dict[str, Any] = new_bulk_action(action="delete", index=index_name, document_id=document_id)
+        elasticsearch_response = await self._client.bulk(operations=operations)
+        body = elasticsearch_response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch bulk-delete response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch bulk-delete response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
 
-            operations.append(delete_action)
+        if body.get("errors") is not False:
+            msg = "Elasticsearch bulk-delete response reported one or more failed deletes"
+            raise StoreConnectionError(msg)
 
-        elasticsearch_response = await _elasticsearch_bulk(self._client, operations)
+        items = body.get("items")
+        if not isinstance(items, list):
+            msg = "Elasticsearch bulk-delete response must contain one item per requested key"
+            raise StoreConnectionError(msg)
+        items = cast("list[Any]", items)
+        if len(items) != len(keys):
+            msg = "Elasticsearch bulk-delete response must contain one item per requested key"
+            raise StoreConnectionError(msg)
 
-        body: dict[str, Any] = get_body_from_response(response=elasticsearch_response)
-
-        # Count successful deletions
         deleted_count = 0
-        items = body.get("items", [])
-        for item in items:
-            delete_result = item.get("delete", {})
-            if delete_result.get("result") == "deleted":
+        for key, item in zip(keys, items, strict=True):
+            if not isinstance(item, dict):
+                msg = "Elasticsearch bulk-delete item must contain exactly one delete result"
+                raise StoreConnectionError(msg)
+            item = cast("dict[Any, Any]", item)
+            if set(item) != {"delete"}:
+                msg = "Elasticsearch bulk-delete item must contain exactly one delete result"
+                raise StoreConnectionError(msg)
+            item = cast("dict[str, Any]", item)
+
+            result = item["delete"]
+            document_id = self._get_document_id(key=key)
+            if not isinstance(result, dict):
+                msg = "Elasticsearch bulk-delete result must be an object"
+                raise StoreConnectionError(msg)
+            result = cast("dict[str, Any]", result)
+            if result.get("_id") != document_id:
+                msg = "Elasticsearch bulk-delete item document ID does not match the requested key"
+                raise StoreConnectionError(msg)
+
+            status = result.get("status")
+            operation_result = result.get("result")
+            if operation_result == "deleted" and status == HTTPStatus.OK:
                 deleted_count += 1
+            elif operation_result != "not_found" or status != HTTPStatus.NOT_FOUND:
+                msg = f"Elasticsearch bulk-delete failed for document '{document_id}'"
+                raise StoreConnectionError(msg)
 
         return deleted_count
 
@@ -517,17 +706,50 @@ class ElasticsearchStore(
             source_includes=[],
             size=limit,
         )
+        body = result.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch key-search response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch key-search response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
 
-        if not (hits := get_hits_from_response(response=result)):
-            return []
+        hits = body.get("hits")
+        if not isinstance(hits, dict):
+            msg = "Elasticsearch key-search response hits must be an object"
+            raise StoreConnectionError(msg)
+        hits = cast("dict[str, Any]", hits)
+        hit_items = hits.get("hits")
+        if not isinstance(hit_items, list):
+            msg = "Elasticsearch key-search response hits.hits must be a list"
+            raise StoreConnectionError(msg)
+        hit_items = cast("list[Any]", hit_items)
 
         all_keys: list[str] = []
 
-        for hit in hits:
-            if not (key := get_first_value_from_field_in_hit(hit=hit, field="key", value_type=str)):
-                continue
+        for hit in hit_items:
+            if not isinstance(hit, dict):
+                msg = "Elasticsearch key-search hit must be an object"
+                raise StoreConnectionError(msg)
+            hit = cast("dict[str, Any]", hit)
+            fields = hit.get("fields")
+            if not isinstance(fields, dict):
+                msg = "Elasticsearch key-search hit fields must be an object"
+                raise StoreConnectionError(msg)
+            fields = cast("dict[str, Any]", fields)
+            key_values = fields.get("key")
+            if not isinstance(key_values, list):
+                msg = "Elasticsearch key-search hit must contain exactly one string key field"
+                raise StoreConnectionError(msg)
+            key_values = cast("list[Any]", key_values)
+            if len(key_values) != 1 or not isinstance(key_values[0], str):
+                msg = "Elasticsearch key-search hit must contain exactly one string key field"
+                raise StoreConnectionError(msg)
+            key_values = cast("list[str]", key_values)
 
-            all_keys.append(key)
+            all_keys.append(key_values[0])
 
         return all_keys
 
@@ -549,13 +771,45 @@ class ElasticsearchStore(
             },
             size=limit,
         )
+        body = search_response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch collection-search response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch collection-search response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
 
-        body: dict[str, Any] = get_body_from_response(response=search_response)
-        aggregations: dict[str, Any] = get_aggregations_from_body(body=body)
+        aggregations = body.get("aggregations")
+        if not isinstance(aggregations, dict):
+            msg = "Elasticsearch collection-search response aggregations must be an object"
+            raise StoreConnectionError(msg)
+        aggregations = cast("dict[str, Any]", aggregations)
+        collections = aggregations.get("collections")
+        if not isinstance(collections, dict):
+            msg = "Elasticsearch collection-search aggregation collections must be an object"
+            raise StoreConnectionError(msg)
+        collections = cast("dict[str, Any]", collections)
+        buckets = collections.get("buckets")
+        if not isinstance(buckets, list):
+            msg = "Elasticsearch collection-search aggregation buckets must be a list"
+            raise StoreConnectionError(msg)
+        buckets = cast("list[Any]", buckets)
 
-        buckets = _get_aggregation_buckets(aggregations, "collections")
+        collection_names: list[str] = []
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                msg = "Elasticsearch collection-search bucket key must be a string"
+                raise StoreConnectionError(msg)
+            bucket = cast("dict[Any, Any]", bucket)
+            if not isinstance(bucket.get("key"), str):
+                msg = "Elasticsearch collection-search bucket key must be a string"
+                raise StoreConnectionError(msg)
+            bucket = cast("dict[str, Any]", bucket)
+            collection_names.append(cast("str", bucket["key"]))
 
-        return [_get_bucket_key(bucket) for bucket in buckets]
+        return collection_names
 
     @override
     async def _delete_collection(self, *, collection: str) -> bool:
@@ -569,18 +823,35 @@ class ElasticsearchStore(
                 },
             },
         )
+        body = result.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch delete-by-query response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch delete-by-query response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
 
-        body: dict[str, Any] = get_body_from_response(response=result)
+        if body.get("timed_out") is not False:
+            msg = "Elasticsearch delete-by-query timed out"
+            raise StoreConnectionError(msg)
+        failures = body.get("failures")
+        if not isinstance(failures, list) or failures:
+            msg = "Elasticsearch delete-by-query reported failures"
+            raise StoreConnectionError(msg)
 
-        if not (deleted := body.get("deleted")) or not isinstance(deleted, int):
-            return False
+        deleted = body.get("deleted")
+        if type(deleted) is not int or deleted < 0:
+            msg = "Elasticsearch delete-by-query deleted count must be a non-negative integer"
+            raise StoreConnectionError(msg)
 
         return deleted > 0
 
     @override
     async def _cull(self) -> None:
         ms_epoch = int(now_as_epoch() * 1000)
-        _ = await self._client.options(ignore_status=404).delete_by_query(
+        response = await self._client.options(ignore_status=404).delete_by_query(
             index=f"{self._index_prefix}-*",
             body={
                 "query": {
@@ -590,3 +861,19 @@ class ElasticsearchStore(
                 },
             },
         )
+        body = response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch cull response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(field, str) for field in body):
+            msg = "Elasticsearch cull response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[str, Any]", body)
+        if body.get("timed_out") is not False:
+            msg = "Elasticsearch cull operation timed out"
+            raise StoreConnectionError(msg)
+        failures = body.get("failures")
+        if not isinstance(failures, list) or failures:
+            msg = "Elasticsearch cull operation reported failures"
+            raise StoreConnectionError(msg)
