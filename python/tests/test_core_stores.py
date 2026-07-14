@@ -26,6 +26,20 @@ async def test_local_store_roundtrip_and_batches(store_type: type[MemoryStore] |
 
 
 @pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore])
+async def test_local_store_public_lifecycle_capabilities(store_type: type[MemoryStore] | type[SimpleStore]) -> None:
+    store = store_type()
+    await store.put_many(["one", "two"], [1, 2], collection="first")
+    await store.put("three", 3, collection="second")
+
+    assert len(await store.keys(collection="first", limit=1)) == 1
+    assert len(await store.collections(limit=1)) == 1
+
+    await store.cull()
+    assert await store.destroy() is True
+    assert await store.collections() == []
+
+
+@pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore])
 async def test_local_store_preserves_missing_ttl(store_type: type[MemoryStore] | type[SimpleStore]) -> None:
     store = store_type()
     await store.put("persistent", "value")
@@ -68,6 +82,7 @@ async def test_null_store_has_explicit_noop_results() -> None:
     assert await store.keys() == []
     assert await store.collections() == []
     assert await store.destroy_collection("collection") is False
+    await store.cull()
     assert await store.destroy() is True
 
 

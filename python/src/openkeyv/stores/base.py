@@ -346,6 +346,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
             managed_entry=managed_entry,
         )
 
+    @bear_enforce
     @override
     async def put_many(
         self,
@@ -504,8 +505,12 @@ class BaseContextManagerStore(BaseStore, ABC):
         """
         # Ensure exit stack is entered
         await self._ensure_exit_stack_entered()
-        # Call parent setup
-        await super().setup()
+        try:
+            # Call parent setup
+            await super().setup()
+        except BaseException:
+            await self.close()
+            raise
 
 
 class BaseEnumerateCollectionsStore(BaseStore, AsyncEnumerateCollectionsProtocol, ABC):
