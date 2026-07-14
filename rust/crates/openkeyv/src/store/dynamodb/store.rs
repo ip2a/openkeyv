@@ -740,7 +740,7 @@ impl AsyncKeyValue for DynamoDBStore {
     ) -> Result<()> {
         let collection = self.collection_name(collection);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         self.client()
@@ -814,6 +814,9 @@ impl AsyncKeyValue for DynamoDBStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
 
         let collection = self.collection_name(collection);
         let mut seen = HashSet::with_capacity(keys.len());
@@ -829,7 +832,7 @@ impl AsyncKeyValue for DynamoDBStore {
             let mut requests = Vec::with_capacity(chunk.len());
             for &index in chunk {
                 let entry = match ttl {
-                    Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds),
+                    Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds)?,
                     None => ManagedEntry::new(values[index].clone()),
                 };
                 let put = PutRequest::builder()
@@ -1624,13 +1627,17 @@ mod tests {
             .put("beta-key", Value::utf8("beta"), Some("beta"), None)
             .await
             .unwrap();
-        store
-            .put(
+        let mut expired = ManagedEntry::new(Value::utf8("expired"));
+        expired.expires_at = Some(Utc::now() - chrono::TimeDelta::seconds(1));
+        client
+            .put_item()
+            .table_name(&table_name)
+            .set_item(Some(DynamoDBStore::encode_item(
+                "expired",
                 "expired-only",
-                Value::utf8("expired"),
-                Some("expired"),
-                Some(-1.0),
-            )
+                &expired,
+            )))
+            .send()
             .await
             .unwrap();
         assert_eq!(
@@ -1684,8 +1691,11 @@ mod tests {
                 .is_none()
         );
 
-        store
-            .put("race", Value::utf8("expired"), Some("race"), Some(-1.0))
+        client
+            .put_item()
+            .table_name(&table_name)
+            .set_item(Some(DynamoDBStore::encode_item("race", "race", &expired)))
+            .send()
             .await
             .unwrap();
         let observed = client
@@ -1711,8 +1721,11 @@ mod tests {
             Some(Value::utf8("replacement"))
         );
 
-        store
-            .put("cull", Value::utf8("expired"), Some("cull"), Some(-1.0))
+        client
+            .put_item()
+            .table_name(&table_name)
+            .set_item(Some(DynamoDBStore::encode_item("cull", "cull", &expired)))
+            .send()
             .await
             .unwrap();
         store.cull().await.unwrap();

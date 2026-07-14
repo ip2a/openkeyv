@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn entry_codec_rejects_truncated_data() {
-        let encoded = encode(&ManagedEntry::with_ttl(Value::utf8("value"), 30.0));
+        let encoded = encode(&ManagedEntry::with_ttl(Value::utf8("value"), 30.0).unwrap());
 
         for end in 0..encoded.len() {
             assert!(decode(Bytes::copy_from_slice(&encoded[..end])).is_err());

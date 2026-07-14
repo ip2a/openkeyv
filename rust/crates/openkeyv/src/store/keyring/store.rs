@@ -186,7 +186,7 @@ impl AsyncKeyValue for KeyringStore {
         ttl: Option<f64>,
     ) -> Result<()> {
         let managed = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         let encoded = managed.encode();
@@ -487,6 +487,9 @@ impl AsyncKeyValue for KeyringStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         if keys.is_empty() {
             return Ok(());
         }
@@ -499,7 +502,7 @@ impl AsyncKeyValue for KeyringStore {
         tokio::task::spawn_blocking(move || {
             for (key, value) in keys.into_iter().zip(values) {
                 let managed = match ttl {
-                    Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+                    Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
                     None => ManagedEntry::new(value),
                 };
                 let encoded = managed.encode();

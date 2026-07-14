@@ -76,7 +76,7 @@ impl AsyncKeyValue for SimpleStore {
         let cname = self.collection_name(collection);
         let mut data = self.client.data().write().await;
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         data.entry(cname.to_string())
@@ -146,12 +146,15 @@ impl AsyncKeyValue for SimpleStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         let cname = self.collection_name(collection);
         let mut data = self.client.data().write().await;
         let col = data.entry(cname.to_string()).or_default();
         for (key, value) in keys.iter().zip(values.iter()) {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
             col.insert(key.clone(), entry);

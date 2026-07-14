@@ -142,7 +142,7 @@ impl AsyncKeyValue for FileTreeStore {
         self.ensure_collection_dir(cname).await?;
         let path = safe_path(self.base_path(), cname, key)?;
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         self.write_entry(&path, &entry).await
@@ -212,12 +212,15 @@ impl AsyncKeyValue for FileTreeStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         let cname = self.collection_name(collection);
         self.ensure_collection_dir(cname).await?;
         for (key, value) in keys.iter().zip(values.iter()) {
             let path = safe_path(self.base_path(), cname, key)?;
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
             self.write_entry(&path, &entry).await?;

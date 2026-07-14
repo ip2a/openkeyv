@@ -107,7 +107,7 @@ impl AsyncKeyValue for MemcachedStore {
         let cname = self.collection_name(collection);
         let ck = Self::compound_key(cname, key);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         let encoded = entry.encode();
@@ -236,13 +236,16 @@ impl AsyncKeyValue for MemcachedStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         let cname = self.collection_name(collection);
         let exptime = ttl.map(|seconds| seconds.max(1.0) as u32).unwrap_or(0);
         let mut entries = Vec::with_capacity(keys.len());
 
         for (key, value) in keys.iter().zip(values.iter()) {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
             let ck = Self::compound_key(cname, key);

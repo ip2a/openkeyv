@@ -121,7 +121,7 @@ impl AsyncKeyValue for DiskStore {
         let cname = self.collection_name(collection);
         let tree = self.get_tree(cname)?;
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         let iv = entry_to_ivec(&entry)?;
@@ -217,11 +217,14 @@ impl AsyncKeyValue for DiskStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         let cname = self.collection_name(collection);
         let tree = self.get_tree(cname)?;
         for (key, value) in keys.iter().zip(values.iter()) {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
             let iv = entry_to_ivec(&entry)?;

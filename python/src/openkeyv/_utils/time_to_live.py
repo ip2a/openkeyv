@@ -4,6 +4,7 @@ This module provides functions for working with TTL (time-to-live) values
 and datetime conversions used throughout the key-value stores.
 """
 
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, SupportsFloat, overload
@@ -82,7 +83,7 @@ def _validate_ttl(t: SupportsFloat | None) -> float | None:
 
     ttl = float(t)
 
-    if ttl <= 0:
+    if not math.isfinite(ttl) or ttl <= 0:
         raise InvalidTTLError(ttl=t)
 
     return ttl

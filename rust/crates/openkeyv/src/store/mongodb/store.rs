@@ -463,7 +463,7 @@ impl AsyncKeyValue for MongoDBStore {
     ) -> Result<()> {
         let collection = self.collection(self.collection_name(collection)).await?;
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         collection
@@ -625,6 +625,9 @@ impl AsyncKeyValue for MongoDBStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         if keys.is_empty() {
             return Ok(());
         }
@@ -639,7 +642,7 @@ impl AsyncKeyValue for MongoDBStore {
         let mut models = Vec::with_capacity(last_indices.len());
         for index in last_indices.into_values() {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds)?,
                 None => ManagedEntry::new(values[index].clone()),
             };
             models.push(

@@ -454,7 +454,7 @@ impl AsyncKeyValue for DuckDBStore {
     ) -> Result<()> {
         let collection = self.collection_name(collection);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         self.conn()
@@ -755,6 +755,9 @@ impl AsyncKeyValue for DuckDBStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         if keys.is_empty() {
             return Ok(());
         }
@@ -785,7 +788,7 @@ impl AsyncKeyValue for DuckDBStore {
                 })?;
             for index in last_indices.into_values() {
                 let entry = match ttl {
-                    Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds),
+                    Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds)?,
                     None => ManagedEntry::new(values[index].clone()),
                 };
                 statement
@@ -1289,7 +1292,7 @@ mod tests {
     async fn duckdb_rejects_expiration_mismatch() {
         let connection = duckdb::Connection::open_in_memory().unwrap();
         let store = DuckDBStore::from_conn(connection, None).await.unwrap();
-        let entry = ManagedEntry::with_ttl(Value::utf8("value"), 60.0);
+        let entry = ManagedEntry::with_ttl(Value::utf8("value"), 60.0).unwrap();
         {
             let connection = store.conn().lock().await;
             connection

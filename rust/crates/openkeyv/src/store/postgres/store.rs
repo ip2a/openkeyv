@@ -480,7 +480,7 @@ impl AsyncKeyValue for PostgresStore {
     ) -> Result<()> {
         let collection = self.collection_name(collection);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         sqlx::query(&format!(
@@ -724,6 +724,9 @@ impl AsyncKeyValue for PostgresStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         if keys.is_empty() {
             return Ok(());
         }
@@ -741,7 +744,7 @@ impl AsyncKeyValue for PostgresStore {
         let mut expires_at = Vec::with_capacity(final_indices.len());
         for index in final_indices {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds)?,
                 None => ManagedEntry::new(values[index].clone()),
             };
             final_keys.push(keys[index].as_str());
@@ -1254,7 +1257,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let mismatch = ManagedEntry::with_ttl(Value::utf8("value"), 60.0);
+        let mismatch = ManagedEntry::with_ttl(Value::utf8("value"), 60.0).unwrap();
         sqlx::query(&format!(
             "INSERT INTO {table} (collection, key, entry, expires_at) \
              VALUES ($1, $2, $3, $4)"

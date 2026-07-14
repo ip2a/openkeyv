@@ -224,7 +224,7 @@ impl AsyncKeyValue for VaultStore {
     ) -> Result<()> {
         let path = secret_path(self.collection_name(collection), key);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         self.write_entry(&path, entry).await
@@ -330,6 +330,9 @@ impl AsyncKeyValue for VaultStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         if keys.is_empty() {
             return Ok(());
         }
@@ -340,7 +343,7 @@ impl AsyncKeyValue for VaultStore {
         for (key, value) in keys.iter().zip(values).rev() {
             if seen.insert(key.as_str()) {
                 let entry = match ttl {
-                    Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                    Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                     None => ManagedEntry::new(value.clone()),
                 };
                 writes.push((secret_path(collection, key), entry));
@@ -523,13 +526,10 @@ mod tests {
             assert!(result.1 > 0.0 && result.1 <= 30.0);
         }
 
+        let mut expired = ManagedEntry::new(Value::utf8("expired"));
+        expired.expires_at = Some(Utc::now() - chrono::TimeDelta::seconds(1));
         store
-            .put(
-                "expired",
-                Value::utf8("expired"),
-                Some(&collection),
-                Some(-1.0),
-            )
+            .write_entry(&secret_path(&collection, "expired"), expired)
             .await
             .unwrap();
         assert_eq!(store.get("expired", Some(&collection)).await.unwrap(), None);

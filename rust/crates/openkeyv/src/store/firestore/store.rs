@@ -162,7 +162,7 @@ impl AsyncKeyValue for FirestoreStore {
     ) -> Result<()> {
         let cname = self.collection_name(collection);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         let doc = FirestoreDoc {
@@ -488,6 +488,9 @@ impl AsyncKeyValue for FirestoreStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         if keys.is_empty() {
             return Ok(());
         }
@@ -512,7 +515,7 @@ impl AsyncKeyValue for FirestoreStore {
         let mut batch = writer.new_batch();
         for (key, value) in writes {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
             let doc = FirestoreDoc {
@@ -816,14 +819,21 @@ mod tests {
     #[ignore = "requires FIRESTORE_EMULATOR_HOST"]
     async fn firestore_expired_reads_delete_documents() {
         let (db, store, collection) = emulator_store("expired").await;
-        store
-            .put("get-expired", Value::utf8("value"), None, Some(-1.0))
-            .await
-            .unwrap();
-        store
-            .put("ttl-expired", Value::utf8("value"), None, Some(-1.0))
-            .await
-            .unwrap();
+        let mut expired = ManagedEntry::new(Value::utf8("value"));
+        expired.expires_at = Some(chrono::Utc::now() - chrono::TimeDelta::seconds(1));
+        let doc = FirestoreDoc {
+            entry: Bytes::from(expired.encode()),
+        };
+        for key in ["get-expired", "ttl-expired"] {
+            db.fluent()
+                .update()
+                .in_col(&collection)
+                .document_id(key)
+                .object(&doc)
+                .execute::<FirestoreDoc>()
+                .await
+                .unwrap();
+        }
 
         assert_eq!(store.get("get-expired", None).await.unwrap(), None);
         assert_eq!(store.ttl("ttl-expired", None).await.unwrap(), None);
@@ -845,15 +855,16 @@ mod tests {
         assert!(ttl_raw.is_none());
 
         let batch_keys = vec!["batch-a".to_string(), "batch-b".to_string()];
-        store
-            .put_many(
-                &batch_keys,
-                &[Value::utf8("a"), Value::utf8("b")],
-                None,
-                Some(-1.0),
-            )
-            .await
-            .unwrap();
+        for key in &batch_keys {
+            db.fluent()
+                .update()
+                .in_col(&collection)
+                .document_id(key)
+                .object(&doc)
+                .execute::<FirestoreDoc>()
+                .await
+                .unwrap();
+        }
         assert_eq!(
             store.get_many(&batch_keys, None).await.unwrap(),
             vec![None, None]

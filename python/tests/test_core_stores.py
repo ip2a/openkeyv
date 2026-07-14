@@ -60,3 +60,18 @@ async def test_null_store_has_explicit_noop_results() -> None:
     assert await store.collections() == []
     assert await store.destroy_collection("collection") is False
     assert await store.destroy() is True
+
+
+@pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore, NullStore])
+@pytest.mark.parametrize("ttl", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0])
+async def test_stores_reject_invalid_ttl(store_type: type[MemoryStore] | type[SimpleStore] | type[NullStore], ttl: float) -> None:
+    store = store_type()
+
+    with pytest.raises(RuntimeError, match="invalid ttl"):
+        await store.put("key", "value", ttl=ttl)
+
+    with pytest.raises(RuntimeError, match="invalid ttl"):
+        await store.put_many(["key"], ["value"], ttl=ttl)
+
+    with pytest.raises(RuntimeError, match="invalid ttl"):
+        await store.put_many([], [], ttl=ttl)

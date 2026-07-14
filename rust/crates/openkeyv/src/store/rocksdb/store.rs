@@ -104,7 +104,7 @@ impl AsyncKeyValue for RocksDBStore {
     ) -> Result<()> {
         let cname = self.collection_name(collection);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         self.put_entry(key, cname, &entry)
@@ -180,11 +180,14 @@ impl AsyncKeyValue for RocksDBStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         let cname = self.collection_name(collection);
         let mut batch = rocksdb::WriteBatch::default();
         for (key, value) in keys.iter().zip(values.iter()) {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
             let ck = compound_key(cname, key);
@@ -360,9 +363,10 @@ mod tests {
             .put("expiring", expiring.clone(), None, Some(60.0))
             .await
             .unwrap();
+        let mut expired = ManagedEntry::new(Value::null());
+        expired.expires_at = Some(chrono::Utc::now() - chrono::TimeDelta::seconds(1));
         store
-            .put("expired", Value::null(), None, Some(-1.0))
-            .await
+            .put_entry("expired", store.collection_name(None), &expired)
             .unwrap();
 
         let keys = vec![

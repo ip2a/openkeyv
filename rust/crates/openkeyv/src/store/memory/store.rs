@@ -150,7 +150,7 @@ impl AsyncKeyValue for MemoryStore {
         self.setup_collection(cname).await?;
 
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
 
@@ -223,6 +223,9 @@ impl AsyncKeyValue for MemoryStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
 
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
@@ -231,7 +234,7 @@ impl AsyncKeyValue for MemoryStore {
             self.maybe_cull_collection(&col);
             for (key, value) in keys.iter().zip(values.iter()) {
                 let entry = match ttl {
-                    Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                    Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                     None => ManagedEntry::new(value.clone()),
                 };
                 col.insert(key.clone(), entry);

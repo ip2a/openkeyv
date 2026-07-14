@@ -753,7 +753,7 @@ impl AsyncKeyValue for OpenSearchStore {
     ) -> Result<()> {
         let index = self.index_name(self.collection_name(collection));
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         self.bulk_index(&index, vec![(key, Self::entry_to_doc(&entry))])
@@ -838,6 +838,9 @@ impl AsyncKeyValue for OpenSearchStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         if keys.is_empty() {
             return Ok(());
         }
@@ -856,7 +859,7 @@ impl AsyncKeyValue for OpenSearchStore {
         let mut documents = Vec::with_capacity(unique_values.len());
         for (key, value) in unique_values {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
             documents.push((key, Self::entry_to_doc(&entry)));
@@ -1349,8 +1352,14 @@ mod tests {
             Some(&Value::utf8("last-a"))
         );
 
+        let mut expired = ManagedEntry::new(Value::utf8("expired"));
+        expired.expires_at = Some(Utc::now() - chrono::TimeDelta::seconds(1));
+        let index = store.index_name(store.collection_name(None));
         store
-            .put("expired-read", Value::utf8("expired"), None, Some(-1.0))
+            .bulk_index(
+                &index,
+                vec![("expired-read", OpenSearchStore::entry_to_doc(&expired))],
+            )
             .await
             .unwrap();
         assert!(
@@ -1363,7 +1372,10 @@ mod tests {
         assert_eq!(store.get("expired-read", None).await.unwrap(), None);
 
         store
-            .put("expired-cull", Value::utf8("expired"), None, Some(-1.0))
+            .bulk_index(
+                &index,
+                vec![("expired-cull", OpenSearchStore::entry_to_doc(&expired))],
+            )
             .await
             .unwrap();
         store.cull().await.unwrap();
@@ -1431,7 +1443,7 @@ mod tests {
         );
         let store = OpenSearchStore::from_url(url, prefix).await.unwrap();
         let index = store.index_name(store.collection_name(None));
-        let valid_entry = ManagedEntry::with_ttl(Value::utf8("value"), 60.0);
+        let valid_entry = ManagedEntry::with_ttl(Value::utf8("value"), 60.0).unwrap();
         let valid_encoded = STANDARD.encode(valid_entry.encode());
         let unpadded = valid_encoded.trim_end_matches('=').to_string();
         let expires_at = valid_entry.expires_at.unwrap().timestamp_millis();

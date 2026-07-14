@@ -110,7 +110,7 @@ impl AsyncKeyValue for RedisStore {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         let mut conn = self.connection();
@@ -199,6 +199,9 @@ impl AsyncKeyValue for RedisStore {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         let cname = self.collection_name(collection);
         let mut conn = self.connection();
         let mut pipe = redis::pipe();
@@ -207,7 +210,7 @@ impl AsyncKeyValue for RedisStore {
             let milliseconds = (seconds * 1000.0) as u64;
             for (key, value) in keys.iter().zip(values.iter()) {
                 let ck = compound_key(cname, key);
-                let entry = ManagedEntry::with_ttl(value.clone(), seconds);
+                let entry = ManagedEntry::with_ttl(value.clone(), seconds)?;
                 pipe.pset_ex(ck, entry.encode(), milliseconds).ignore();
             }
         } else {

@@ -3,7 +3,7 @@ mod codec;
 use crate::error::Result;
 use crate::value::Value;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 
 /// A managed cache entry containing value data and TTL metadata.
 ///
@@ -27,15 +27,39 @@ impl ManagedEntry {
         }
     }
 
-    pub fn with_ttl(value: Value, ttl_secs: f64) -> Self {
+    pub fn with_ttl(value: Value, ttl_secs: f64) -> Result<Self> {
         let created_at = Utc::now();
-        let expires_at =
-            Some(created_at + chrono::TimeDelta::milliseconds((ttl_secs * 1000.0) as i64));
-        Self {
+        let expires_at = Some(Self::expiration_at(created_at, ttl_secs)?);
+        Ok(Self {
             value,
             created_at: Some(created_at),
             expires_at,
+        })
+    }
+
+    pub(crate) fn validate_ttl(ttl_secs: f64) -> Result<()> {
+        Self::expiration_at(Utc::now(), ttl_secs).map(|_| ())
+    }
+
+    fn expiration_at(created_at: DateTime<Utc>, ttl_secs: f64) -> Result<DateTime<Utc>> {
+        if !ttl_secs.is_finite() || ttl_secs <= 0.0 {
+            return Err(crate::error::Error::InvalidTtl(format!(
+                "must be finite and greater than zero, got {ttl_secs}"
+            )));
         }
+
+        let ttl_millis = ttl_secs * 1000.0;
+        if !ttl_millis.is_finite() || ttl_millis > i64::MAX as f64 {
+            return Err(crate::error::Error::InvalidTtl(format!(
+                "exceeds the supported range: {ttl_secs}"
+            )));
+        }
+
+        created_at
+            .checked_add_signed(TimeDelta::milliseconds(ttl_millis as i64))
+            .ok_or_else(|| {
+                crate::error::Error::InvalidTtl(format!("exceeds the supported range: {ttl_secs}"))
+            })
     }
 
     pub fn is_expired(&self) -> bool {
@@ -86,9 +110,23 @@ mod tests {
 
     #[test]
     fn test_entry_with_ttl() {
-        let entry = ManagedEntry::with_ttl(Value::null(), 3600.0);
+        let entry = ManagedEntry::with_ttl(Value::null(), 3600.0).unwrap();
         assert!(!entry.is_expired());
         assert!(entry.ttl().unwrap() > 3500.0);
+    }
+
+    #[test]
+    fn test_entry_rejects_invalid_ttl() {
+        for ttl in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            let err = ManagedEntry::with_ttl(Value::null(), ttl).unwrap_err();
+            assert!(matches!(err, crate::error::Error::InvalidTtl(_)));
+        }
+    }
+
+    #[test]
+    fn test_entry_rejects_ttl_outside_datetime_range() {
+        let err = ManagedEntry::with_ttl(Value::null(), f64::MAX).unwrap_err();
+        assert!(matches!(err, crate::error::Error::InvalidTtl(_)));
     }
 
     #[test]

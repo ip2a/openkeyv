@@ -1,6 +1,7 @@
 use super::client::NullClient;
 use super::config::NullConfig;
 use super::error::Result;
+use crate::entry::ManagedEntry;
 use crate::protocol::{
     AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
     AsyncEnumerateKeys, AsyncKeyValue,
@@ -49,8 +50,11 @@ impl AsyncKeyValue for NullStore {
         _key: &str,
         _value: Value,
         _collection: Option<&str>,
-        _ttl: Option<f64>,
+        ttl: Option<f64>,
     ) -> Result<()> {
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         Ok(())
     }
 
@@ -79,8 +83,11 @@ impl AsyncKeyValue for NullStore {
         _keys: &[String],
         _values: &[Value],
         _collection: Option<&str>,
-        _ttl: Option<f64>,
+        ttl: Option<f64>,
     ) -> Result<()> {
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         Ok(())
     }
 
@@ -137,5 +144,25 @@ mod tests {
         assert_eq!(store.get("k", None).await.unwrap(), None);
         assert!(!store.delete("k", None).await.unwrap());
         assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_null_store_rejects_invalid_ttl() {
+        let store = NullStore::new();
+
+        for ttl in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            assert!(
+                store
+                    .put("k", Value::null(), None, Some(ttl))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .put_many(&["k".to_string()], &[Value::null()], None, Some(ttl))
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

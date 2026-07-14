@@ -198,7 +198,7 @@ impl AsyncKeyValue for S3Store {
         let cname = self.collection_name(collection);
         let sk = Self::s3_key(cname, key);
         let entry = match ttl {
-            Some(seconds) => ManagedEntry::with_ttl(value, seconds),
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
         self.put_object_bytes(&sk, entry.encode()).await
@@ -282,10 +282,13 @@ impl AsyncKeyValue for S3Store {
                 values: values.len(),
             });
         }
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
         let cname = self.collection_name(collection);
         for (key, value) in keys.iter().zip(values.iter()) {
             let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
                 None => ManagedEntry::new(value.clone()),
             };
             let sk = Self::s3_key(cname, key);
