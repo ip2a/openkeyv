@@ -595,7 +595,7 @@ class ElasticsearchStore(
         document_id: str = self._get_document_id(key=key)
 
         elasticsearch_response: ObjectApiResponse[Any] = await self._client.options(ignore_status=404).delete(
-            index=index_name, id=document_id
+            index=index_name, id=document_id, refresh=True
         )
         body = elasticsearch_response.body
         if not isinstance(body, dict):
@@ -632,7 +632,7 @@ class ElasticsearchStore(
             index_name, document_id = self._get_destination(collection=collection, key=key)
             operations.append({"delete": {"_index": index_name, "_id": document_id}})
 
-        elasticsearch_response = await self._client.bulk(operations=operations)
+        elasticsearch_response = await self._client.bulk(operations=operations, refresh=True)
         body = elasticsearch_response.body
         if not isinstance(body, dict):
             msg = "Elasticsearch bulk-delete response body must be an object with string keys"
@@ -695,7 +695,7 @@ class ElasticsearchStore(
 
         result: ObjectApiResponse[Any] = await self._client.options(ignore_status=404).search(
             index=self._get_index_name(collection=collection),
-            fields=[{"key": None}],
+            fields=cast("Any", ["key"]),
             body={
                 "query": {
                     "term": {
@@ -822,6 +822,7 @@ class ElasticsearchStore(
                     },
                 },
             },
+            refresh=True,
         )
         body = result.body
         if not isinstance(body, dict):
@@ -860,6 +861,7 @@ class ElasticsearchStore(
                     },
                 },
             },
+            refresh=True,
         )
         body = response.body
         if not isinstance(body, dict):

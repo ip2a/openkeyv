@@ -23,9 +23,14 @@ class FakeElasticsearchClient:
         self.get_body: object = {}
         self.index_body: object = {}
         self.delete_body: object = {}
+        self.delete_by_query_body: object = {}
         self.bulk_body: object = {}
+        self.search_body: object = {}
         self.index_calls: list[dict[str, Any]] = []
+        self.delete_calls: list[dict[str, Any]] = []
+        self.delete_by_query_calls: list[dict[str, Any]] = []
         self.bulk_calls: list[dict[str, Any]] = []
+        self.search_calls: list[dict[str, Any]] = []
         self.options_calls: list[dict[str, Any]] = []
 
     def options(self, **kwargs: Any) -> "FakeElasticsearchClient":
@@ -39,12 +44,21 @@ class FakeElasticsearchClient:
         self.index_calls.append(kwargs)
         return FakeResponse(self.index_body)
 
-    async def delete(self, **_kwargs: Any) -> FakeResponse:
+    async def delete(self, **kwargs: Any) -> FakeResponse:
+        self.delete_calls.append(kwargs)
         return FakeResponse(self.delete_body)
+
+    async def delete_by_query(self, **kwargs: Any) -> FakeResponse:
+        self.delete_by_query_calls.append(kwargs)
+        return FakeResponse(self.delete_by_query_body)
 
     async def bulk(self, **kwargs: Any) -> FakeResponse:
         self.bulk_calls.append(kwargs)
         return FakeResponse(self.bulk_body)
+
+    async def search(self, **kwargs: Any) -> FakeResponse:
+        self.search_calls.append(kwargs)
+        return FakeResponse(self.search_body)
 
 
 @pytest.fixture
@@ -158,6 +172,7 @@ async def test_elasticsearch_delete_accepts_only_typed_results(
     client.delete_body = {"_id": "key", "result": result}
 
     assert await store._delete_managed_entry(key="key", collection="items") is expected
+    assert client.delete_calls[-1] == {"index": "openkeyv-items", "id": "key", "refresh": True}
 
 
 async def test_elasticsearch_delete_rejects_invalid_result(elasticsearch_store: tuple[ElasticsearchStore, FakeElasticsearchClient]) -> None:
@@ -237,6 +252,7 @@ async def test_elasticsearch_bulk_delete_counts_deleted_and_missing(
     }
 
     assert await store._delete_managed_entries(keys=["one", "two"], collection="items") == 1
+    assert client.bulk_calls[-1]["refresh"] is True
 
     client.bulk_body = {
         "errors": False,
@@ -244,3 +260,41 @@ async def test_elasticsearch_bulk_delete_counts_deleted_and_missing(
     }
     with pytest.raises(StoreConnectionError, match="failed for document"):
         await store._delete_managed_entries(keys=["one"], collection="items")
+
+
+async def test_elasticsearch_key_search_requests_keyword_field(
+    elasticsearch_store: tuple[ElasticsearchStore, FakeElasticsearchClient],
+) -> None:
+    store, client = elasticsearch_store
+    client.search_body = {
+        "hits": {
+            "hits": [
+                {"fields": {"key": ["one"]}},
+                {"fields": {"key": ["two"]}},
+            ]
+        }
+    }
+
+    assert await store._get_collection_keys(collection="items") == ["one", "two"]
+    assert client.search_calls == [
+        {
+            "index": "openkeyv-items",
+            "fields": ["key"],
+            "body": {"query": {"term": {"collection": "items"}}},
+            "source_includes": [],
+            "size": 10000,
+        }
+    ]
+
+
+async def test_elasticsearch_delete_by_query_operations_refresh(
+    elasticsearch_store: tuple[ElasticsearchStore, FakeElasticsearchClient],
+) -> None:
+    store, client = elasticsearch_store
+    client.delete_by_query_body = {"timed_out": False, "failures": [], "deleted": 1}
+
+    assert await store._delete_collection(collection="items") is True
+    assert client.delete_by_query_calls[-1]["refresh"] is True
+
+    await store._cull()
+    assert client.delete_by_query_calls[-1]["refresh"] is True
