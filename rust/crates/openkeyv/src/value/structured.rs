@@ -11,6 +11,7 @@ pub enum StructuredValue {
     Null,
     Bool(bool),
     Integer(i64),
+    UnsignedInteger(u64),
     Float(f64),
     String(String),
     Bytes(Bytes),

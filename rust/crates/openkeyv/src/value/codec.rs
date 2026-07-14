@@ -13,6 +13,7 @@ const TAG_STR: u8 = 5;
 const TAG_BYTES: u8 = 6;
 const TAG_LIST: u8 = 7;
 const TAG_DICT: u8 = 8;
+const TAG_UINT: u8 = 9;
 
 pub(crate) fn encode(value: &StructuredValue) -> Result<Bytes> {
     let mut out = Vec::with_capacity(STRUCTURED_MAGIC.len() + 32);
@@ -44,6 +45,10 @@ fn encode_value(value: &StructuredValue, out: &mut Vec<u8>) -> Result<()> {
         StructuredValue::Bool(true) => out.push(TAG_TRUE),
         StructuredValue::Integer(value) => {
             out.push(TAG_INT);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        StructuredValue::UnsignedInteger(value) => {
+            out.push(TAG_UINT);
             out.extend_from_slice(&value.to_le_bytes());
         }
         StructuredValue::Float(value) => {
@@ -95,6 +100,9 @@ fn decode_value(cursor: &mut Cursor<'_>) -> Result<StructuredValue> {
         TAG_FALSE => Ok(StructuredValue::Bool(false)),
         TAG_TRUE => Ok(StructuredValue::Bool(true)),
         TAG_INT => Ok(StructuredValue::Integer(i64::from_le_bytes(
+            cursor.read_array::<8>()?,
+        ))),
+        TAG_UINT => Ok(StructuredValue::UnsignedInteger(u64::from_le_bytes(
             cursor.read_array::<8>()?,
         ))),
         TAG_FLOAT => Ok(StructuredValue::Float(f64::from_le_bytes(
@@ -238,5 +246,46 @@ mod tests {
         }
 
         assert!(decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn unsigned_integer_tag_is_appended_and_roundtrips_nested_values() {
+        let value = StructuredValue::Dict(vec![(
+            "values".to_string(),
+            StructuredValue::List(vec![
+                StructuredValue::Integer(i64::MAX),
+                StructuredValue::UnsignedInteger(u64::MAX),
+            ]),
+        )]);
+
+        let encoded = encode(&value).unwrap();
+
+        assert!(
+            encoded
+                .windows(9)
+                .any(|bytes| bytes[0] == 9 && bytes[1..] == u64::MAX.to_le_bytes())
+        );
+        assert_eq!(decode(&encoded).unwrap(), value);
+    }
+
+    #[test]
+    fn truncated_unsigned_integer_is_rejected() {
+        let mut bytes = Vec::from(STRUCTURED_MAGIC.as_slice());
+        bytes.push(9);
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()[..7]);
+
+        let err = decode(&bytes).unwrap_err();
+
+        assert!(err.to_string().contains("truncated structured value"));
+    }
+
+    #[test]
+    fn unknown_structured_tag_is_rejected() {
+        let mut bytes = Vec::from(STRUCTURED_MAGIC.as_slice());
+        bytes.push(10);
+
+        let err = decode(&bytes).unwrap_err();
+
+        assert!(err.to_string().contains("unknown structured value tag"));
     }
 }

@@ -69,6 +69,16 @@ async def test_batch_size_mismatch_raises() -> None:
         await MemoryStore().put_many(["key"], [])
 
 
+async def test_memory_store_roundtrips_unsigned_integer_boundaries() -> None:
+    store = MemoryStore()
+    values = [2**63, 2**64 - 1, {"nested": [2**63, 2**64 - 1]}]
+    keys = ["lower", "upper", "nested"]
+
+    await store.put_many(keys, values)
+
+    assert await store.get_many(keys) == values
+
+
 async def test_null_store_has_explicit_noop_results() -> None:
     store = NullStore()
 

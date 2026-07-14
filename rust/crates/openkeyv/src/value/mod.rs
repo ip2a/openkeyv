@@ -37,6 +37,10 @@ impl Value {
         Self::new(ValueKind::Integer, value.to_le_bytes().to_vec())
     }
 
+    pub fn unsigned_integer(value: u64) -> Self {
+        Self::new(ValueKind::UnsignedInteger, value.to_le_bytes().to_vec())
+    }
+
     pub fn float(value: f64) -> Self {
         Self::new(ValueKind::Float, value.to_le_bytes().to_vec())
     }
@@ -100,6 +104,12 @@ impl From<i64> for Value {
     }
 }
 
+impl From<u64> for Value {
+    fn from(value: u64) -> Self {
+        Self::unsigned_integer(value)
+    }
+}
+
 impl From<f64> for Value {
     fn from(value: f64) -> Self {
         Self::float(value)
@@ -122,5 +132,14 @@ mod tests {
 
         assert_eq!(value.kind(), ValueKind::Integer);
         assert_eq!(value.bytes(), &Bytes::from(42_i64.to_le_bytes().to_vec()));
+    }
+
+    #[test]
+    fn unsigned_integer_uses_exact_little_endian_bytes() {
+        let value = Value::unsigned_integer(u64::MAX);
+
+        assert_eq!(value.kind(), ValueKind::UnsignedInteger);
+        assert_eq!(value.bytes().as_ref(), &u64::MAX.to_le_bytes());
+        assert_eq!(Value::from(u64::MAX), value);
     }
 }

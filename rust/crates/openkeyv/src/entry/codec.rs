@@ -170,6 +170,7 @@ mod tests {
             Value::binary(Bytes::from_static(&[0, 1, 2])),
             Value::utf8("hello"),
             Value::integer(i64::MIN),
+            Value::unsigned_integer(u64::MAX),
             Value::float(std::f64::consts::PI),
             Value::bool(true),
             Value::null(),

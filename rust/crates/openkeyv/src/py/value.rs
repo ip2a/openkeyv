@@ -2,7 +2,7 @@ use crate::value::{StructuredValue, Value, ValueKind};
 use bytes::Bytes;
 use pyo3::BoundObject;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyList};
+use pyo3::types::{PyBool, PyBoolMethods, PyBytes, PyDict, PyFloat, PyInt, PyList};
 
 pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
     match value.kind() {
@@ -16,6 +16,13 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
         ValueKind::Integer => {
             let bytes = fixed_bytes::<8>(value.bytes(), "integer")?;
             Ok(i64::from_le_bytes(bytes)
+                .into_pyobject(py)?
+                .into_any()
+                .unbind())
+        }
+        ValueKind::UnsignedInteger => {
+            let bytes = fixed_bytes::<8>(value.bytes(), "unsigned integer")?;
+            Ok(u64::from_le_bytes(bytes)
                 .into_pyobject(py)?
                 .into_any()
                 .unbind())
@@ -47,10 +54,18 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         Ok(Value::null())
     } else if let Ok(bytes) = obj.cast::<PyBytes>() {
         Ok(Value::binary(bytes.as_bytes().to_vec()))
-    } else if let Ok(b) = obj.extract::<bool>() {
-        Ok(Value::bool(b))
-    } else if let Ok(i) = obj.extract::<i64>() {
-        Ok(Value::integer(i))
+    } else if let Ok(value) = obj.cast::<PyBool>() {
+        Ok(Value::bool(value.is_true()))
+    } else if let Ok(value) = obj.cast::<PyInt>() {
+        if let Ok(value) = value.extract::<i64>() {
+            Ok(Value::integer(value))
+        } else if let Ok(value) = value.extract::<u64>() {
+            Ok(Value::unsigned_integer(value))
+        } else {
+            Err(pyo3::exceptions::PyOverflowError::new_err(
+                "Python int is outside the supported i64::MIN..=u64::MAX range",
+            ))
+        }
     } else if let Ok(float) = obj.cast::<PyFloat>() {
         Ok(Value::float(float.value()))
     } else if let Ok(s) = obj.extract::<String>() {
@@ -81,10 +96,18 @@ fn structured_from_py(obj: &Bound<'_, PyAny>) -> PyResult<StructuredValue> {
         Ok(StructuredValue::Bytes(Bytes::copy_from_slice(
             bytes.as_bytes(),
         )))
-    } else if let Ok(b) = obj.extract::<bool>() {
-        Ok(StructuredValue::Bool(b))
-    } else if let Ok(i) = obj.extract::<i64>() {
-        Ok(StructuredValue::Integer(i))
+    } else if let Ok(value) = obj.cast::<PyBool>() {
+        Ok(StructuredValue::Bool(value.is_true()))
+    } else if let Ok(value) = obj.cast::<PyInt>() {
+        if let Ok(value) = value.extract::<i64>() {
+            Ok(StructuredValue::Integer(value))
+        } else if let Ok(value) = value.extract::<u64>() {
+            Ok(StructuredValue::UnsignedInteger(value))
+        } else {
+            Err(pyo3::exceptions::PyOverflowError::new_err(
+                "Python int is outside the supported i64::MIN..=u64::MAX range",
+            ))
+        }
     } else if let Ok(float) = obj.cast::<PyFloat>() {
         Ok(StructuredValue::Float(float.value()))
     } else if let Ok(s) = obj.extract::<String>() {
@@ -117,6 +140,7 @@ fn structured_to_py(py: Python, value: &StructuredValue) -> PyResult<Py<PyAny>> 
         StructuredValue::Bool(false) => Ok(PyBool::new(py, false).into_any().unbind()),
         StructuredValue::Bool(true) => Ok(PyBool::new(py, true).into_any().unbind()),
         StructuredValue::Integer(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
+        StructuredValue::UnsignedInteger(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
         StructuredValue::Float(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
         StructuredValue::String(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
         StructuredValue::Bytes(value) => Ok(PyBytes::new(py, value).into_any().unbind()),
