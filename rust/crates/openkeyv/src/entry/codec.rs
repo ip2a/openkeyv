@@ -91,7 +91,7 @@ pub(super) fn decode(bytes: Bytes) -> Result<ManagedEntry> {
     }
 
     Ok(ManagedEntry {
-        value: Value::new(kind, bytes.slice(offset..end)),
+        value: Value::new(kind, bytes.slice(offset..end))?,
         created_at,
         expires_at,
     })
@@ -127,6 +127,7 @@ fn read_datetime(bytes: &[u8], offset: &mut usize) -> Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::StructuredValue;
     use chrono::TimeDelta;
 
     #[test]
@@ -174,7 +175,8 @@ mod tests {
             Value::float(std::f64::consts::PI),
             Value::bool(true),
             Value::null(),
-            Value::structured(Bytes::from_static(&[9, 8, 7])),
+            Value::from_structured(&StructuredValue::List(vec![StructuredValue::Integer(1)]))
+                .unwrap(),
         ];
 
         for value in values {
@@ -188,6 +190,29 @@ mod tests {
 
             assert_eq!(decoded, entry);
         }
+    }
+
+    #[test]
+    fn entry_codec_rejects_invalid_value_payload() {
+        let mut encoded = encode(&ManagedEntry::new(Value::null()));
+        encoded[MAGIC.len()] = ValueKind::Integer.tag();
+
+        let err = decode(encoded.into()).unwrap_err();
+
+        assert!(matches!(err, Error::InvalidValue(_)));
+    }
+
+    #[test]
+    fn entry_codec_rejects_invalid_structured_payload() {
+        let mut encoded = encode(&ManagedEntry::new(Value::binary(Bytes::from_static(
+            b"OKV1\x00\x00",
+        ))));
+        encoded[MAGIC.len()] = ValueKind::Structured.tag();
+
+        let err = decode(encoded.into()).unwrap_err();
+
+        assert!(matches!(err, Error::InvalidValue(_)));
+        assert!(err.to_string().contains("trailing bytes"));
     }
 
     #[test]

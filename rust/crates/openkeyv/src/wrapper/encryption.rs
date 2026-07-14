@@ -60,7 +60,7 @@ where
         let kind =
             ValueKind::from_tag(bytes[ENCRYPTION_MAGIC.len() + 4]).ok_or(Error::CorruptedData)?;
         let decrypted = (self.decrypt_fn)(&bytes[header_len..], version)?;
-        Ok(Some(Value::new(kind, decrypted)))
+        Ok(Some(Value::new(kind, decrypted)?))
     }
 }
 
@@ -233,6 +233,27 @@ mod tests {
             wrapper.get("k", None).await.unwrap_err(),
             Error::Decryption("failed".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn test_encryption_wrapper_rejects_invalid_decrypted_payload() {
+        let inner = MemoryStore::new();
+        let wrapper = EncryptionWrapper::new(inner, noop_encrypt, noop_decrypt, 1);
+        let mut envelope = ENCRYPTION_MAGIC.to_vec();
+        envelope.extend_from_slice(&1_u32.to_le_bytes());
+        envelope.push(ValueKind::Integer.tag());
+        envelope.extend_from_slice(&[0; 7]);
+
+        wrapper
+            .inner
+            .put("k", Value::binary(envelope), None, None)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            wrapper.get("k", None).await.unwrap_err(),
+            Error::InvalidValue(_)
+        ));
     }
 
     #[tokio::test]

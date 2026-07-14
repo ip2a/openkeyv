@@ -41,11 +41,13 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
                 "invalid bool payload",
             )),
         },
-        ValueKind::Null => Ok(py.None()),
-        ValueKind::Structured => structured_to_py(
-            py,
-            &StructuredValue::decode(value.bytes()).map_err(value_error_to_py)?,
-        ),
+        ValueKind::Null if value.bytes().is_empty() => Ok(py.None()),
+        ValueKind::Null => Err(pyo3::exceptions::PyValueError::new_err(
+            "invalid null payload",
+        )),
+        ValueKind::Structured => {
+            structured_to_py(py, &value.decode_structured().map_err(value_error_to_py)?)
+        }
     }
 }
 
@@ -72,9 +74,7 @@ pub fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         Ok(Value::utf8(s))
     } else if obj.cast::<PyList>().is_ok() || obj.cast::<PyDict>().is_ok() {
         let structured = structured_from_py(obj)?;
-        Ok(Value::structured(
-            structured.encode().map_err(value_error_to_py)?,
-        ))
+        Value::from_structured(&structured).map_err(value_error_to_py)
     } else {
         Err(pyo3::exceptions::PyTypeError::new_err(
             "unsupported value type; expected dict, list, str, bytes, int, float, bool, or None",

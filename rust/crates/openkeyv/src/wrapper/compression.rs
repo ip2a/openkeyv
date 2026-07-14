@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
 use crate::value::{Value, ValueKind};
 use async_trait::async_trait;
@@ -67,18 +67,16 @@ impl<T: AsyncKeyValue> CompressionWrapper<T> {
         }
         let bytes = value.bytes();
         if bytes.len() <= COMPRESSION_MAGIC.len() {
-            return Ok(Some(value));
+            return Err(Error::CorruptedData);
         }
-        let kind = match ValueKind::from_tag(bytes[COMPRESSION_MAGIC.len()]) {
-            Some(kind) => kind,
-            None => return Ok(Some(value)),
-        };
+        let kind =
+            ValueKind::from_tag(bytes[COMPRESSION_MAGIC.len()]).ok_or(Error::CorruptedData)?;
         let mut decoder = flate2::read::GzDecoder::new(&bytes[COMPRESSION_MAGIC.len() + 1..]);
         let mut buf = Vec::new();
-        if decoder.read_to_end(&mut buf).is_err() {
-            return Ok(Some(value));
-        }
-        Ok(Some(Value::new(kind, buf)))
+        decoder
+            .read_to_end(&mut buf)
+            .map_err(|_| Error::CorruptedData)?;
+        Ok(Some(Value::new(kind, buf)?))
     }
 }
 
@@ -199,6 +197,50 @@ mod tests {
         wrapper.put("k", value.clone(), None, None).await.unwrap();
         let got = wrapper.get("k", None).await.unwrap();
         assert_eq!(got, Some(value));
+    }
+
+    #[test]
+    fn test_compression_rejects_corrupt_envelopes_and_payloads() {
+        let wrapper = CompressionWrapper::new(MemoryStore::new());
+
+        assert_eq!(
+            wrapper
+                .decompress(Some(Value::binary(COMPRESSION_MAGIC.to_vec())))
+                .unwrap_err(),
+            Error::CorruptedData
+        );
+
+        let mut unknown_kind = COMPRESSION_MAGIC.to_vec();
+        unknown_kind.push(250);
+        assert_eq!(
+            wrapper
+                .decompress(Some(Value::binary(unknown_kind)))
+                .unwrap_err(),
+            Error::CorruptedData
+        );
+
+        let mut invalid_gzip = COMPRESSION_MAGIC.to_vec();
+        invalid_gzip.push(ValueKind::Integer.tag());
+        invalid_gzip.extend_from_slice(b"not-gzip");
+        assert_eq!(
+            wrapper
+                .decompress(Some(Value::binary(invalid_gzip)))
+                .unwrap_err(),
+            Error::CorruptedData
+        );
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&[0; 7]).unwrap();
+        let mut invalid_payload = COMPRESSION_MAGIC.to_vec();
+        invalid_payload.push(ValueKind::Integer.tag());
+        invalid_payload.extend_from_slice(&encoder.finish().unwrap());
+
+        assert!(matches!(
+            wrapper
+                .decompress(Some(Value::binary(invalid_payload)))
+                .unwrap_err(),
+            Error::InvalidValue(_)
+        ));
     }
 
     #[tokio::test]

@@ -25,6 +25,9 @@ pub enum Error {
     #[error("invalid ttl: {0}")]
     InvalidTtl(String),
 
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
+
     #[error("value too large: {size} bytes (max {max})")]
     ValueTooLarge { size: usize, max: usize },
 

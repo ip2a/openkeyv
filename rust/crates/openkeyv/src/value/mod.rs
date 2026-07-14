@@ -2,6 +2,7 @@ mod codec;
 mod kind;
 mod structured;
 
+use crate::error::{Error, Result};
 use bytes::Bytes;
 
 pub use kind::ValueKind;
@@ -18,7 +19,19 @@ pub struct Value {
 }
 
 impl Value {
-    pub fn new(kind: ValueKind, bytes: impl Into<Bytes>) -> Self {
+    /// Construct a value from a raw kind and payload after validating the payload.
+    pub fn new(kind: ValueKind, bytes: impl Into<Bytes>) -> Result<Self> {
+        let bytes = bytes.into();
+        validate_payload(kind, &bytes)?;
+        Ok(Self::new_unchecked(kind, bytes))
+    }
+
+    /// Construct a value without validating that the payload matches its kind.
+    ///
+    /// Prefer the typed constructors or [`Value::new`] at protocol boundaries.
+    /// This method is intended for bytes that were produced by an already checked
+    /// OpenKeyV path and does not provide protocol validity by itself.
+    pub fn new_unchecked(kind: ValueKind, bytes: impl Into<Bytes>) -> Self {
         Self {
             kind,
             bytes: bytes.into(),
@@ -26,35 +39,55 @@ impl Value {
     }
 
     pub fn binary(bytes: impl Into<Bytes>) -> Self {
-        Self::new(ValueKind::Binary, bytes)
+        Self::new_unchecked(ValueKind::Binary, bytes)
     }
 
     pub fn utf8(value: impl Into<String>) -> Self {
-        Self::new(ValueKind::Utf8, value.into())
+        Self::new_unchecked(ValueKind::Utf8, value.into())
     }
 
     pub fn integer(value: i64) -> Self {
-        Self::new(ValueKind::Integer, value.to_le_bytes().to_vec())
+        Self::new_unchecked(ValueKind::Integer, value.to_le_bytes().to_vec())
     }
 
     pub fn unsigned_integer(value: u64) -> Self {
-        Self::new(ValueKind::UnsignedInteger, value.to_le_bytes().to_vec())
+        Self::new_unchecked(ValueKind::UnsignedInteger, value.to_le_bytes().to_vec())
     }
 
     pub fn float(value: f64) -> Self {
-        Self::new(ValueKind::Float, value.to_le_bytes().to_vec())
+        Self::new_unchecked(ValueKind::Float, value.to_le_bytes().to_vec())
     }
 
     pub fn bool(value: bool) -> Self {
-        Self::new(ValueKind::Bool, [u8::from(value)].to_vec())
+        Self::new_unchecked(ValueKind::Bool, [u8::from(value)].to_vec())
     }
 
     pub fn null() -> Self {
-        Self::new(ValueKind::Null, Bytes::new())
+        Self::new_unchecked(ValueKind::Null, Bytes::new())
     }
 
-    pub fn structured(bytes: impl Into<Bytes>) -> Self {
-        Self::new(ValueKind::Structured, bytes)
+    /// Encode a structured value into a checked `Value`.
+    pub fn from_structured(value: &StructuredValue) -> Result<Self> {
+        Ok(Self::structured_unchecked(value.encode()?))
+    }
+
+    /// Decode this value as a structured value.
+    pub fn decode_structured(&self) -> Result<StructuredValue> {
+        if self.kind != ValueKind::Structured {
+            return Err(Error::InvalidValue(format!(
+                "expected Structured kind, got {:?}",
+                self.kind
+            )));
+        }
+        StructuredValue::decode(&self.bytes)
+    }
+
+    /// Construct a structured value from raw OKV1 bytes without validating them.
+    ///
+    /// Prefer [`Value::from_structured`] for normal construction or [`Value::new`]
+    /// when accepting raw protocol bytes.
+    pub fn structured_unchecked(bytes: impl Into<Bytes>) -> Self {
+        Self::new_unchecked(ValueKind::Structured, bytes)
     }
 
     pub fn kind(&self) -> ValueKind {
@@ -71,6 +104,40 @@ impl Value {
 
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
+    }
+}
+
+fn validate_payload(kind: ValueKind, bytes: &[u8]) -> Result<()> {
+    match kind {
+        ValueKind::Binary => Ok(()),
+        ValueKind::Utf8 => std::str::from_utf8(bytes)
+            .map(|_| ())
+            .map_err(|error| Error::InvalidValue(format!("invalid UTF-8 payload: {error}"))),
+        ValueKind::Integer => validate_fixed_width(bytes, 8, "integer"),
+        ValueKind::UnsignedInteger => validate_fixed_width(bytes, 8, "unsigned integer"),
+        ValueKind::Float => validate_fixed_width(bytes, 8, "float"),
+        ValueKind::Bool if matches!(bytes, [0] | [1]) => Ok(()),
+        ValueKind::Bool => Err(Error::InvalidValue(
+            "bool payload must be exactly one byte containing 0 or 1".to_string(),
+        )),
+        ValueKind::Null if bytes.is_empty() => Ok(()),
+        ValueKind::Null => Err(Error::InvalidValue(
+            "null payload must be empty".to_string(),
+        )),
+        ValueKind::Structured => StructuredValue::decode(bytes)
+            .map(|_| ())
+            .map_err(|error| Error::InvalidValue(format!("invalid structured payload: {error}"))),
+    }
+}
+
+fn validate_fixed_width(bytes: &[u8], expected: usize, label: &str) -> Result<()> {
+    if bytes.len() == expected {
+        Ok(())
+    } else {
+        Err(Error::InvalidValue(format!(
+            "invalid {label} payload length: expected {expected} bytes, got {}",
+            bytes.len()
+        )))
     }
 }
 
@@ -141,5 +208,80 @@ mod tests {
         assert_eq!(value.kind(), ValueKind::UnsignedInteger);
         assert_eq!(value.bytes().as_ref(), &u64::MAX.to_le_bytes());
         assert_eq!(Value::from(u64::MAX), value);
+    }
+
+    #[test]
+    fn checked_constructor_accepts_valid_payloads() {
+        let structured = StructuredValue::List(vec![StructuredValue::UnsignedInteger(u64::MAX)]);
+        let structured_bytes = structured.encode().unwrap();
+        let values = [
+            (ValueKind::Binary, Bytes::from_static(&[0, 1, 2])),
+            (ValueKind::Utf8, Bytes::from_static(b"hello")),
+            (
+                ValueKind::Integer,
+                Bytes::copy_from_slice(&i64::MIN.to_le_bytes()),
+            ),
+            (
+                ValueKind::UnsignedInteger,
+                Bytes::copy_from_slice(&u64::MAX.to_le_bytes()),
+            ),
+            (
+                ValueKind::Float,
+                Bytes::copy_from_slice(&1.5_f64.to_le_bytes()),
+            ),
+            (ValueKind::Bool, Bytes::from_static(&[1])),
+            (ValueKind::Null, Bytes::new()),
+            (ValueKind::Structured, structured_bytes),
+        ];
+
+        for (kind, bytes) in values {
+            let value = Value::new(kind, bytes.clone()).unwrap();
+
+            assert_eq!(value.kind(), kind);
+            assert_eq!(value.bytes(), &bytes);
+        }
+    }
+
+    #[test]
+    fn checked_constructor_rejects_invalid_payloads() {
+        let invalid_values = [
+            (ValueKind::Utf8, Bytes::from_static(&[0xff])),
+            (ValueKind::Integer, Bytes::from_static(&[0; 7])),
+            (ValueKind::UnsignedInteger, Bytes::from_static(&[0; 9])),
+            (ValueKind::Float, Bytes::new()),
+            (ValueKind::Bool, Bytes::new()),
+            (ValueKind::Bool, Bytes::from_static(&[2])),
+            (ValueKind::Bool, Bytes::from_static(&[0, 1])),
+            (ValueKind::Null, Bytes::from_static(&[0])),
+            (ValueKind::Structured, Bytes::from_static(b"OKV1")),
+            (ValueKind::Structured, Bytes::from_static(b"OKV1\x00\x00")),
+        ];
+
+        for (kind, bytes) in invalid_values {
+            assert!(Value::new(kind, bytes).is_err(), "kind {kind:?}");
+        }
+    }
+
+    #[test]
+    fn structured_value_uses_checked_roundtrip_api() {
+        let structured = StructuredValue::Dict(vec![(
+            "value".to_string(),
+            StructuredValue::UnsignedInteger(u64::MAX),
+        )]);
+
+        let value = Value::from_structured(&structured).unwrap();
+
+        assert_eq!(value.kind(), ValueKind::Structured);
+        assert_eq!(value.decode_structured().unwrap(), structured);
+        assert!(Value::binary(Bytes::new()).decode_structured().is_err());
+    }
+
+    #[test]
+    fn unchecked_constructor_is_explicit() {
+        let value = Value::new_unchecked(ValueKind::Integer, Bytes::new());
+        let structured = Value::structured_unchecked(Bytes::from_static(b"invalid"));
+
+        assert!(value.bytes().is_empty());
+        assert!(structured.decode_structured().is_err());
     }
 }
