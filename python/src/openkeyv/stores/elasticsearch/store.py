@@ -1,3 +1,4 @@
+import base64
 from collections.abc import Sequence
 from datetime import datetime
 from http import HTTPStatus
@@ -6,21 +7,9 @@ from typing import Any, cast, overload
 from typing_extensions import override
 
 from openkeyv._utils.managed_entry import ManagedEntry
-from openkeyv._utils.sanitization import (
-    AlwaysHashStrategy,
-    HashFragmentMode,
-    HybridSanitizationStrategy,
-    SanitizationStrategy,
-)
-from openkeyv._utils.sanitize import (
-    ALPHANUMERIC_CHARACTERS,
-    LOWERCASE_ALPHABET,
-    NUMBERS,
-    UPPERCASE_ALPHABET,
-)
 from openkeyv._utils.serialization import SerializationAdapter
 from openkeyv._utils.time_to_live import now_as_epoch
-from openkeyv.errors import DeserializationError, SerializationError, StoreConnectionError
+from openkeyv.errors import DeserializationError, InvalidKeyError, SerializationError, StoreConnectionError
 from openkeyv.stores.base import (
     BaseContextManagerStore,
     BaseCullStore,
@@ -71,11 +60,10 @@ DEFAULT_MAPPING = {
 DEFAULT_PAGE_SIZE = 10000
 PAGE_LIMIT = 10000
 
-MAX_KEY_LENGTH = 256
-ALLOWED_KEY_CHARACTERS: str = ALPHANUMERIC_CHARACTERS
-
-MAX_INDEX_LENGTH = 200
-ALLOWED_INDEX_CHARACTERS: str = LOWERCASE_ALPHABET + NUMBERS + "_" + "-" + "."
+INDEX_ENCODING_PREFIX = "okv1-"
+MAX_INDEX_BYTES = 255
+MAX_DOCUMENT_ID_BYTES = 512
+ALLOWED_INDEX_PREFIX_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-.")
 
 
 class ElasticsearchSerializationAdapter(SerializationAdapter):
@@ -132,23 +120,6 @@ class ElasticsearchSerializationAdapter(SerializationAdapter):
         return data
 
 
-class ElasticsearchV1KeySanitizationStrategy(AlwaysHashStrategy):
-    def __init__(self) -> None:
-        super().__init__(
-            hash_length=64,
-        )
-
-
-class ElasticsearchV1CollectionSanitizationStrategy(HybridSanitizationStrategy):
-    def __init__(self) -> None:
-        super().__init__(
-            replacement_character="_",
-            max_length=MAX_INDEX_LENGTH,
-            allowed_characters=UPPERCASE_ALPHABET + ALLOWED_INDEX_CHARACTERS,
-            hash_fragment_mode=HashFragmentMode.ALWAYS,
-        )
-
-
 class ElasticsearchStore(
     BaseEnumerateCollectionsStore, BaseEnumerateKeysStore, BaseDestroyCollectionStore, BaseCullStore, BaseContextManagerStore, BaseStore
 ):
@@ -156,11 +127,9 @@ class ElasticsearchStore(
 
     Stores collections in their own indices and stores values in Flattened fields.
 
-    This store has specific restrictions on what is allowed in keys and collections. Keys and collections are not sanitized
-    by default which may result in errors when using the store.
-
-    To avoid issues, you may want to consider leveraging the `ElasticsearchV1KeySanitizationStrategy` and
-    `ElasticsearchV1CollectionSanitizationStrategy` strategies.
+    Logical keys and collections are transported through reversible, canonical Elasticsearch-safe identities.
+    Collection names are encoded into owned index names and keys into document IDs; no logical identity is lowercased,
+    hashed, truncated, or silently replaced.
     """
 
     _client: AsyncElasticsearch
@@ -173,8 +142,6 @@ class ElasticsearchStore(
 
     _serializer: SerializationAdapter
 
-    _key_sanitization_strategy: SanitizationStrategy
-    _collection_sanitization_strategy: SanitizationStrategy
     _auto_create: bool
 
     @overload
@@ -184,8 +151,6 @@ class ElasticsearchStore(
         elasticsearch_client: AsyncElasticsearch,
         index_prefix: str,
         default_collection: str | None = None,
-        key_sanitization_strategy: SanitizationStrategy | None = None,
-        collection_sanitization_strategy: SanitizationStrategy | None = None,
         auto_create: bool = True,
     ) -> None:
         """Initialize the elasticsearch store.
@@ -194,8 +159,6 @@ class ElasticsearchStore(
             elasticsearch_client: The elasticsearch client to use.
             index_prefix: The index prefix to use. Collections will be prefixed with this prefix.
             default_collection: The default collection to use if no collection is provided.
-            key_sanitization_strategy: The sanitization strategy to use for keys.
-            collection_sanitization_strategy: The sanitization strategy to use for collections.
             auto_create: Whether to automatically create indices if they don't exist. Defaults to True.
         """
 
@@ -207,8 +170,6 @@ class ElasticsearchStore(
         api_key: str | None = None,
         index_prefix: str,
         default_collection: str | None = None,
-        key_sanitization_strategy: SanitizationStrategy | None = None,
-        collection_sanitization_strategy: SanitizationStrategy | None = None,
         auto_create: bool = True,
     ) -> None:
         """Initialize the elasticsearch store.
@@ -229,8 +190,6 @@ class ElasticsearchStore(
         api_key: str | None = None,
         index_prefix: str,
         default_collection: str | None = None,
-        key_sanitization_strategy: SanitizationStrategy | None = None,
-        collection_sanitization_strategy: SanitizationStrategy | None = None,
         auto_create: bool = True,
     ) -> None:
         """Initialize the elasticsearch store.
@@ -243,13 +202,24 @@ class ElasticsearchStore(
             api_key: The api key to use.
             index_prefix: The index prefix to use. Collections will be prefixed with this prefix.
             default_collection: The default collection to use if no collection is provided.
-            key_sanitization_strategy: The sanitization strategy to use for keys.
-            collection_sanitization_strategy: The sanitization strategy to use for collections.
             auto_create: Whether to automatically create indices if they don't exist. Defaults to True.
                 When False, raises ValueError if an index doesn't exist.
         """
         if elasticsearch_client is None and url is None:
             msg = "Either elasticsearch_client or url must be provided"
+            raise ValueError(msg)
+
+        if not index_prefix:
+            msg = "index_prefix must not be empty"
+            raise ValueError(msg)
+        normalized_index_prefix = index_prefix.lower()
+        if normalized_index_prefix[0] in "-_+" or not all(
+            character in ALLOWED_INDEX_PREFIX_CHARACTERS for character in normalized_index_prefix
+        ):
+            msg = "index_prefix must contain only lowercase Elasticsearch index characters"
+            raise ValueError(msg)
+        if len((normalized_index_prefix + "-" + INDEX_ENCODING_PREFIX).encode("ascii")) > MAX_INDEX_BYTES:
+            msg = f"index_prefix leaves no room for an Elasticsearch collection index within {MAX_INDEX_BYTES} bytes"
             raise ValueError(msg)
 
         client_provided = elasticsearch_client is not None
@@ -266,7 +236,7 @@ class ElasticsearchStore(
         LessCapableJsonSerializer.install_default_serializer(client=self._client)
         LessCapableNdjsonSerializer.install_serializer(client=self._client)
 
-        self._index_prefix = index_prefix.lower()
+        self._index_prefix = normalized_index_prefix
         self._is_serverless = False
 
         self._serializer = ElasticsearchSerializationAdapter()
@@ -274,8 +244,6 @@ class ElasticsearchStore(
 
         super().__init__(
             default_collection=default_collection,
-            collection_sanitization_strategy=collection_sanitization_strategy,
-            key_sanitization_strategy=key_sanitization_strategy,
             client_provided_by_user=client_provided,
         )
 
@@ -334,14 +302,75 @@ class ElasticsearchStore(
             msg = f"Elasticsearch did not acknowledge creation of index '{index_name}'"
             raise StoreConnectionError(msg)
 
+    def _get_index_namespace_prefix(self) -> str:
+        return f"{self._index_prefix}-{INDEX_ENCODING_PREFIX}"
+
     def _get_index_name(self, collection: str) -> str:
-        # The Sanitization Strategy ensures that we do not have conflicts between upper and lower case
-        # but it does not lowercase the collection name, so we do that here, which conveniently also
-        # prevents errors when using PassthroughStrategy.
-        return (self._index_prefix + "-" + self._sanitize_collection(collection=collection)).lower()
+        encoded_collection = collection.encode("utf-8").hex()
+        index_name = self._get_index_namespace_prefix() + encoded_collection
+        if len(index_name.encode("ascii")) > MAX_INDEX_BYTES:
+            msg = f"Elasticsearch collection index exceeds the maximum size of {MAX_INDEX_BYTES} bytes"
+            raise InvalidKeyError(msg)
+        return index_name
 
     def _get_document_id(self, key: str) -> str:
-        return self._sanitize_key(key=key)
+        encoded_key = base64.urlsafe_b64encode(key.encode("utf-8")).decode("ascii").rstrip("=")
+        document_id = INDEX_ENCODING_PREFIX + encoded_key
+        if len(document_id.encode("ascii")) > MAX_DOCUMENT_ID_BYTES:
+            msg = f"Elasticsearch document ID exceeds the maximum size of {MAX_DOCUMENT_ID_BYTES} bytes"
+            raise InvalidKeyError(msg)
+        return document_id
+
+    def _decode_index_name(self, index_name: str) -> str:
+        namespace_prefix = self._get_index_namespace_prefix()
+        if not index_name.startswith(namespace_prefix):
+            msg = "Elasticsearch index is outside the OpenKeyV namespace"
+            raise StoreConnectionError(msg)
+
+        encoded_collection = index_name[len(namespace_prefix) :]
+        if len(encoded_collection) % 2 or not all(character in "0123456789abcdef" for character in encoded_collection):
+            msg = "Elasticsearch owned index has a malformed canonical collection identity"
+            raise StoreConnectionError(msg)
+
+        try:
+            collection = bytes.fromhex(encoded_collection).decode("utf-8")
+        except UnicodeDecodeError as error:
+            msg = "Elasticsearch owned index has a non-UTF-8 canonical collection identity"
+            raise StoreConnectionError(msg) from error
+
+        try:
+            canonical_index_name = self._get_index_name(collection=collection)
+        except InvalidKeyError as error:
+            msg = "Elasticsearch owned index exceeds the canonical collection boundary"
+            raise StoreConnectionError(msg) from error
+        if canonical_index_name != index_name:
+            msg = "Elasticsearch owned index is not a canonical collection identity"
+            raise StoreConnectionError(msg)
+
+        return collection
+
+    async def _get_owned_index_names(self) -> list[str]:
+        response = await self._client.options(ignore_status=404).indices.get(index=f"{self._get_index_namespace_prefix()}*")
+        status = getattr(getattr(response, "meta", None), "status", HTTPStatus.OK)
+        if status == HTTPStatus.NOT_FOUND:
+            return []
+        if status != HTTPStatus.OK:
+            msg = "Elasticsearch owned-index lookup returned an unexpected status"
+            raise StoreConnectionError(msg)
+
+        body = response.body
+        if not isinstance(body, dict):
+            msg = "Elasticsearch owned-index response body must be an object with string keys"
+            raise StoreConnectionError(msg)
+        body = cast("dict[Any, Any]", body)
+        if not all(isinstance(index_name, str) for index_name in body):
+            msg = "Elasticsearch owned-index response keys must be strings"
+            raise StoreConnectionError(msg)
+
+        index_names = list(cast("dict[str, Any]", body))
+        for index_name in index_names:
+            self._decode_index_name(index_name=index_name)
+        return index_names
 
     def _get_destination(self, *, collection: str, key: str) -> tuple[str, str]:
         index_name: str = self._get_index_name(collection=collection)
@@ -688,7 +717,9 @@ class ElasticsearchStore(
         return deleted_count
 
     @override
-    async def _get_collection_keys(self, *, collection: str, limit: int | None = None) -> list[str]:
+    async def _get_collection_keys(  # noqa: PLR0912, PLR0915
+        self, *, collection: str, limit: int | None = None
+    ) -> list[str]:
         """Get up to 10,000 keys in the specified collection (eventually consistent)."""
 
         limit = min(DEFAULT_PAGE_SIZE if limit is None else limit, PAGE_LIMIT)
@@ -704,7 +735,7 @@ class ElasticsearchStore(
                 },
             },
             source_includes=[],
-            size=limit,
+            size=PAGE_LIMIT,
         )
         body = result.body
         if not isinstance(body, dict):
@@ -734,6 +765,14 @@ class ElasticsearchStore(
                 msg = "Elasticsearch key-search hit must be an object"
                 raise StoreConnectionError(msg)
             hit = cast("dict[str, Any]", hit)
+            if hit.get("_index") != self._get_index_name(collection=collection):
+                msg = "Elasticsearch key-search hit index does not match the requested collection"
+                raise StoreConnectionError(msg)
+            document_id = hit.get("_id")
+            if not isinstance(document_id, str):
+                msg = "Elasticsearch key-search hit document ID must be a string"
+                raise StoreConnectionError(msg)
+
             fields = hit.get("fields")
             if not isinstance(fields, dict):
                 msg = "Elasticsearch key-search hit fields must be an object"
@@ -748,68 +787,27 @@ class ElasticsearchStore(
                 msg = "Elasticsearch key-search hit must contain exactly one string key field"
                 raise StoreConnectionError(msg)
             key_values = cast("list[str]", key_values)
+            try:
+                expected_document_id = self._get_document_id(key=key_values[0])
+            except InvalidKeyError as error:
+                msg = "Elasticsearch key-search hit contains an invalid canonical key"
+                raise StoreConnectionError(msg) from error
+            if document_id != expected_document_id:
+                msg = "Elasticsearch key-search hit document ID does not match the returned key"
+                raise StoreConnectionError(msg)
 
             all_keys.append(key_values[0])
 
-        return all_keys
+        return all_keys[:limit]
 
     @override
     async def _get_collection_names(self, *, limit: int | None = None) -> list[str]:
-        """List up to 10,000 collections in the elasticsearch store (eventually consistent)."""
+        """List up to 10,000 canonical OpenKeyV collection names."""
 
         limit = min(DEFAULT_PAGE_SIZE if limit is None else limit, PAGE_LIMIT)
-
-        search_response: ObjectApiResponse[Any] = await self._client.options(ignore_status=404).search(
-            index=f"{self._index_prefix}-*",
-            aggregations={
-                "collections": {
-                    "terms": {
-                        "field": "collection",
-                        "size": limit,
-                    },
-                },
-            },
-            size=limit,
-        )
-        body = search_response.body
-        if not isinstance(body, dict):
-            msg = "Elasticsearch collection-search response body must be an object with string keys"
-            raise StoreConnectionError(msg)
-        body = cast("dict[Any, Any]", body)
-        if not all(isinstance(field, str) for field in body):
-            msg = "Elasticsearch collection-search response body must be an object with string keys"
-            raise StoreConnectionError(msg)
-        body = cast("dict[str, Any]", body)
-
-        aggregations = body.get("aggregations")
-        if not isinstance(aggregations, dict):
-            msg = "Elasticsearch collection-search response aggregations must be an object"
-            raise StoreConnectionError(msg)
-        aggregations = cast("dict[str, Any]", aggregations)
-        collections = aggregations.get("collections")
-        if not isinstance(collections, dict):
-            msg = "Elasticsearch collection-search aggregation collections must be an object"
-            raise StoreConnectionError(msg)
-        collections = cast("dict[str, Any]", collections)
-        buckets = collections.get("buckets")
-        if not isinstance(buckets, list):
-            msg = "Elasticsearch collection-search aggregation buckets must be a list"
-            raise StoreConnectionError(msg)
-        buckets = cast("list[Any]", buckets)
-
-        collection_names: list[str] = []
-        for bucket in buckets:
-            if not isinstance(bucket, dict):
-                msg = "Elasticsearch collection-search bucket key must be a string"
-                raise StoreConnectionError(msg)
-            bucket = cast("dict[Any, Any]", bucket)
-            if not isinstance(bucket.get("key"), str):
-                msg = "Elasticsearch collection-search bucket key must be a string"
-                raise StoreConnectionError(msg)
-            bucket = cast("dict[str, Any]", bucket)
-            collection_names.append(cast("str", bucket["key"]))
-
-        return collection_names
+        index_names = await self._get_owned_index_names()
+        collection_names = [self._decode_index_name(index_name=index_name) for index_name in index_names]
+        return collection_names[:limit]
 
     @override
     async def _delete_collection(self, *, collection: str) -> bool:
@@ -851,9 +849,13 @@ class ElasticsearchStore(
 
     @override
     async def _cull(self) -> None:
+        index_names = await self._get_owned_index_names()
+        if not index_names:
+            return
+
         ms_epoch = int(now_as_epoch() * 1000)
         response = await self._client.options(ignore_status=404).delete_by_query(
-            index=f"{self._index_prefix}-*",
+            index=index_names,
             body={
                 "query": {
                     "range": {
