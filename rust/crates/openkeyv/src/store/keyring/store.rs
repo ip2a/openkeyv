@@ -1,4 +1,4 @@
-use super::client::KeyringClient;
+use super::client::{KeyringClient, MAX_SECRET_BYTES};
 use super::config::KeyringConfig;
 use super::error::{Error, Result};
 use crate::entry::ManagedEntry;
@@ -12,7 +12,7 @@ use bytes::Bytes;
 /// Uses the platform-specific secure credential store (macOS Keychain,
 /// Windows Credential Manager, Linux Secret Service, etc.) via the
 /// `keyring` crate. Each entry is stored as a binary secret identified by
-/// `(service_name, "{collection byte length}:{collection}{key}")`.
+/// `(service_name, "okv1-<lowercase hex of canonical compound identity>")`.
 pub struct KeyringStore {
     client: KeyringClient,
     config: KeyringConfig,
@@ -195,6 +195,12 @@ impl AsyncKeyValue for KeyringStore {
         };
         let encoded = managed.encode();
         let encoded_len = encoded.len();
+        if encoded_len > MAX_SECRET_BYTES {
+            return Err(Error::ValueTooLarge {
+                size: encoded_len,
+                max: MAX_SECRET_BYTES,
+            });
+        }
         let client = self.client.clone();
         let collection = self.collection_name(collection).to_owned();
         let key = key.to_owned();
@@ -303,8 +309,7 @@ impl AsyncKeyValue for KeyringStore {
         let keys = keys.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            let mut results = Vec::with_capacity(keys.len());
-
+            let mut entries = Vec::with_capacity(keys.len());
             for key in keys {
                 let entry = match client.entry(&collection, &key) {
                     Ok(entry) => entry,
@@ -324,7 +329,11 @@ impl AsyncKeyValue for KeyringStore {
                         });
                     }
                 };
+                entries.push(entry);
+            }
 
+            let mut results = Vec::with_capacity(entries.len());
+            for entry in entries {
                 let secret = match entry.get_secret() {
                     Ok(secret) => secret,
                     Err(keyring::Error::NoEntry) => {
@@ -397,8 +406,7 @@ impl AsyncKeyValue for KeyringStore {
         let keys = keys.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            let mut results = Vec::with_capacity(keys.len());
-
+            let mut entries = Vec::with_capacity(keys.len());
             for key in keys {
                 let entry = match client.entry(&collection, &key) {
                     Ok(entry) => entry,
@@ -418,7 +426,11 @@ impl AsyncKeyValue for KeyringStore {
                         });
                     }
                 };
+                entries.push(entry);
+            }
 
+            let mut results = Vec::with_capacity(entries.len());
+            for entry in entries {
                 let secret = match entry.get_secret() {
                     Ok(secret) => secret,
                     Err(keyring::Error::NoEntry) => {
@@ -504,6 +516,7 @@ impl AsyncKeyValue for KeyringStore {
         let values = values.to_vec();
 
         tokio::task::spawn_blocking(move || {
+            let mut prepared = Vec::with_capacity(keys.len());
             for (key, value) in keys.into_iter().zip(values) {
                 let managed = match ttl {
                     Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
@@ -511,6 +524,12 @@ impl AsyncKeyValue for KeyringStore {
                 };
                 let encoded = managed.encode();
                 let encoded_len = encoded.len();
+                if encoded_len > MAX_SECRET_BYTES {
+                    return Err(Error::ValueTooLarge {
+                        size: encoded_len,
+                        max: MAX_SECRET_BYTES,
+                    });
+                }
                 let entry = match client.entry(&collection, &key) {
                     Ok(entry) => entry,
                     Err(keyring::Error::TooLong(name, max)) => {
@@ -529,12 +548,15 @@ impl AsyncKeyValue for KeyringStore {
                         });
                     }
                 };
+                prepared.push((entry, encoded));
+            }
 
+            for (entry, encoded) in prepared {
                 match entry.set_secret(&encoded) {
                     Ok(()) => {}
                     Err(keyring::Error::TooLong(name, max)) if name == "secret" => {
                         return Err(Error::ValueTooLarge {
-                            size: encoded_len,
+                            size: encoded.len(),
                             max: max as usize,
                         });
                     }
@@ -574,8 +596,7 @@ impl AsyncKeyValue for KeyringStore {
         let keys = keys.to_vec();
 
         tokio::task::spawn_blocking(move || {
-            let mut count = 0;
-
+            let mut entries = Vec::with_capacity(keys.len());
             for key in keys {
                 let entry = match client.entry(&collection, &key) {
                     Ok(entry) => entry,
@@ -595,7 +616,11 @@ impl AsyncKeyValue for KeyringStore {
                         });
                     }
                 };
+                entries.push(entry);
+            }
 
+            let mut count = 0;
+            for entry in entries {
                 match entry.delete_credential() {
                     Ok(()) => count += 1,
                     Err(keyring::Error::NoEntry) => {}
@@ -696,6 +721,154 @@ mod tests {
             store.get("b:c", Some("a")).await.unwrap(),
             Some(Value::utf8("second-compound-key"))
         );
+
+        for (collection, key, value) in [
+            ("", "", "empty-identity"),
+            ("Users", "Key", "case-sensitive"),
+            ("users", "Key", "case-distinct"),
+            ("é", "e\u{301}", "unicode-normalization"),
+            ("control\u{0001}", "nul\0key", "control-identity"),
+        ] {
+            let value = Value::utf8(value);
+            store
+                .put(key, value.clone(), Some(collection), None)
+                .await
+                .unwrap();
+            assert_eq!(store.get(key, Some(collection)).await.unwrap(), Some(value));
+            assert!(store.delete(key, Some(collection)).await.unwrap());
+        }
+
+        let legacy_collection = "legacy";
+        let legacy_key = "old";
+        let legacy_username = format!(
+            "{}:{legacy_collection}{legacy_key}",
+            legacy_collection.len()
+        );
+        let legacy_service = service_name.clone();
+        let legacy_username_for_write = legacy_username.clone();
+        tokio::task::spawn_blocking(move || {
+            keyring::Entry::new(&legacy_service, &legacy_username_for_write)
+                .unwrap()
+                .set_secret(&ManagedEntry::new(Value::utf8("legacy")).encode())
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .get(legacy_key, Some(legacy_collection))
+                .await
+                .unwrap(),
+            None
+        );
+        let legacy_service = service_name.clone();
+        tokio::task::spawn_blocking(move || {
+            keyring::Entry::new(&legacy_service, &legacy_username)
+                .unwrap()
+                .delete_credential()
+                .unwrap();
+        })
+        .await
+        .unwrap();
+
+        let empty_entry_len = ManagedEntry::new(Value::binary(Bytes::new()))
+            .encode()
+            .len();
+        let boundary_value =
+            Value::binary(Bytes::from(vec![0u8; MAX_SECRET_BYTES - empty_entry_len]));
+        assert_eq!(
+            ManagedEntry::new(boundary_value.clone()).encode().len(),
+            MAX_SECRET_BYTES
+        );
+        store
+            .put(
+                "secret-boundary",
+                boundary_value.clone(),
+                Some(collection),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get("secret-boundary", Some(collection))
+                .await
+                .unwrap(),
+            Some(boundary_value)
+        );
+        assert!(
+            store
+                .delete("secret-boundary", Some(collection))
+                .await
+                .unwrap()
+        );
+
+        store
+            .put("sentinel", Value::utf8("before"), Some("preflight"), None)
+            .await
+            .unwrap();
+        let invalid_key = "x".repeat(253);
+        assert!(matches!(
+            store
+                .put_many(
+                    &["sentinel".to_string(), invalid_key.clone()],
+                    &[Value::utf8("after"), Value::utf8("never-written")],
+                    Some("preflight"),
+                    None,
+                )
+                .await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert_eq!(
+            store.get("sentinel", Some("preflight")).await.unwrap(),
+            Some(Value::utf8("before"))
+        );
+
+        let oversized = Value::binary(Bytes::from(vec![0u8; MAX_SECRET_BYTES]));
+        assert!(matches!(
+            store
+                .put_many(
+                    &["sentinel".to_string(), "oversized".to_string()],
+                    &[Value::utf8("after"), oversized],
+                    Some("preflight"),
+                    None,
+                )
+                .await,
+            Err(Error::ValueTooLarge { .. })
+        ));
+        assert_eq!(
+            store.get("sentinel", Some("preflight")).await.unwrap(),
+            Some(Value::utf8("before"))
+        );
+        assert!(matches!(
+            store
+                .get_many(
+                    &["sentinel".to_string(), invalid_key.clone()],
+                    Some("preflight"),
+                )
+                .await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store
+                .ttl_many(
+                    &["sentinel".to_string(), invalid_key.clone()],
+                    Some("preflight"),
+                )
+                .await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store
+                .delete_many(&["sentinel".to_string(), invalid_key], Some("preflight"))
+                .await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert_eq!(
+            store.get("sentinel", Some("preflight")).await.unwrap(),
+            Some(Value::utf8("before"))
+        );
+        assert!(store.delete("sentinel", Some("preflight")).await.unwrap());
 
         store
             .put_many(
