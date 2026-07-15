@@ -1,14 +1,15 @@
 import base64
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from http import HTTPStatus
-from typing import Any, cast, overload
+from typing import Any, SupportsFloat, cast, overload
 
 from typing_extensions import override
 
+from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.managed_entry import ManagedEntry
 from openkeyv._utils.serialization import SerializationAdapter
-from openkeyv._utils.time_to_live import now_as_epoch
+from openkeyv._utils.time_to_live import now_as_epoch, prepare_ttl
 from openkeyv.errors import DeserializationError, InvalidKeyError, SerializationError, StoreConnectionError
 from openkeyv.stores.base import (
     BaseContextManagerStore,
@@ -246,6 +247,92 @@ class ElasticsearchStore(
             default_collection=default_collection,
             client_provided_by_user=client_provided,
         )
+
+    @override
+    async def setup_collection(self, *, collection: str) -> None:
+        self._get_index_name(collection=collection)
+        await super().setup_collection(collection=collection)
+
+    @bear_enforce
+    @override
+    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+        self._get_document_id(key=key)
+        return await super().get(key=key, collection=collection)
+
+    @bear_enforce
+    @override
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+        for key in keys:
+            self._get_document_id(key=key)
+        return await super().get_many(keys=keys, collection=collection)
+
+    @bear_enforce
+    @override
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+        self._get_document_id(key=key)
+        return await super().ttl(key=key, collection=collection)
+
+    @bear_enforce
+    @override
+    async def ttl_many(
+        self,
+        keys: Sequence[str],
+        *,
+        collection: str | None = None,
+    ) -> list[tuple[dict[str, Any] | None, float | None]]:
+        for key in keys:
+            self._get_document_id(key=key)
+        return await super().ttl_many(keys=keys, collection=collection)
+
+    @bear_enforce
+    @override
+    async def put(
+        self,
+        key: str,
+        value: Mapping[str, Any],
+        *,
+        collection: str | None = None,
+        ttl: SupportsFloat | None = None,
+    ) -> None:
+        self._get_document_id(key=key)
+        validated_ttl = prepare_ttl(t=ttl)
+        await super().put(key=key, value=value, collection=collection, ttl=validated_ttl)
+
+    @bear_enforce
+    @override
+    async def put_many(
+        self,
+        keys: Sequence[str],
+        values: Sequence[Mapping[str, Any]],
+        *,
+        collection: str | None = None,
+        ttl: SupportsFloat | None = None,
+    ) -> None:
+        if len(keys) != len(values):
+            msg = "put_many called but a different number of keys and values were provided"
+            raise ValueError(msg) from None
+        for key in keys:
+            self._get_document_id(key=key)
+        validated_ttl = prepare_ttl(t=ttl)
+        await super().put_many(keys=keys, values=values, collection=collection, ttl=validated_ttl)
+
+    @bear_enforce
+    @override
+    async def delete(self, key: str, *, collection: str | None = None) -> bool:
+        self._get_document_id(key=key)
+        return await super().delete(key=key, collection=collection)
+
+    @bear_enforce
+    @override
+    async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
+        for key in keys:
+            self._get_document_id(key=key)
+        return await super().delete_many(keys=keys, collection=collection)
+
+    @override
+    async def destroy_collection(self, collection: str) -> bool:
+        self._get_index_name(collection=collection)
+        return await super().destroy_collection(collection=collection)
 
     @override
     async def _setup(self) -> None:

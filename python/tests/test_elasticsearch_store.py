@@ -7,7 +7,7 @@ import pytest
 from elastic_transport import SerializationError as ElasticsearchSerializationError
 
 from openkeyv._utils.managed_entry import ManagedEntry
-from openkeyv.errors import DeserializationError, InvalidKeyError, StoreConnectionError
+from openkeyv.errors import DeserializationError, InvalidKeyError, InvalidTTLError, StoreConnectionError
 from openkeyv.stores.elasticsearch.serializers import LessCapableJsonSerializer
 from openkeyv.stores.elasticsearch.store import ElasticsearchSerializationAdapter, ElasticsearchStore
 
@@ -404,3 +404,87 @@ async def test_elasticsearch_cull_validates_owned_indices_before_mutation(
     with pytest.raises(StoreConnectionError, match="malformed canonical"):
         await store._cull()
     assert client.delete_by_query_calls == []
+
+
+@pytest.mark.parametrize(
+    ("operation", "kwargs"),
+    [
+        ("get", {"key": "x" * 381}),
+        ("get_many", {"keys": ["valid", "x" * 381]}),
+        ("ttl", {"key": "x" * 381}),
+        ("ttl_many", {"keys": ["valid", "x" * 381]}),
+        ("put", {"key": "x" * 381, "value": {"value": "new"}}),
+        ("put_many", {"keys": ["valid", "x" * 381], "values": [{"value": "first"}, {"value": "second"}]}),
+        ("delete", {"key": "x" * 381}),
+        ("delete_many", {"keys": ["valid", "x" * 381]}),
+    ],
+)
+async def test_elasticsearch_public_key_preflight_happens_before_setup(
+    elasticsearch_store: tuple[ElasticsearchStore, FakeElasticsearchClient],
+    operation: str,
+    kwargs: dict[str, Any],
+) -> None:
+    store, client = elasticsearch_store
+
+    with pytest.raises(InvalidKeyError, match="document ID"):
+        await getattr(store, operation)(collection="new-collection", **kwargs)
+
+    assert client.options_calls == []
+    assert client.index_calls == []
+    assert client.bulk_calls == []
+
+
+@pytest.mark.parametrize("operation", ["setup_collection", "keys", "destroy_collection"])
+async def test_elasticsearch_public_collection_preflight_happens_before_setup(
+    elasticsearch_store: tuple[ElasticsearchStore, FakeElasticsearchClient],
+    operation: str,
+) -> None:
+    store, client = elasticsearch_store
+
+    if operation == "setup_collection":
+        invalid_call = store.setup_collection(collection="x" * 121)
+    elif operation == "keys":
+        invalid_call = store.keys(collection="x" * 121)
+    else:
+        invalid_call = store.destroy_collection("x" * 121)
+
+    with pytest.raises(InvalidKeyError, match="collection index"):
+        await invalid_call
+
+    assert client.options_calls == []
+    assert client.indices.get_calls == []
+
+
+@pytest.mark.parametrize(
+    ("operation", "kwargs", "error", "message"),
+    [
+        ("put", {"key": "valid", "value": {"value": "new"}, "ttl": 0}, InvalidTTLError, "TTL is invalid"),
+        (
+            "put_many",
+            {"keys": ["one"], "values": [{"value": "one"}, {"value": "two"}]},
+            ValueError,
+            "different number",
+        ),
+        (
+            "put_many",
+            {"keys": ["one"], "values": [{"value": "one"}], "ttl": float("nan")},
+            InvalidTTLError,
+            "TTL is invalid",
+        ),
+    ],
+)
+async def test_elasticsearch_public_write_validation_happens_before_setup(
+    elasticsearch_store: tuple[ElasticsearchStore, FakeElasticsearchClient],
+    operation: str,
+    kwargs: dict[str, Any],
+    error: type[Exception],
+    message: str,
+) -> None:
+    store, client = elasticsearch_store
+
+    with pytest.raises(error, match=message):
+        await getattr(store, operation)(collection="new-collection", **kwargs)
+
+    assert client.options_calls == []
+    assert client.index_calls == []
+    assert client.bulk_calls == []
