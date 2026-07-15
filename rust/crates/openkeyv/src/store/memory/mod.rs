@@ -3,6 +3,6 @@ mod config;
 mod error;
 mod store;
 
-pub use client::{MemoryClient, MemoryCollections};
+pub use client::MemoryClient;
 pub use config::{MemoryConfig, SeedData};
 pub use store::MemoryStore;

@@ -1,5 +1,16 @@
-from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, SupportsFloat, runtime_checkable
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Protocol, SupportsFloat, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from openkeyv._internal import (
+        CompareAndDeleteResult,
+        CompareAndSwapResult,
+        Revision,
+        RevisionedValue,
+    )
 
 
 @runtime_checkable
@@ -188,3 +199,55 @@ class AsyncKeyValue(AsyncKeyValueProtocol, Protocol):
     Includes basic operations: get, put, delete, ttl
     Includes bulk operations: get_many, put_many, delete_many, ttl_many.
     """
+
+
+@runtime_checkable
+class AsyncCompareAndSwapProtocol(Protocol):
+    """Optional optimistic-concurrency capability for atomic conditional writes.
+
+    Stores advertise this protocol only when they provide a genuine atomic
+    implementation backed by an opaque revision token.
+    """
+
+    async def get_with_revision(
+        self,
+        key: str,
+        *,
+        collection: str | None = None,
+    ) -> RevisionedValue | None:
+        """Atomically read a live value together with its opaque revision.
+
+        Args:
+            key: The key to read.
+            collection: The collection to read from. Defaults to the store default collection.
+
+        Returns:
+            The observed value, revision, and remaining TTL, or ``None`` when the
+            key is missing or expired.
+        """
+        ...
+
+    async def compare_and_swap(
+        self,
+        key: str,
+        expected: Revision | None,
+        value: Mapping[str, Any],
+        *,
+        collection: str | None = None,
+        ttl: SupportsFloat | None = None,
+    ) -> CompareAndSwapResult:
+        """Atomically store ``value`` only when ``expected`` matches.
+
+        ``expected=None`` means create-if-absent, not unconditional write.
+        """
+        ...
+
+    async def compare_and_delete(
+        self,
+        key: str,
+        expected: Revision,
+        *,
+        collection: str | None = None,
+    ) -> CompareAndDeleteResult:
+        """Atomically delete only when the live revision matches ``expected``."""
+        ...

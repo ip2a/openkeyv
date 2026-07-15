@@ -1,4 +1,4 @@
-use super::client::MemoryClient;
+use super::client::{MemoryClient, RevisionedEntry, RevisionedEntrySnapshot, fresh_revision};
 use super::config::{MemoryConfig, SeedData};
 use super::error::{Error, Result};
 use crate::change::{ChangeFeedRequest, ChangeOperation, ChangeSubscription};
@@ -11,6 +11,7 @@ use crate::protocol::{
 use crate::value::Value;
 use async_trait::async_trait;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use std::sync::Arc;
 
 const DEFAULT_PAGE_SIZE: usize = 10_000;
@@ -62,7 +63,8 @@ impl MemoryStore {
                     .or_default();
                 for (key, value) in items {
                     let entry = ManagedEntry::new(value.clone());
-                    col.insert(key.clone(), entry);
+                    let revision = fresh_revision()?;
+                    col.insert(key.clone(), RevisionedEntry { entry, revision });
                 }
             }
         }
@@ -80,17 +82,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    fn revision_key(collection: &str, key: &str) -> String {
-        format!("{collection}\0{key}")
-    }
-
-    fn current_revision(&self, collection: &str, key: &str) -> Option<Revision> {
-        self.client
-            .revisions()
-            .get(&Self::revision_key(collection, key))
-            .map(|entry| *entry)
-    }
-
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
         collection.unwrap_or(&self.config.default_collection)
     }
@@ -98,17 +89,17 @@ impl MemoryStore {
     fn get_collection(
         &self,
         name: &str,
-    ) -> Result<dashmap::mapref::one::Ref<'_, String, DashMap<String, ManagedEntry>>> {
+    ) -> Result<dashmap::mapref::one::Ref<'_, String, DashMap<String, RevisionedEntry>>> {
         self.client
             .collections()
             .get(name)
             .ok_or_else(|| Error::InvalidOperation(format!("collection '{}' not found", name)))
     }
 
-    fn maybe_cull_collection(&self, col: &DashMap<String, ManagedEntry>) {
+    fn maybe_cull_collection(&self, col: &DashMap<String, RevisionedEntry>) {
         if let Some(max) = self.config.max_entries_per_collection {
             if col.len() > max {
-                col.retain(|_k, v| !v.is_expired());
+                col.retain(|_k, v| !v.entry.is_expired());
                 while col.len() > max {
                     if let Some(k) = col.iter().next().map(|e| e.key().clone()) {
                         col.remove(&k);
@@ -127,6 +118,14 @@ impl Default for MemoryStore {
     }
 }
 
+fn snapshot_to_revisioned_value(snapshot: RevisionedEntrySnapshot) -> RevisionedValue {
+    RevisionedValue {
+        value: snapshot.value,
+        revision: snapshot.revision,
+        ttl: snapshot.ttl,
+    }
+}
+
 #[async_trait]
 impl AsyncKeyValue for MemoryStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
@@ -135,7 +134,7 @@ impl AsyncKeyValue for MemoryStore {
 
         let col = self.get_collection(cname)?;
         match col.get(key) {
-            Some(entry) if !entry.is_expired() => Ok(Some(entry.value.clone())),
+            Some(rev) if !rev.entry.is_expired() => Ok(Some(rev.entry.value.clone())),
             _ => Ok(None),
         }
     }
@@ -150,9 +149,9 @@ impl AsyncKeyValue for MemoryStore {
 
         let col = self.get_collection(cname)?;
         match col.get(key) {
-            Some(entry) if !entry.is_expired() => {
-                let ttl = entry.ttl();
-                Ok(Some((entry.value.clone(), ttl)))
+            Some(rev) if !rev.entry.is_expired() => {
+                let ttl = rev.entry.ttl();
+                Ok(Some((rev.entry.value.clone(), ttl)))
             }
             _ => Ok(None),
         }
@@ -172,19 +171,16 @@ impl AsyncKeyValue for MemoryStore {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
+        let revision = fresh_revision()?;
 
         let _mutation = self.client.mutation_lock().lock().await;
         if let Some(col) = self.client.collections().get_mut(cname) {
             self.maybe_cull_collection(&col);
-            col.insert(key.to_string(), entry);
+            col.insert(key.to_string(), RevisionedEntry { entry, revision });
         }
-        let revision = self
-            .client
+        self.client
             .record_change(cname, key, ChangeOperation::Put)
             .await;
-        self.client
-            .revisions()
-            .insert(Self::revision_key(cname, key), revision);
         Ok(())
     }
 
@@ -196,13 +192,9 @@ impl AsyncKeyValue for MemoryStore {
         let col = self.get_collection(cname)?;
         let deleted = col.remove(key).is_some();
         if deleted {
-            let revision = self
-                .client
+            self.client
                 .record_change(cname, key, ChangeOperation::Delete)
                 .await;
-            self.client
-                .revisions()
-                .insert(Self::revision_key(cname, key), revision);
         }
         Ok(deleted)
     }
@@ -220,8 +212,8 @@ impl AsyncKeyValue for MemoryStore {
             .iter()
             .map(|k| {
                 col.get(k)
-                    .filter(|e| !e.is_expired())
-                    .map(|e| e.value.clone())
+                    .filter(|rev| !rev.entry.is_expired())
+                    .map(|rev| rev.entry.value.clone())
             })
             .collect();
         Ok(results)
@@ -239,9 +231,9 @@ impl AsyncKeyValue for MemoryStore {
         let results: Vec<_> = keys
             .iter()
             .map(|k| {
-                col.get(k).filter(|e| !e.is_expired()).map(|e| {
-                    let ttl = e.ttl();
-                    (e.value.clone(), ttl)
+                col.get(k).filter(|rev| !rev.entry.is_expired()).map(|rev| {
+                    let ttl = rev.entry.ttl();
+                    (rev.entry.value.clone(), ttl)
                 })
             })
             .collect();
@@ -264,22 +256,54 @@ impl AsyncKeyValue for MemoryStore {
         if let Some(seconds) = ttl {
             ManagedEntry::validate_ttl(seconds)?;
         }
-        let cname = self.collection_name(collection).to_string();
-        for (key, value) in keys.iter().zip(values.iter()) {
-            self.put(key, value.clone(), Some(&cname), ttl).await?;
+
+        let cname = self.collection_name(collection);
+        self.setup_collection(cname).await?;
+
+        let entries = values
+            .iter()
+            .map(|value| match ttl {
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                None => Ok(ManagedEntry::new(value.clone())),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let revisions = (0..entries.len())
+            .map(|_| fresh_revision())
+            .collect::<Result<Vec<_>>>()?;
+
+        let _mutation = self.client.mutation_lock().lock().await;
+        if let Some(col) = self.client.collections().get_mut(cname) {
+            self.maybe_cull_collection(&col);
+            for ((key, entry), revision) in keys.iter().zip(entries).zip(revisions) {
+                col.insert(key.clone(), RevisionedEntry { entry, revision });
+            }
+        }
+        for key in keys {
+            self.client
+                .record_change(cname, key, ChangeOperation::Put)
+                .await;
         }
         Ok(())
     }
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
-        let cname = self.collection_name(collection).to_string();
-        let mut deleted = 0;
+        let cname = self.collection_name(collection);
+        self.setup_collection(cname).await?;
+
+        let _mutation = self.client.mutation_lock().lock().await;
+        let col = self.get_collection(cname)?;
+        let mut deleted = Vec::new();
         for key in keys {
-            if self.delete(key, Some(&cname)).await? {
-                deleted += 1;
+            if col.remove(key).is_some() {
+                deleted.push(key);
             }
         }
-        Ok(deleted)
+        for key in &deleted {
+            self.client
+                .record_change(cname, key, ChangeOperation::Delete)
+                .await;
+        }
+        Ok(deleted.len())
     }
 }
 
@@ -292,22 +316,14 @@ impl AsyncCompareAndSwap for MemoryStore {
     ) -> Result<Option<RevisionedValue>> {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
-        let _mutation = self.client.mutation_lock().lock().await;
-        let entry = self
-            .get_collection(cname)?
-            .get(key)
-            .map(|entry| entry.clone())
-            .filter(|entry| !entry.is_expired());
-        let Some(entry) = entry else { return Ok(None) };
-        let revision = self
-            .current_revision(cname, key)
-            .ok_or(Error::CorruptedData)?;
-        let ttl = entry.ttl();
-        Ok(Some(RevisionedValue {
-            value: entry.value,
-            revision,
-            ttl,
-        }))
+
+        let col = self.get_collection(cname)?;
+        Ok(match col.get(key) {
+            Some(rev) if !rev.entry.is_expired() => {
+                Some(snapshot_to_revisioned_value(rev.snapshot()))
+            }
+            _ => None,
+        })
     }
 
     async fn compare_and_swap(
@@ -318,41 +334,89 @@ impl AsyncCompareAndSwap for MemoryStore {
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<CompareAndSwapResult> {
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
+
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
+
         let entry = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
+        // Generate the new revision before taking any mutation lock so a
+        // randomness failure cannot leave a partial write behind.
+        let new_revision = fresh_revision()?;
+
         let _mutation = self.client.mutation_lock().lock().await;
-        let current = self
-            .get_collection(cname)?
-            .get(key)
-            .map(|entry| entry.clone())
-            .filter(|entry| !entry.is_expired());
-        let current_revision = current
-            .as_ref()
-            .and_then(|_| self.current_revision(cname, key));
-        if current_revision.as_ref() != expected {
-            return Ok(CompareAndSwapResult::Conflict {
-                current: current
-                    .zip(current_revision)
-                    .map(|(entry, revision)| RevisionedValue {
-                        ttl: entry.ttl(),
-                        value: entry.value,
-                        revision,
-                    }),
-            });
+        let col = self.get_collection(cname)?;
+        let mut entry_guard = match col.entry(key.to_string()) {
+            Entry::Occupied(occupied) => occupied,
+            Entry::Vacant(vacant) => match expected {
+                None => {
+                    vacant.insert(RevisionedEntry {
+                        entry,
+                        revision: new_revision,
+                    });
+                    self.client
+                        .record_change(cname, key, ChangeOperation::Put)
+                        .await;
+                    return Ok(CompareAndSwapResult::Applied {
+                        revision: new_revision,
+                    });
+                }
+                Some(_) => {
+                    return Ok(CompareAndSwapResult::Conflict { current: None });
+                }
+            },
+        };
+
+        let current = entry_guard.get();
+        if current.entry.is_expired() {
+            // Expired entries are treated exactly as absent.
+            match expected {
+                None => {
+                    entry_guard.insert(RevisionedEntry {
+                        entry,
+                        revision: new_revision,
+                    });
+                    self.client
+                        .record_change(cname, key, ChangeOperation::Put)
+                        .await;
+                    return Ok(CompareAndSwapResult::Applied {
+                        revision: new_revision,
+                    });
+                }
+                Some(_) => {
+                    // Remove the expired occupied entry within the same atomic
+                    // operation before reporting absence.
+                    entry_guard.remove();
+                    return Ok(CompareAndSwapResult::Conflict { current: None });
+                }
+            }
         }
-        self.get_collection(cname)?.insert(key.to_string(), entry);
-        let revision = self
-            .client
-            .record_change(cname, key, ChangeOperation::Put)
-            .await;
-        self.client
-            .revisions()
-            .insert(Self::revision_key(cname, key), revision);
-        Ok(CompareAndSwapResult::Applied { revision })
+
+        match expected {
+            None => Ok(CompareAndSwapResult::Conflict {
+                current: Some(snapshot_to_revisioned_value(current.snapshot())),
+            }),
+            Some(expected_revision) if expected_revision == &current.revision => {
+                entry_guard.insert(RevisionedEntry {
+                    entry,
+                    revision: new_revision,
+                });
+                self.client
+                    .record_change(cname, key, ChangeOperation::Put)
+                    .await;
+                Ok(CompareAndSwapResult::Applied {
+                    revision: new_revision,
+                })
+            }
+            Some(_) => Ok(CompareAndSwapResult::Conflict {
+                current: Some(snapshot_to_revisioned_value(current.snapshot())),
+            }),
+        }
     }
 
     async fn compare_and_delete(
@@ -363,35 +427,35 @@ impl AsyncCompareAndSwap for MemoryStore {
     ) -> Result<CompareAndDeleteResult> {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
+
         let _mutation = self.client.mutation_lock().lock().await;
-        let current = self
-            .get_collection(cname)?
-            .get(key)
-            .map(|entry| entry.clone())
-            .filter(|entry| !entry.is_expired());
-        let current_revision = current
-            .as_ref()
-            .and_then(|_| self.current_revision(cname, key));
-        if current_revision.as_ref() != Some(expected) {
-            return Ok(CompareAndDeleteResult::Conflict {
-                current: current
-                    .zip(current_revision)
-                    .map(|(entry, revision)| RevisionedValue {
-                        ttl: entry.ttl(),
-                        value: entry.value,
-                        revision,
-                    }),
-            });
+        let col = self.get_collection(cname)?;
+        let entry_guard = match col.entry(key.to_string()) {
+            Entry::Occupied(occupied) => occupied,
+            Entry::Vacant(_) => {
+                return Ok(CompareAndDeleteResult::Conflict { current: None });
+            }
+        };
+
+        let current = entry_guard.get();
+        if current.entry.is_expired() {
+            // Expired occupied entry is removed within the same atomic operation
+            // and treated as absent.
+            entry_guard.remove();
+            return Ok(CompareAndDeleteResult::Conflict { current: None });
         }
-        self.get_collection(cname)?.remove(key);
-        let revision = self
-            .client
-            .record_change(cname, key, ChangeOperation::Delete)
-            .await;
-        self.client
-            .revisions()
-            .insert(Self::revision_key(cname, key), revision);
-        Ok(CompareAndDeleteResult::Deleted)
+
+        if expected == &current.revision {
+            entry_guard.remove();
+            self.client
+                .record_change(cname, key, ChangeOperation::Delete)
+                .await;
+            Ok(CompareAndDeleteResult::Deleted)
+        } else {
+            Ok(CompareAndDeleteResult::Conflict {
+                current: Some(snapshot_to_revisioned_value(current.snapshot())),
+            })
+        }
     }
 }
 
@@ -408,7 +472,7 @@ impl AsyncCull for MemoryStore {
     async fn cull(&self) -> Result<()> {
         for entry in self.client.collections().iter() {
             let col = entry.value();
-            col.retain(|_k, v| !v.is_expired());
+            col.retain(|_k, v| !v.entry.is_expired());
         }
         Ok(())
     }
@@ -709,5 +773,433 @@ mod tests {
 
         assert!(store.destroy().await.unwrap());
         assert_eq!(store.get("k", None).await.unwrap(), None);
+    }
+
+    // ----- 4B atomic CAS / revision tests -----
+
+    fn conflict_current(result: CompareAndSwapResult) -> Option<RevisionedValue> {
+        match result {
+            CompareAndSwapResult::Conflict { current } => current,
+            CompareAndSwapResult::Applied { .. } => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_with_revision_missing() {
+        let store = MemoryStore::new();
+        assert_eq!(
+            store.get_with_revision("missing", None).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cas_create_if_absent_success() {
+        let store = MemoryStore::new();
+        let result = store
+            .compare_and_swap("k", None, Value::utf8("v"), None, None)
+            .await
+            .unwrap();
+        let revision = match result {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+        assert_eq!(observed.value, Value::utf8("v"));
+        assert_eq!(observed.revision, revision);
+        assert_eq!(observed.ttl, None);
+    }
+
+    #[tokio::test]
+    async fn test_cas_create_if_absent_existing_conflict() {
+        let store = MemoryStore::new();
+        store.put("k", Value::utf8("v"), None, None).await.unwrap();
+        let current = store
+            .compare_and_swap("k", None, Value::utf8("other"), None, None)
+            .await
+            .unwrap();
+        match current {
+            CompareAndSwapResult::Conflict { current: Some(rev) } => {
+                assert_eq!(rev.value, Value::utf8("v"));
+                assert_eq!(rev.ttl, None);
+            }
+            _ => panic!("expected conflict with current"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cas_exact_revision_update() {
+        let store = MemoryStore::new();
+        store.put("k", Value::integer(1), None, None).await.unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+
+        let result = store
+            .compare_and_swap("k", Some(&observed.revision), Value::integer(2), None, None)
+            .await
+            .unwrap();
+        let new_revision = match result {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+        assert_ne!(new_revision, observed.revision);
+
+        let after = store.get_with_revision("k", None).await.unwrap().unwrap();
+        assert_eq!(after.value, Value::integer(2));
+        assert_eq!(after.revision, new_revision);
+    }
+
+    #[tokio::test]
+    async fn test_cas_stale_revision_conflict() {
+        let store = MemoryStore::new();
+        store.put("k", Value::integer(1), None, None).await.unwrap();
+        let first = store.get_with_revision("k", None).await.unwrap().unwrap();
+        store.put("k", Value::integer(2), None, None).await.unwrap();
+
+        let result = store
+            .compare_and_swap("k", Some(&first.revision), Value::integer(3), None, None)
+            .await
+            .unwrap();
+        match result {
+            CompareAndSwapResult::Conflict { current: Some(rev) } => {
+                assert_eq!(rev.value, Value::integer(2))
+            }
+            _ => panic!("expected conflict"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cas_same_value_changes_revision() {
+        let store = MemoryStore::new();
+        store
+            .put("k", Value::utf8("same"), None, None)
+            .await
+            .unwrap();
+        let before = store.get_with_revision("k", None).await.unwrap().unwrap();
+
+        let result = store
+            .compare_and_swap("k", Some(&before.revision), Value::utf8("same"), None, None)
+            .await
+            .unwrap();
+        match result {
+            CompareAndSwapResult::Applied { revision } => assert_ne!(revision, before.revision),
+            _ => panic!("expected applied"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cas_ttl_validation_before_mutation() {
+        let store = MemoryStore::new();
+        store.put("k", Value::utf8("v"), None, None).await.unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+
+        let err = store
+            .compare_and_swap(
+                "k",
+                Some(&observed.revision),
+                Value::utf8("v"),
+                None,
+                Some(-1.0),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidTtl(_)));
+        // Entry must be unchanged after the failed attempt.
+        let after = store.get_with_revision("k", None).await.unwrap().unwrap();
+        assert_eq!(after.revision, observed.revision);
+    }
+
+    #[tokio::test]
+    async fn test_cas_new_ttl_replaces_old_ttl() {
+        let store = MemoryStore::new();
+        store
+            .put("k", Value::utf8("v"), None, Some(100.0))
+            .await
+            .unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+        assert!(observed.ttl.unwrap() > 0.0);
+
+        let result = store
+            .compare_and_swap("k", Some(&observed.revision), Value::utf8("v2"), None, None)
+            .await
+            .unwrap();
+        assert!(matches!(result, CompareAndSwapResult::Applied { .. }));
+
+        let after = store.get_with_revision("k", None).await.unwrap().unwrap();
+        assert_eq!(after.value, Value::utf8("v2"));
+        assert_eq!(after.ttl, None);
+    }
+
+    #[tokio::test]
+    async fn test_cas_conflict_does_not_refresh_ttl() {
+        let store = MemoryStore::new();
+        store
+            .put("k", Value::utf8("v"), None, Some(100.0))
+            .await
+            .unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+        let ttl_before = observed.ttl.unwrap();
+
+        store
+            .compare_and_swap(
+                "k",
+                Some(&Revision::from_bytes([0; 16])),
+                Value::utf8("x"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let after = store.get_with_revision("k", None).await.unwrap().unwrap();
+        // TTL should be effectively unchanged (within floating jitter).
+        assert!((after.ttl.unwrap() - ttl_before).abs() < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_cas_expired_treated_as_absent() {
+        let store = MemoryStore::new();
+        store
+            .put("k", Value::utf8("v"), None, Some(0.01))
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // create-if-absent should succeed against the expired entry.
+        let result = store
+            .compare_and_swap("k", None, Value::utf8("rebuilt"), None, None)
+            .await
+            .unwrap();
+        assert!(matches!(result, CompareAndSwapResult::Applied { .. }));
+
+        // expected-revision against the expired entry must report absence.
+        store
+            .put("exp", Value::utf8("v"), None, Some(0.01))
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let result = store
+            .compare_and_swap(
+                "exp",
+                Some(&Revision::from_bytes([1; 16])),
+                Value::utf8("x"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict_current(result), None);
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_delete_success() {
+        let store = MemoryStore::new();
+        store.put("k", Value::utf8("v"), None, None).await.unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+
+        let result = store
+            .compare_and_delete("k", &observed.revision, None)
+            .await
+            .unwrap();
+        assert_eq!(result, CompareAndDeleteResult::Deleted);
+        assert_eq!(store.get("k", None).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_delete_stale_conflict() {
+        let store = MemoryStore::new();
+        store.put("k", Value::utf8("v"), None, None).await.unwrap();
+        let first = store.get_with_revision("k", None).await.unwrap().unwrap();
+        store.put("k", Value::utf8("v2"), None, None).await.unwrap();
+
+        let result = store
+            .compare_and_delete("k", &first.revision, None)
+            .await
+            .unwrap();
+        match result {
+            CompareAndDeleteResult::Conflict { current: Some(rev) } => {
+                assert_eq!(rev.value, Value::utf8("v2"))
+            }
+            _ => panic!("expected conflict"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_delete_missing_conflict() {
+        let store = MemoryStore::new();
+        let result = store
+            .compare_and_delete("missing", &Revision::from_bytes([1; 16]), None)
+            .await
+            .unwrap();
+        assert_eq!(result, CompareAndDeleteResult::Conflict { current: None });
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_delete_expired_treated_as_absent() {
+        let store = MemoryStore::new();
+        store
+            .put("k", Value::utf8("v"), None, Some(0.01))
+            .await
+            .unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let result = store
+            .compare_and_delete("k", &observed.revision, None)
+            .await
+            .unwrap();
+        assert_eq!(result, CompareAndDeleteResult::Conflict { current: None });
+        // The expired occupied entry must have been removed by the atomic operation.
+        assert_eq!(store.get("k", None).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_delete_recreate_rejects_stale_revision() {
+        let store = MemoryStore::new();
+        store.put("k", Value::utf8("v1"), None, None).await.unwrap();
+        let first = store.get_with_revision("k", None).await.unwrap().unwrap();
+        store.delete("k", None).await.unwrap();
+        store.put("k", Value::utf8("v2"), None, None).await.unwrap();
+
+        // The stale pre-delete revision must not match the recreated entry.
+        let result = store
+            .compare_and_swap("k", Some(&first.revision), Value::utf8("v3"), None, None)
+            .await
+            .unwrap();
+        match result {
+            CompareAndSwapResult::Conflict { current: Some(rev) } => {
+                assert_eq!(rev.value, Value::utf8("v2"))
+            }
+            _ => panic!("expected conflict"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ordinary_put_invalidates_observed_revision() {
+        let store = MemoryStore::new();
+        store.put("k", Value::utf8("v1"), None, None).await.unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+        store.put("k", Value::utf8("v2"), None, None).await.unwrap();
+
+        let result = store
+            .compare_and_swap("k", Some(&observed.revision), Value::utf8("v3"), None, None)
+            .await
+            .unwrap();
+        assert!(matches!(result, CompareAndSwapResult::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_ordinary_put_many_invalidates_observed_revision() {
+        let store = MemoryStore::new();
+        store.put("k", Value::utf8("v1"), None, None).await.unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+        store
+            .put_many(&["k".to_string()], &[Value::utf8("v2")], None, None)
+            .await
+            .unwrap();
+
+        let result = store
+            .compare_and_swap("k", Some(&observed.revision), Value::utf8("v3"), None, None)
+            .await
+            .unwrap();
+        assert!(matches!(result, CompareAndSwapResult::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_cas_exactly_one_success() {
+        let store = Arc::new(MemoryStore::new());
+        store
+            .put("k", Value::utf8("seed"), None, None)
+            .await
+            .unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..8u8 {
+            let store = store.clone();
+            let revision = observed.revision;
+            handles.push(tokio::spawn(async move {
+                store
+                    .compare_and_swap("k", Some(&revision), Value::integer(i as i64), None, None)
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut applied = 0usize;
+        for handle in handles {
+            if matches!(handle.await.unwrap(), CompareAndSwapResult::Applied { .. }) {
+                applied += 1;
+            }
+        }
+        assert_eq!(applied, 1);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_create_if_absent_exactly_one_success() {
+        let store = Arc::new(MemoryStore::new());
+        let mut handles = Vec::new();
+        for i in 0..8u8 {
+            let store = store.clone();
+            handles.push(tokio::spawn(async move {
+                store
+                    .compare_and_swap("k", None, Value::integer(i as i64), None, None)
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut applied = 0usize;
+        for handle in handles {
+            if matches!(handle.await.unwrap(), CompareAndSwapResult::Applied { .. }) {
+                applied += 1;
+            }
+        }
+        assert_eq!(applied, 1);
+    }
+
+    #[tokio::test]
+    async fn test_change_feed_only_records_successful_mutations() {
+        let store = MemoryStore::new();
+        let mut changes = store.subscribe(ChangeFeedRequest::default()).await.unwrap();
+
+        store.put("k", Value::utf8("v"), None, None).await.unwrap();
+        let observed = store.get_with_revision("k", None).await.unwrap().unwrap();
+
+        // A conflicting CAS must not emit a change event.
+        store
+            .compare_and_swap(
+                "k",
+                Some(&Revision::from_bytes([9; 16])),
+                Value::utf8("x"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(100), changes.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.key, "k");
+        assert_eq!(first.operation, ChangeOperation::Put);
+
+        // No second event should arrive for the conflict.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), changes.recv())
+                .await
+                .is_err()
+        );
+
+        // A successful CAS emits exactly one event.
+        store
+            .compare_and_swap("k", Some(&observed.revision), Value::utf8("v2"), None, None)
+            .await
+            .unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_millis(100), changes.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.key, "k");
+        assert_eq!(second.operation, ChangeOperation::Put);
     }
 }

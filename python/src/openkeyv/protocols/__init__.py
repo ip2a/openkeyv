@@ -1,1 +1,2 @@
+from openkeyv.protocols.key_value import AsyncCompareAndSwapProtocol as AsyncCompareAndSwapProtocol
 from openkeyv.protocols.key_value import AsyncKeyValue as AsyncKeyValue

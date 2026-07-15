@@ -69,4 +69,7 @@ pub enum Error {
 
     #[error("change subscriber lagged by {skipped} records")]
     ChangeFeedLagged { skipped: u64 },
+
+    #[error("revision generation failed: {0}")]
+    RevisionGeneration(String),
 }

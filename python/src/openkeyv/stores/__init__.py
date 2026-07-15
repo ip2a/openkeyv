@@ -1,6 +1,8 @@
 """Store backends exposed by the OpenKeyV Rust extension."""
 
 from openkeyv._internal import (
+    CompareAndDeleteResult,
+    CompareAndSwapResult,
     DiskStore,
     DuckDBStore,
     DynamoDBStore,
@@ -14,6 +16,8 @@ from openkeyv._internal import (
     OpenSearchStore,
     PostgresStore,
     RedisStore,
+    Revision,
+    RevisionedValue,
     RocksDBStore,
     S3Store,
     SimpleStore,
@@ -22,6 +26,8 @@ from openkeyv._internal import (
 )
 
 __all__ = [
+    "CompareAndDeleteResult",
+    "CompareAndSwapResult",
     "DiskStore",
     "DuckDBStore",
     "DynamoDBStore",
@@ -35,6 +41,8 @@ __all__ = [
     "OpenSearchStore",
     "PostgresStore",
     "RedisStore",
+    "Revision",
+    "RevisionedValue",
     "RocksDBStore",
     "S3Store",
     "SimpleStore",

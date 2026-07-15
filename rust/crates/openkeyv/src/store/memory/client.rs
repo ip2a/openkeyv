@@ -10,9 +10,47 @@ use dashmap::DashMap;
 use std::collections::VecDeque;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
-pub type MemoryCollections = DashMap<String, DashMap<String, ManagedEntry>>;
+/// A stored entry paired with its opaque revision.
+///
+/// This is private to the memory backend; the revision lives alongside the
+/// managed entry so that conditional operations can observe and mutate both in
+/// a single DashMap entry operation.
+#[derive(Debug, Clone)]
+pub(crate) struct RevisionedEntry {
+    pub entry: ManagedEntry,
+    pub revision: Revision,
+}
+
+impl RevisionedEntry {
+    pub(crate) fn snapshot(&self) -> RevisionedEntrySnapshot {
+        RevisionedEntrySnapshot {
+            value: self.entry.value.clone(),
+            revision: self.revision,
+            ttl: self.entry.ttl(),
+        }
+    }
+}
+
+/// An immutable atomic snapshot used to build protocol result types.
+pub(crate) struct RevisionedEntrySnapshot {
+    pub value: crate::value::Value,
+    pub revision: Revision,
+    pub ttl: Option<f64>,
+}
+
+pub(crate) type MemoryCollections = DashMap<String, DashMap<String, RevisionedEntry>>;
 
 pub(crate) const CHANGE_RETENTION: usize = 10_000;
+
+/// Generate a fresh opaque revision from OS randomness.
+///
+/// Must be called before mutation so that a randomness failure cannot leave a
+/// partial write behind.
+pub(crate) fn fresh_revision() -> Result<Revision> {
+    let mut bytes = [0u8; Revision::BYTE_LEN];
+    getrandom::fill(&mut bytes).map_err(|err| Error::RevisionGeneration(err.to_string()))?;
+    Ok(Revision::from_bytes(bytes))
+}
 
 struct MemoryChangeState {
     revision: u64,
@@ -54,7 +92,6 @@ pub struct MemoryClient {
     setup_complete: RwLock<bool>,
     mutation_lock: Mutex<()>,
     changes: Mutex<MemoryChangeState>,
-    revisions: DashMap<String, Revision>,
 }
 
 impl Default for MemoryClient {
@@ -70,7 +107,6 @@ impl MemoryClient {
             collections: MemoryCollections::new(),
             setup_complete: RwLock::new(false),
             mutation_lock: Mutex::new(()),
-            revisions: DashMap::new(),
             changes: Mutex::new(MemoryChangeState {
                 revision: 0,
                 entries: VecDeque::with_capacity(CHANGE_RETENTION),
@@ -87,10 +123,6 @@ impl MemoryClient {
         &self.setup_complete
     }
 
-    pub(crate) fn revisions(&self) -> &DashMap<String, Revision> {
-        &self.revisions
-    }
-
     pub(crate) fn mutation_lock(&self) -> &Mutex<()> {
         &self.mutation_lock
     }
@@ -100,7 +132,7 @@ impl MemoryClient {
         collection: &str,
         key: &str,
         operation: ChangeOperation,
-    ) -> Revision {
+    ) {
         let mut state = self.changes.lock().await;
         state.revision += 1;
         let change = StoreChange {
@@ -116,10 +148,7 @@ impl MemoryClient {
             state.entries.pop_front();
         }
         state.entries.push_back(change.clone());
-        let revision =
-            Revision::from_bytes(state.revision.to_be_bytes().repeat(2).try_into().unwrap());
         let _ = state.sender.send(change);
-        revision
     }
 
     pub(crate) async fn subscribe(
