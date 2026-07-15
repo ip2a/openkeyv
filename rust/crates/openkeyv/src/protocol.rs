@@ -3,6 +3,51 @@ use crate::error::Result;
 use crate::value::Value;
 use async_trait::async_trait;
 
+/// Opaque revision token returned by stores with atomic conditional-write support.
+///
+/// Revisions may be compared for equality, but their bytes do not carry ordering,
+/// timestamp, or application-version semantics.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Revision([u8; Self::BYTE_LEN]);
+
+impl Revision {
+    pub const BYTE_LEN: usize = 16;
+
+    pub const fn from_bytes(bytes: [u8; Self::BYTE_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; Self::BYTE_LEN] {
+        &self.0
+    }
+
+    pub const fn into_bytes(self) -> [u8; Self::BYTE_LEN] {
+        self.0
+    }
+}
+
+/// Value and revision observed from the same atomic store entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevisionedValue {
+    pub value: Value,
+    pub revision: Revision,
+    pub ttl: Option<f64>,
+}
+
+/// Result of an atomic conditional write.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompareAndSwapResult {
+    Applied { revision: Revision },
+    Conflict { current: Option<RevisionedValue> },
+}
+
+/// Result of an atomic conditional delete.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompareAndDeleteResult {
+    Deleted,
+    Conflict { current: Option<RevisionedValue> },
+}
+
 /// Core async key-value protocol.
 ///
 /// All store implementations and wrappers must implement this trait.
@@ -63,6 +108,40 @@ pub trait AsyncKeyValue: Send + Sync {
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize>;
 }
 
+/// Optional protocol for stores with genuinely atomic conditional writes.
+///
+/// `expected = None` means create-if-absent. Implementations must not emulate
+/// this capability with a non-atomic read followed by a write.
+#[async_trait]
+pub trait AsyncCompareAndSwap: Send + Sync {
+    /// Atomically retrieve a live value and its opaque revision.
+    async fn get_with_revision(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<RevisionedValue>>;
+
+    /// Store a value only when the expected revision matches.
+    ///
+    /// A missing expected revision creates only when the key is absent or expired.
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected: Option<&Revision>,
+        value: Value,
+        collection: Option<&str>,
+        ttl: Option<f64>,
+    ) -> Result<CompareAndSwapResult>;
+
+    /// Delete a value only when the expected revision matches.
+    async fn compare_and_delete(
+        &self,
+        key: &str,
+        expected: &Revision,
+        collection: Option<&str>,
+    ) -> Result<CompareAndDeleteResult>;
+}
+
 /// Protocol for stores that support culling (removing expired entries).
 #[async_trait]
 pub trait AsyncCull: Send + Sync {
@@ -97,4 +176,76 @@ pub trait AsyncDestroyCollection: Send + Sync {
 #[async_trait]
 pub trait AsyncChangeFeed: Send + Sync {
     async fn subscribe(&self, request: ChangeFeedRequest) -> Result<ChangeSubscription>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn revision_has_fixed_opaque_bytes() {
+        let bytes = [0xA5; Revision::BYTE_LEN];
+        let revision = Revision::from_bytes(bytes);
+
+        assert_eq!(revision.as_bytes(), &bytes);
+        assert_eq!(revision.into_bytes(), bytes);
+        assert_eq!(HashSet::from([revision]).len(), 1);
+    }
+
+    #[test]
+    fn conditional_results_preserve_revisions_and_current_values() {
+        let revision = Revision::from_bytes([1; Revision::BYTE_LEN]);
+        let current = RevisionedValue {
+            value: Value::utf8("current"),
+            revision,
+            ttl: Some(5.0),
+        };
+
+        match (CompareAndSwapResult::Applied { revision }, revision) {
+            (CompareAndSwapResult::Applied { revision: actual }, expected) => {
+                assert_eq!(actual, expected)
+            }
+            (result, _) => panic!("unexpected CAS result: {result:?}"),
+        }
+
+        let conflict = CompareAndSwapResult::Conflict {
+            current: Some(current.clone()),
+        };
+        match conflict {
+            CompareAndSwapResult::Conflict {
+                current: Some(actual),
+            } => {
+                assert_eq!(actual.value, current.value);
+                assert_eq!(actual.revision, current.revision);
+                assert_eq!(actual.ttl, current.ttl);
+            }
+            result => panic!("unexpected CAS result: {result:?}"),
+        }
+
+        match (CompareAndDeleteResult::Conflict {
+            current: Some(current.clone()),
+        }) {
+            CompareAndDeleteResult::Conflict {
+                current: Some(actual),
+            } => {
+                assert_eq!(actual.value, current.value);
+                assert_eq!(actual.revision, current.revision);
+                assert_eq!(actual.ttl, current.ttl);
+            }
+            result => panic!("unexpected conditional-delete result: {result:?}"),
+        }
+
+        assert!(matches!(
+            CompareAndDeleteResult::Deleted,
+            CompareAndDeleteResult::Deleted
+        ));
+    }
+
+    #[test]
+    fn compare_and_swap_trait_is_object_safe() {
+        fn accept(_: Option<&dyn AsyncCompareAndSwap>) {}
+
+        accept(None);
+    }
 }

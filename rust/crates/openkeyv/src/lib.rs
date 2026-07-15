@@ -52,7 +52,8 @@ pub use change::{
 pub use entry::ManagedEntry;
 pub use error::{Error, Result};
 pub use protocol::{
-    AsyncChangeFeed, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
-    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
+    CompareAndSwapResult, Revision, RevisionedValue,
 };
 pub use value::{StructuredValue, Value, ValueKind};
