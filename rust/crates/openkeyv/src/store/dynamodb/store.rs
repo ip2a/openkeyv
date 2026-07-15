@@ -2094,57 +2094,29 @@ mod tests {
         let invalid_items = [
             (
                 "old-json",
-                HashMap::from([
-                    (
-                        COLLECTION_ATTR.to_string(),
-                        AttributeValue::S("invalid".to_string()),
-                    ),
-                    (
-                        KEY_ATTR.to_string(),
-                        AttributeValue::S("old-json".to_string()),
-                    ),
-                    (
-                        "value".to_string(),
-                        AttributeValue::S(r#"{"value":null}"#.to_string()),
-                    ),
-                ]),
+                HashMap::from([(
+                    "value".to_string(),
+                    AttributeValue::S(r#"{"value":null}"#.to_string()),
+                )]),
             ),
             (
                 "wrong-entry-type",
-                HashMap::from([
-                    (
-                        COLLECTION_ATTR.to_string(),
-                        AttributeValue::S("invalid".to_string()),
-                    ),
-                    (
-                        KEY_ATTR.to_string(),
-                        AttributeValue::S("wrong-entry-type".to_string()),
-                    ),
-                    (
-                        ENTRY_ATTR.to_string(),
-                        AttributeValue::S("not-binary".to_string()),
-                    ),
-                ]),
+                HashMap::from([(
+                    ENTRY_ATTR.to_string(),
+                    AttributeValue::S("not-binary".to_string()),
+                )]),
             ),
             (
                 "corrupt-entry",
-                HashMap::from([
-                    (
-                        COLLECTION_ATTR.to_string(),
-                        AttributeValue::S("invalid".to_string()),
-                    ),
-                    (
-                        KEY_ATTR.to_string(),
-                        AttributeValue::S("corrupt-entry".to_string()),
-                    ),
-                    (
-                        ENTRY_ATTR.to_string(),
-                        AttributeValue::B(Blob::new(br#"{"value":null}"#.to_vec())),
-                    ),
-                ]),
+                HashMap::from([(
+                    ENTRY_ATTR.to_string(),
+                    AttributeValue::B(Blob::new(br#"{"value":null}"#.to_vec())),
+                )]),
             ),
         ];
-        for (key, item) in invalid_items {
+        for (key, attributes) in invalid_items {
+            let mut item = DynamoDBStore::primary_key("invalid", key);
+            item.extend(attributes);
             client
                 .put_item()
                 .table_name(&table_name)
@@ -2156,38 +2128,36 @@ mod tests {
             assert!(matches!(error, Error::Deserialization(_)), "{key}: {error}");
         }
 
+        assert!(store.destroy_collection("invalid").await.unwrap());
+        assert!(!store.destroy_collection("invalid").await.unwrap());
+
+        let legacy_item = HashMap::from([
+            (
+                COLLECTION_ATTR.to_string(),
+                AttributeValue::S("legacy".to_string()),
+            ),
+            (
+                KEY_ATTR.to_string(),
+                AttributeValue::S("raw-key".to_string()),
+            ),
+            (
+                ENTRY_ATTR.to_string(),
+                AttributeValue::B(Blob::new(ManagedEntry::new(Value::utf8("legacy")).encode())),
+            ),
+        ]);
         client
             .put_item()
             .table_name(&table_name)
-            .set_item(Some(HashMap::from([
-                (
-                    COLLECTION_ATTR.to_string(),
-                    AttributeValue::S("corrupt-collection".to_string()),
-                ),
-                (
-                    KEY_ATTR.to_string(),
-                    AttributeValue::S("corrupt".to_string()),
-                ),
-                (
-                    ENTRY_ATTR.to_string(),
-                    AttributeValue::B(Blob::new(br#"{"value":null}"#.to_vec())),
-                ),
-            ])))
+            .set_item(Some(legacy_item))
             .send()
             .await
             .unwrap();
-        assert!(
-            store
-                .destroy_collection("corrupt-collection")
-                .await
-                .unwrap()
-        );
-        assert!(
-            !store
-                .destroy_collection("corrupt-collection")
-                .await
-                .unwrap()
-        );
+        assert_eq!(store.get("raw-key", Some("legacy")).await.unwrap(), None);
+        assert!(matches!(
+            store.collections(None).await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert!(!store.destroy_collection("legacy").await.unwrap());
         assert!(store.destroy().await.unwrap());
     }
 
