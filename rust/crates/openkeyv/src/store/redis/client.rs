@@ -1,14 +1,39 @@
+use crate::error::{Error, Result};
+use redis::aio::MultiplexedConnection;
+
 #[derive(Clone)]
 pub struct RedisClient {
-    conn: redis::aio::MultiplexedConnection,
+    conn: MultiplexedConnection,
+    client: Option<redis::Client>,
 }
 
 impl RedisClient {
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
-        Self { conn }
+    pub fn new(conn: MultiplexedConnection) -> Self {
+        Self { conn, client: None }
     }
 
-    pub(crate) fn connection(&self) -> redis::aio::MultiplexedConnection {
+    pub(crate) fn with_client(conn: MultiplexedConnection, client: redis::Client) -> Self {
+        Self {
+            conn,
+            client: Some(client),
+        }
+    }
+
+    pub(crate) fn connection(&self) -> MultiplexedConnection {
         self.conn.clone()
+    }
+
+    pub(crate) async fn subscription_connection(&self) -> Result<MultiplexedConnection> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            Error::InvalidOperation(
+                "Redis ChangeFeed requires RedisStore::new or RedisStore::from_client".to_string(),
+            )
+        })?;
+        client
+            .get_multiplexed_tokio_connection()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: error.to_string(),
+            })
     }
 }

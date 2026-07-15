@@ -1,18 +1,196 @@
 use super::client::RedisClient;
 use super::config::RedisConfig;
 use super::error::{Error, Result, map_redis_err};
+use crate::change::{
+    ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream,
+    ChangeSubscription, StoreChange,
+};
 use crate::entry::ManagedEntry;
 use crate::protocol::{
-    AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
-    AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncChangeFeed, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
 };
 use crate::utils::compound::{collection_prefix, compound_key, decompound_key};
 use crate::value::Value;
 use async_trait::async_trait;
 use bytes::Bytes;
-use redis::AsyncCommands;
+use redis::streams::{StreamId, StreamRangeReply, StreamReadOptions, StreamReadReply};
+use redis::{AsyncCommands, Script};
 
 const SCAN_COUNT: usize = 1_000;
+const CHANGE_RETENTION: usize = 10_000;
+const CHANGE_STREAM_KEY: &str = "__openkeyv_changefeed_stream";
+const CHANGE_REVISION_KEY: &str = "__openkeyv_changefeed_revision";
+
+const PUT_CHANGE_SCRIPT: &str = r#"
+local revision = redis.call('INCR', KEYS[2])
+local id = tostring(revision) .. '-0'
+if ARGV[2] == '0' then
+    redis.call('SET', KEYS[1], ARGV[1])
+else
+    redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[1])
+end
+redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[6], id,
+    'revision', tostring(revision),
+    'collection', ARGV[3],
+    'key', ARGV[4],
+    'operation', 'put',
+    'occurred_at', ARGV[5])
+return id
+"#;
+
+const DELETE_CHANGE_SCRIPT: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return false
+end
+redis.call('DEL', KEYS[1])
+local revision = redis.call('INCR', KEYS[2])
+local id = tostring(revision) .. '-0'
+redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[3], id,
+    'revision', tostring(revision),
+    'collection', ARGV[1],
+    'key', ARGV[2],
+    'operation', 'delete',
+    'occurred_at', ARGV[4])
+return id
+"#;
+
+fn is_internal_key(key: &str) -> bool {
+    key == CHANGE_STREAM_KEY || key == CHANGE_REVISION_KEY
+}
+
+fn cursor_revision(cursor: &str) -> Result<u64> {
+    let (revision, sequence) = cursor
+        .split_once('-')
+        .ok_or_else(|| crate::error::Error::InvalidChangeCursor(cursor.to_string()))?;
+    if sequence != "0" {
+        return Err(crate::error::Error::InvalidChangeCursor(cursor.to_string()));
+    }
+    revision
+        .parse::<u64>()
+        .map_err(|_| crate::error::Error::InvalidChangeCursor(cursor.to_string()))
+}
+
+fn stream_change(entry: &StreamId) -> Result<StoreChange> {
+    let revision = entry
+        .get::<u64>("revision")
+        .ok_or(crate::error::Error::CorruptedData)?;
+    let collection = entry
+        .get::<String>("collection")
+        .ok_or(crate::error::Error::CorruptedData)?;
+    let key = entry
+        .get::<String>("key")
+        .ok_or(crate::error::Error::CorruptedData)?;
+    let operation = match entry.get::<String>("operation").as_deref() {
+        Some("put") => ChangeOperation::Put,
+        Some("delete") => ChangeOperation::Delete,
+        _ => return Err(crate::error::Error::CorruptedData),
+    };
+    let occurred_at = entry
+        .get::<String>("occurred_at")
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .ok_or(crate::error::Error::CorruptedData)?;
+
+    Ok(StoreChange {
+        cursor: crate::change::ChangeCursor::new(entry.id.clone()),
+        revision,
+        collection,
+        key,
+        operation,
+        occurred_at,
+    })
+}
+
+struct RedisChangeStream {
+    connection: redis::aio::MultiplexedConnection,
+    cursor: String,
+    last_revision: Option<u64>,
+    filter: ChangeFilter,
+}
+
+#[async_trait]
+impl ChangeStream for RedisChangeStream {
+    async fn recv(&mut self) -> Result<Option<StoreChange>> {
+        loop {
+            let options = StreamReadOptions::default().count(128).block(1_000);
+            let reply: StreamReadReply = self
+                .connection
+                .xread_options(&[CHANGE_STREAM_KEY], &[self.cursor.as_str()], &options)
+                .await
+                .map_err(map_redis_err)?;
+
+            for stream in reply.keys {
+                for entry in stream.ids {
+                    let previous_cursor = self.cursor.clone();
+                    let change = stream_change(&entry)?;
+                    if let Some(last_revision) = self.last_revision {
+                        if change.revision > last_revision.saturating_add(1) {
+                            return Err(crate::error::Error::ChangeCursorExpired {
+                                requested: previous_cursor,
+                                oldest: entry.id.clone(),
+                            });
+                        }
+                    }
+                    self.cursor = entry.id.clone();
+                    self.last_revision = Some(change.revision);
+                    if self.filter.matches(&change) {
+                        return Ok(Some(change));
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn latest_cursor(connection: &mut redis::aio::MultiplexedConnection) -> Result<String> {
+    let reply: StreamRangeReply = connection
+        .xrevrange_count(CHANGE_STREAM_KEY, "+", "-", 1)
+        .await
+        .map_err(map_redis_err)?;
+    Ok(reply
+        .ids
+        .first()
+        .map(|entry| entry.id.clone())
+        .unwrap_or_else(|| "0-0".to_string()))
+}
+
+async fn validate_after_cursor(
+    connection: &mut redis::aio::MultiplexedConnection,
+    cursor: &str,
+) -> Result<()> {
+    let requested = cursor_revision(cursor)?;
+    let last: StreamRangeReply = connection
+        .xrevrange_count(CHANGE_STREAM_KEY, "+", "-", 1)
+        .await
+        .map_err(map_redis_err)?;
+    let Some(last_entry) = last.ids.first() else {
+        return if requested == 0 {
+            Ok(())
+        } else {
+            Err(crate::error::Error::InvalidChangeCursor(cursor.to_string()))
+        };
+    };
+    let last_revision = cursor_revision(&last_entry.id)?;
+    if requested > last_revision {
+        return Err(crate::error::Error::InvalidChangeCursor(cursor.to_string()));
+    }
+
+    let first: StreamRangeReply = connection
+        .xrange_count(CHANGE_STREAM_KEY, "-", "+", 1)
+        .await
+        .map_err(map_redis_err)?;
+    if let Some(first_entry) = first.ids.first() {
+        let first_revision = cursor_revision(&first_entry.id)?;
+        if first_revision > requested.saturating_add(1) {
+            return Err(crate::error::Error::ChangeCursorExpired {
+                requested: cursor.to_string(),
+                oldest: first_entry.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
 
 fn collection_scan_pattern(collection: &str) -> String {
     let prefix = collection_prefix(collection);
@@ -43,7 +221,10 @@ impl RedisStore {
             .get_multiplexed_tokio_connection()
             .await
             .map_err(map_redis_err)?;
-        Ok(Self::with_config(conn, RedisConfig::default()))
+        Ok(Self {
+            client: RedisClient::with_client(conn, client),
+            config: RedisConfig::default(),
+        })
     }
 
     pub async fn from_client(client: redis::Client) -> Result<Self> {
@@ -51,7 +232,10 @@ impl RedisStore {
             .get_multiplexed_tokio_connection()
             .await
             .map_err(map_redis_err)?;
-        Ok(Self::with_config(conn, RedisConfig::default()))
+        Ok(Self {
+            client: RedisClient::with_client(conn, client),
+            config: RedisConfig::default(),
+        })
     }
 
     pub fn with_config(conn: redis::aio::MultiplexedConnection, config: RedisConfig) -> Self {
@@ -67,6 +251,34 @@ impl RedisStore {
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
         collection.unwrap_or(&self.config.default_collection)
+    }
+}
+
+#[async_trait]
+impl AsyncChangeFeed for RedisStore {
+    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<ChangeSubscription> {
+        let mut connection = self.client.subscription_connection().await?;
+        let start = request.start;
+        let filter = request.filter;
+        let cursor = match &start {
+            ChangeStart::Beginning => "0-0".to_string(),
+            ChangeStart::Latest => latest_cursor(&mut connection).await?,
+            ChangeStart::After(cursor) => {
+                validate_after_cursor(&mut connection, cursor.as_str()).await?;
+                cursor.to_string()
+            }
+        };
+        let last_revision = match &start {
+            ChangeStart::Beginning => None,
+            ChangeStart::Latest => Some(cursor_revision(&cursor)?),
+            ChangeStart::After(cursor) => Some(cursor_revision(cursor.as_str())?),
+        };
+        Ok(ChangeSubscription::new(RedisChangeStream {
+            connection,
+            cursor,
+            last_revision,
+            filter,
+        }))
     }
 }
 
@@ -126,28 +338,44 @@ impl AsyncKeyValue for RedisStore {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
+        let milliseconds = ttl
+            .map(|seconds| ((seconds * 1000.0).ceil() as u64).to_string())
+            .unwrap_or_else(|| "0".to_string());
+        let occurred_at = chrono::Utc::now().timestamp_millis().to_string();
         let mut conn = self.connection();
-        match ttl {
-            Some(seconds) => {
-                let milliseconds = (seconds * 1000.0) as u64;
-                let _: () = conn
-                    .pset_ex(ck, entry.encode(), milliseconds)
-                    .await
-                    .map_err(map_redis_err)?;
-            }
-            None => {
-                let _: () = conn.set(ck, entry.encode()).await.map_err(map_redis_err)?;
-            }
-        }
+        let _: String = Script::new(PUT_CHANGE_SCRIPT)
+            .key(ck)
+            .key(CHANGE_REVISION_KEY)
+            .key(CHANGE_STREAM_KEY)
+            .arg(entry.encode())
+            .arg(milliseconds)
+            .arg(cname)
+            .arg(key)
+            .arg(occurred_at)
+            .arg(CHANGE_RETENTION)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(map_redis_err)?;
         Ok(())
     }
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
         let ck = compound_key(cname, key);
+        let occurred_at = chrono::Utc::now().timestamp_millis().to_string();
         let mut conn = self.connection();
-        let res: i64 = conn.del(&ck).await.map_err(map_redis_err)?;
-        Ok(res > 0)
+        let result: Option<String> = Script::new(DELETE_CHANGE_SCRIPT)
+            .key(ck)
+            .key(CHANGE_REVISION_KEY)
+            .key(CHANGE_STREAM_KEY)
+            .arg(cname)
+            .arg(key)
+            .arg(CHANGE_RETENTION)
+            .arg(occurred_at)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(map_redis_err)?;
+        Ok(result.is_some())
     }
 
     async fn get_many(
@@ -216,33 +444,21 @@ impl AsyncKeyValue for RedisStore {
             ManagedEntry::validate_ttl(seconds)?;
         }
         let cname = self.collection_name(collection);
-        let mut conn = self.connection();
-        let mut pipe = redis::pipe();
-
-        if let Some(seconds) = ttl {
-            let milliseconds = (seconds * 1000.0) as u64;
-            for (key, value) in keys.iter().zip(values.iter()) {
-                let ck = compound_key(cname, key);
-                let entry = ManagedEntry::with_ttl(value.clone(), seconds)?;
-                pipe.pset_ex(ck, entry.encode(), milliseconds).ignore();
-            }
-        } else {
-            for (key, value) in keys.iter().zip(values.iter()) {
-                let ck = compound_key(cname, key);
-                let entry = ManagedEntry::new(value.clone());
-                pipe.set(ck, entry.encode()).ignore();
-            }
+        for (key, value) in keys.iter().zip(values.iter()) {
+            self.put(key, value.clone(), Some(cname), ttl).await?;
         }
-        let _: () = pipe.query_async(&mut conn).await.map_err(map_redis_err)?;
         Ok(())
     }
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
         let cname = self.collection_name(collection);
-        let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
-        let mut conn = self.connection();
-        let res: i64 = conn.del(&cks).await.map_err(map_redis_err)?;
-        Ok(res as usize)
+        let mut count = 0;
+        for key in keys {
+            if self.delete(key, Some(cname)).await? {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -324,6 +540,9 @@ impl AsyncEnumerateCollections for RedisStore {
                 .map_err(map_redis_err)?;
 
             for identity in keys {
+                if is_internal_key(&identity) {
+                    continue;
+                }
                 let (collection, _) = decompound_key(&identity)?;
                 collections.insert(collection.to_string());
                 if collections.len() == limit {
@@ -400,6 +619,105 @@ mod tests {
     #[test]
     fn scan_pattern_escapes_collection_glob_characters() {
         assert_eq!(collection_scan_pattern("*?[\\]"), r"5:\*\?\[\\\]*");
+    }
+
+    #[test]
+    fn redis_change_cursors_require_stream_ids_with_zero_sequence() {
+        assert_eq!(cursor_revision("42-0").unwrap(), 42);
+        assert!(matches!(
+            cursor_revision("42"),
+            Err(Error::InvalidChangeCursor(_))
+        ));
+        assert!(matches!(
+            cursor_revision("42-1"),
+            Err(Error::InvalidChangeCursor(_))
+        ));
+        assert!(matches!(
+            cursor_revision("not-a-cursor"),
+            Err(Error::InvalidChangeCursor(_))
+        ));
+    }
+
+    #[test]
+    fn redis_changefeed_keys_are_not_collections() {
+        assert!(is_internal_key(CHANGE_STREAM_KEY));
+        assert!(is_internal_key(CHANGE_REVISION_KEY));
+        assert!(!is_internal_key("5:events:key"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_change_feed_delivers_and_resumes_across_instances() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let writer = RedisStore::new(&url).await.unwrap();
+        let reader = RedisStore::new(&url).await.unwrap();
+        let collection = format!(
+            "openkeyv_changefeed_test_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+
+        let mut live = reader
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Latest,
+                filter: ChangeFilter::collection(&collection),
+            })
+            .await
+            .unwrap();
+
+        writer
+            .put("event-1", Value::integer(1), Some(&collection), None)
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), live.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.collection, collection);
+        assert_eq!(first.key, "event-1");
+        assert_eq!(first.operation, ChangeOperation::Put);
+        assert_eq!(
+            reader.get("event-1", Some(&collection)).await.unwrap(),
+            Some(Value::integer(1))
+        );
+
+        writer
+            .put("event-2", Value::integer(2), Some(&collection), None)
+            .await
+            .unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), live.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.key, "event-2");
+        assert!(second.revision > first.revision);
+
+        let mut resumed = reader
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::After(first.cursor),
+                filter: ChangeFilter::collection(&collection),
+            })
+            .await
+            .unwrap();
+        let replayed = tokio::time::timeout(std::time::Duration::from_secs(2), resumed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(replayed.cursor, second.cursor);
+
+        assert!(writer.delete("event-2", Some(&collection)).await.unwrap());
+        let deleted = tokio::time::timeout(std::time::Duration::from_secs(2), resumed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted.key, "event-2");
+        assert_eq!(deleted.operation, ChangeOperation::Delete);
+
+        assert!(writer.destroy_collection(&collection).await.unwrap());
     }
 
     #[tokio::test]
