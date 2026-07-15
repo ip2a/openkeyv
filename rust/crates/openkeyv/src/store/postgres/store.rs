@@ -55,8 +55,19 @@ impl PostgresStore {
         }
     }
 
-    fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
-        collection.unwrap_or(&self.config.default_collection)
+    fn validate_text_identity(kind: &str, identity: &str) -> Result<()> {
+        if identity.contains('\0') {
+            return Err(Error::InvalidKey(format!(
+                "Postgres {kind} cannot contain NUL"
+            )));
+        }
+        Ok(())
+    }
+
+    fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> Result<&'a str> {
+        let collection = collection.unwrap_or(&self.config.default_collection);
+        Self::validate_text_identity("collection", collection)?;
+        Ok(collection)
     }
 
     fn pool(&self) -> &sqlx::PgPool {
@@ -379,7 +390,8 @@ impl PostgresStore {
 #[async_trait]
 impl AsyncKeyValue for PostgresStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
-        let collection = self.collection_name(collection);
+        let collection = self.collection_name(collection)?;
+        Self::validate_text_identity("key", key)?;
         let row = sqlx::query(&format!(
             "SELECT entry, expires_at FROM {} WHERE collection = $1 AND key = $2",
             self.config.table_name
@@ -429,7 +441,8 @@ impl AsyncKeyValue for PostgresStore {
         key: &str,
         collection: Option<&str>,
     ) -> Result<Option<(Value, Option<f64>)>> {
-        let collection = self.collection_name(collection);
+        let collection = self.collection_name(collection)?;
+        Self::validate_text_identity("key", key)?;
         let row = sqlx::query(&format!(
             "SELECT entry, expires_at FROM {} WHERE collection = $1 AND key = $2",
             self.config.table_name
@@ -482,7 +495,8 @@ impl AsyncKeyValue for PostgresStore {
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
-        let collection = self.collection_name(collection);
+        let collection = self.collection_name(collection)?;
+        Self::validate_text_identity("key", key)?;
         let entry = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
@@ -507,7 +521,8 @@ impl AsyncKeyValue for PostgresStore {
     }
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
-        let collection = self.collection_name(collection);
+        let collection = self.collection_name(collection)?;
+        Self::validate_text_identity("key", key)?;
         let result = sqlx::query(&format!(
             "DELETE FROM {} WHERE collection = $1 AND key = $2",
             self.config.table_name
@@ -527,11 +542,14 @@ impl AsyncKeyValue for PostgresStore {
         keys: &[String],
         collection: Option<&str>,
     ) -> Result<Vec<Option<Value>>> {
+        let collection = self.collection_name(collection)?;
+        for key in keys {
+            Self::validate_text_identity("key", key)?;
+        }
         if keys.is_empty() {
             return Ok(Vec::new());
         }
 
-        let collection = self.collection_name(collection);
         let requested = keys.iter().map(String::as_str).collect::<HashSet<_>>();
         let rows = sqlx::query(&format!(
             "SELECT key, entry, expires_at FROM {} \
@@ -623,11 +641,14 @@ impl AsyncKeyValue for PostgresStore {
         keys: &[String],
         collection: Option<&str>,
     ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
+        let collection = self.collection_name(collection)?;
+        for key in keys {
+            Self::validate_text_identity("key", key)?;
+        }
         if keys.is_empty() {
             return Ok(Vec::new());
         }
 
-        let collection = self.collection_name(collection);
         let requested = keys.iter().map(String::as_str).collect::<HashSet<_>>();
         let rows = sqlx::query(&format!(
             "SELECT key, entry, expires_at FROM {} \
@@ -731,11 +752,14 @@ impl AsyncKeyValue for PostgresStore {
         if let Some(seconds) = ttl {
             ManagedEntry::validate_ttl(seconds)?;
         }
+        let collection = self.collection_name(collection)?;
+        for key in keys {
+            Self::validate_text_identity("key", key)?;
+        }
         if keys.is_empty() {
             return Ok(());
         }
 
-        let collection = self.collection_name(collection);
         let mut last_indices = HashMap::with_capacity(keys.len());
         for (index, key) in keys.iter().enumerate() {
             last_indices.insert(key.as_str(), index);
@@ -778,10 +802,13 @@ impl AsyncKeyValue for PostgresStore {
     }
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
+        let collection = self.collection_name(collection)?;
+        for key in keys {
+            Self::validate_text_identity("key", key)?;
+        }
         if keys.is_empty() {
             return Ok(0);
         }
-        let collection = self.collection_name(collection);
         let result = sqlx::query(&format!(
             "DELETE FROM {} WHERE collection = $1 AND key = ANY($2)",
             self.config.table_name
@@ -883,11 +910,11 @@ impl AsyncCull for PostgresStore {
 impl AsyncEnumerateKeys for PostgresStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
+        let collection = self.collection_name(collection)?;
         if limit == 0 {
             return Ok(Vec::new());
         }
 
-        let collection = self.collection_name(collection);
         let rows = sqlx::query(&format!(
             "SELECT key, entry, expires_at FROM {} \
              WHERE collection = $1 \
@@ -983,6 +1010,7 @@ impl AsyncEnumerateCollections for PostgresStore {
 #[async_trait]
 impl AsyncDestroyCollection for PostgresStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
+        Self::validate_text_identity("collection", collection)?;
         let result = sqlx::query(&format!(
             "DELETE FROM {} WHERE collection = $1",
             self.config.table_name
@@ -1075,6 +1103,121 @@ mod tests {
             std::process::id(),
             NEXT_TABLE.fetch_add(1, Ordering::Relaxed)
         )
+    }
+
+    fn offline_store() -> PostgresStore {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://127.0.0.1:1/openkeyv")
+            .unwrap();
+        PostgresStore::with_config(pool, PostgresConfig::new(None).unwrap())
+    }
+
+    #[test]
+    fn postgres_text_identity_rejects_nul_only() {
+        assert!(PostgresStore::validate_text_identity("key", "line\n值").is_ok());
+        assert!(matches!(
+            PostgresStore::validate_text_identity("key", "bad\0key"),
+            Err(Error::InvalidKey(message)) if message == "Postgres key cannot contain NUL"
+        ));
+    }
+
+    fn assert_invalid_key<T>(result: Result<T>) {
+        assert!(matches!(result, Err(Error::InvalidKey(_))));
+    }
+
+    #[tokio::test]
+    async fn postgres_prevalidates_nul_before_service_access() {
+        let store = offline_store();
+
+        assert_invalid_key(store.get("bad\0key", Some("entries")).await);
+        assert_invalid_key(store.ttl("bad\0key", Some("entries")).await);
+        assert_invalid_key(
+            store
+                .put("bad\0key", Value::utf8("value"), Some("entries"), None)
+                .await,
+        );
+        assert_invalid_key(store.delete("bad\0key", Some("entries")).await);
+        assert_invalid_key(
+            store
+                .get_many(
+                    &["valid".to_string(), "bad\0key".to_string()],
+                    Some("entries"),
+                )
+                .await,
+        );
+        assert_invalid_key(
+            store
+                .ttl_many(
+                    &["valid".to_string(), "bad\0key".to_string()],
+                    Some("entries"),
+                )
+                .await,
+        );
+        assert_invalid_key(
+            store
+                .put_many(
+                    &["valid".to_string(), "bad\0key".to_string()],
+                    &[Value::utf8("first"), Value::utf8("second")],
+                    Some("entries"),
+                    None,
+                )
+                .await,
+        );
+        assert_invalid_key(
+            store
+                .delete_many(
+                    &["valid".to_string(), "bad\0key".to_string()],
+                    Some("entries"),
+                )
+                .await,
+        );
+        assert_invalid_key(store.keys(Some("entries\0"), Some(0)).await);
+        assert_invalid_key(store.destroy_collection("entries\0").await);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_batch_nul_validation_has_no_side_effects() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("nul");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+        store
+            .put("existing", Value::utf8("before"), Some("entries"), None)
+            .await
+            .unwrap();
+
+        let put_error = store
+            .put_many(
+                &["new".to_string(), "bad\0key".to_string()],
+                &[Value::utf8("new-value"), Value::utf8("invalid")],
+                Some("entries"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(put_error, Error::InvalidKey(_)));
+        assert_eq!(
+            store.get("existing", Some("entries")).await.unwrap(),
+            Some(Value::utf8("before"))
+        );
+        assert_eq!(store.get("new", Some("entries")).await.unwrap(), None);
+
+        let delete_error = store
+            .delete_many(
+                &["existing".to_string(), "bad\0key".to_string()],
+                Some("entries"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(delete_error, Error::InvalidKey(_)));
+        assert_eq!(
+            store.get("existing", Some("entries")).await.unwrap(),
+            Some(Value::utf8("before"))
+        );
+
+        assert!(store.destroy().await.unwrap());
     }
 
     #[tokio::test]
