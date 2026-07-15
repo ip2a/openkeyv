@@ -42,16 +42,6 @@ pub(crate) type MemoryCollections = DashMap<String, DashMap<String, RevisionedEn
 
 pub(crate) const CHANGE_RETENTION: usize = 10_000;
 
-/// Generate a fresh opaque revision from OS randomness.
-///
-/// Must be called before mutation so that a randomness failure cannot leave a
-/// partial write behind.
-pub(crate) fn fresh_revision() -> Result<Revision> {
-    let mut bytes = [0u8; Revision::BYTE_LEN];
-    getrandom::fill(&mut bytes).map_err(|err| Error::RevisionGeneration(err.to_string()))?;
-    Ok(Revision::from_bytes(bytes))
-}
-
 struct MemoryChangeState {
     revision: u64,
     entries: VecDeque<StoreChange>,

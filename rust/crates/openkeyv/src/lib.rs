@@ -33,6 +33,7 @@
 //! | Firestore | `firestore` | Google Firestore |
 //! | OpenSearch | `opensearch` | OpenSearch |
 
+mod cas;
 pub mod change;
 pub mod entry;
 pub mod error;

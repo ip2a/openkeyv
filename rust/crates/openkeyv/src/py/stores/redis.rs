@@ -1,6 +1,6 @@
 use crate::protocol::{
-    AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
-    AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
 };
 use crate::py::error::error_to_py;
 use crate::py::value::{optional_value_to_py, py_to_value};
@@ -33,10 +33,7 @@ impl PyRedisStore {
     #[new]
     #[pyo3(signature = (url))]
     fn new(url: String) -> PyResult<Self> {
-        let store = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?
+        let store = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async { crate::store::redis::RedisStore::new(&url).await })
             .map_err(error_to_py)?;
         Ok(Self {
@@ -291,6 +288,80 @@ impl PyRedisStore {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store.cull().await.map_err(error_to_py)?;
             with_gil(|py| Ok(py.None()))
+        })
+    }
+
+    #[pyo3(signature = (key, collection = None))]
+    fn get_with_revision<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        collection: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = store
+                .get_with_revision(&key, collection.as_deref())
+                .await
+                .map_err(error_to_py)?;
+            with_gil(|py| match result {
+                Some(rv) => Ok(crate::py::cas::PyRevisionedValue::from_rust(rv)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind()),
+                None => Ok(py.None()),
+            })
+        })
+    }
+
+    #[pyo3(signature = (key, expected, value, collection = None, ttl = None))]
+    fn compare_and_swap<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        expected: Option<PyRef<'py, crate::py::cas::PyRevision>>,
+        value: Bound<'py, PyAny>,
+        collection: Option<String>,
+        ttl: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.inner.clone();
+        let expected = expected.map(|rev| rev.inner);
+        let value = with_gil(|_py| py_to_value(&value))?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = store
+                .compare_and_swap(&key, expected.as_ref(), value, collection.as_deref(), ttl)
+                .await
+                .map_err(error_to_py)?;
+            with_gil(|py| {
+                Ok(crate::py::cas::PyCompareAndSwapResult::from_rust(result)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
+        })
+    }
+
+    #[pyo3(signature = (key, expected, collection = None))]
+    fn compare_and_delete<'py>(
+        &self,
+        py: Python<'py>,
+        key: String,
+        expected: PyRef<'py, crate::py::cas::PyRevision>,
+        collection: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.inner.clone();
+        let expected = expected.inner;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = store
+                .compare_and_delete(&key, &expected, collection.as_deref())
+                .await
+                .map_err(error_to_py)?;
+            with_gil(|py| {
+                Ok(crate::py::cas::PyCompareAndDeleteResult::from_rust(result)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            })
         })
     }
 }

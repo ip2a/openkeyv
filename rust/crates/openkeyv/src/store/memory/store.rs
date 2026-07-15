@@ -1,4 +1,4 @@
-use super::client::{MemoryClient, RevisionedEntry, RevisionedEntrySnapshot, fresh_revision};
+use super::client::{MemoryClient, RevisionedEntry, RevisionedEntrySnapshot};
 use super::config::{MemoryConfig, SeedData};
 use super::error::{Error, Result};
 use crate::change::{ChangeFeedRequest, ChangeOperation, ChangeSubscription};
@@ -63,7 +63,7 @@ impl MemoryStore {
                     .or_default();
                 for (key, value) in items {
                     let entry = ManagedEntry::new(value.clone());
-                    let revision = fresh_revision()?;
+                    let revision = Revision::fresh()?;
                     col.insert(key.clone(), RevisionedEntry { entry, revision });
                 }
             }
@@ -171,7 +171,7 @@ impl AsyncKeyValue for MemoryStore {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
-        let revision = fresh_revision()?;
+        let revision = Revision::fresh()?;
 
         let _mutation = self.client.mutation_lock().lock().await;
         if let Some(col) = self.client.collections().get_mut(cname) {
@@ -268,7 +268,7 @@ impl AsyncKeyValue for MemoryStore {
             })
             .collect::<Result<Vec<_>>>()?;
         let revisions = (0..entries.len())
-            .map(|_| fresh_revision())
+            .map(|_| Revision::fresh())
             .collect::<Result<Vec<_>>>()?;
 
         let _mutation = self.client.mutation_lock().lock().await;
@@ -347,7 +347,7 @@ impl AsyncCompareAndSwap for MemoryStore {
         };
         // Generate the new revision before taking any mutation lock so a
         // randomness failure cannot leave a partial write behind.
-        let new_revision = fresh_revision()?;
+        let new_revision = Revision::fresh()?;
 
         let _mutation = self.client.mutation_lock().lock().await;
         let col = self.get_collection(cname)?;

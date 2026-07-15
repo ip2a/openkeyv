@@ -24,6 +24,20 @@ impl Revision {
     pub const fn into_bytes(self) -> [u8; Self::BYTE_LEN] {
         self.0
     }
+
+    /// Generate a fresh opaque revision token from operating-system randomness.
+    ///
+    /// Per the CAS/revision ADR (section 5), every successful write candidate on a
+    /// CAS-capable store receives a fresh 16-byte token drawn from the OS random
+    /// source. This must be called before any backend mutation so that a
+    /// randomness failure cannot leave a partial write behind. The bytes carry no
+    /// ordering, timestamp, or business-version meaning.
+    pub fn fresh() -> Result<Revision> {
+        let mut bytes = [0u8; Self::BYTE_LEN];
+        getrandom::fill(&mut bytes)
+            .map_err(|err| crate::error::Error::RevisionGeneration(err.to_string()))?;
+        Ok(Revision(bytes))
+    }
 }
 
 /// Value and revision observed from the same atomic store entry.
