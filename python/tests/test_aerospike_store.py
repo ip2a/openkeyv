@@ -81,7 +81,7 @@ async def test_aerospike_public_roundtrip_uses_binary_entries_and_native_ttl() -
 
     await store.put("persistent", {"value": "kept"}, collection="items")
     persistent_call = client.put_calls[-1]
-    assert persistent_call[0] == ("test", "entries", "items::persistent")
+    assert persistent_call[0] == ("test", "entries", "5:itemspersistent")
     assert persistent_call[1]["value"].startswith(b"OKVE1")
     assert persistent_call[2] == {"ttl": aerospike.TTL_NEVER_EXPIRE}
     assert client.put_policies[-1] == {"key": aerospike.POLICY_KEY_SEND}

@@ -207,6 +207,27 @@ async def test_passthrough_cache_populates_clamps_and_invalidates_the_cache() ->
     assert await primary.get("key") == {"version": 2}
 
 
+def test_single_collection_wrapper_has_no_separator_configuration() -> None:
+    with pytest.raises(TypeError):
+        SingleCollectionWrapper(_memory_store(), single_collection="all", separator="__")  # type: ignore[call-arg]
+
+
+async def test_single_collection_wrapper_preserves_empty_and_collision_identities() -> None:
+    backing = MemoryStore()
+    store = SingleCollectionWrapper(cast("AsyncKeyValue", backing), single_collection="all")
+
+    await store.put("c", {"value": "left"}, collection="a:b")
+    await store.put("b:c", {"value": "right"}, collection="a")
+    await store.put("key", {"value": "empty"}, collection="")
+
+    assert await store.get("c", collection="a:b") == {"value": "left"}
+    assert await store.get("b:c", collection="a") == {"value": "right"}
+    assert await store.get("key", collection="") == {"value": "empty"}
+    assert await backing.get("3:a:bc", collection="all") == {"value": "left"}
+    assert await backing.get("1:ab:c", collection="all") == {"value": "right"}
+    assert await backing.get("0:key", collection="all") == {"value": "empty"}
+
+
 async def test_prefix_and_single_collection_wrappers_transform_backing_keys() -> None:
     collection_backing = MemoryStore()
     collection_store = PrefixCollectionsWrapper(cast("AsyncKeyValue", collection_backing), prefix="tenant")
@@ -221,7 +242,7 @@ async def test_prefix_and_single_collection_wrappers_transform_backing_keys() ->
     single_backing = MemoryStore()
     single_store = SingleCollectionWrapper(cast("AsyncKeyValue", single_backing), single_collection="all")
     await single_store.put("key", {"value": 1}, collection="users")
-    assert await single_backing.get("users__key", collection="all") == {"value": 1}
+    assert await single_backing.get("5:userskey", collection="all") == {"value": 1}
 
 
 async def test_read_only_wrapper_allows_reads_and_rejects_all_writes() -> None:
