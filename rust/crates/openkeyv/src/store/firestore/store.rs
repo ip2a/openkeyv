@@ -5,11 +5,63 @@ use crate::entry::ManagedEntry;
 use crate::protocol::AsyncKeyValue;
 use crate::value::Value;
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use firestore::errors::FirestoreError;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+
+const IDENTITY_PREFIX: &str = "okv1-";
+const MAX_IDENTIFIER_BYTES: usize = 1_500;
+const MAX_DOCUMENT_NAME_BYTES: usize = 6 * 1024;
+
+fn encode_identifier(value: &str, kind: &str) -> Result<String> {
+    let encoded = URL_SAFE_NO_PAD.encode(value.as_bytes());
+    let final_len = IDENTITY_PREFIX.len() + encoded.len();
+    if final_len > MAX_IDENTIFIER_BYTES {
+        return Err(Error::InvalidKey(format!(
+            "Firestore {kind} identity encodes to {final_len} bytes (max {MAX_IDENTIFIER_BYTES})"
+        )));
+    }
+    Ok(format!("{IDENTITY_PREFIX}{encoded}"))
+}
+
+fn validate_document_name(
+    documents_path: &str,
+    collection_id: &str,
+    document_id: &str,
+) -> Result<()> {
+    let final_len = documents_path.len() + collection_id.len() + document_id.len() + 2;
+    if final_len > MAX_DOCUMENT_NAME_BYTES {
+        return Err(Error::InvalidKey(format!(
+            "Firestore document name encodes to {final_len} bytes (max {MAX_DOCUMENT_NAME_BYTES})"
+        )));
+    }
+    Ok(())
+}
+
+fn encode_batch_identifiers(
+    documents_path: &str,
+    collection: &str,
+    keys: &[String],
+) -> Result<(String, Vec<String>, HashMap<String, String>)> {
+    let collection_id = encode_identifier(collection, "collection")?;
+    let mut seen = HashSet::with_capacity(keys.len());
+    let mut document_ids = Vec::with_capacity(keys.len());
+    let mut logical_by_document_id = HashMap::with_capacity(keys.len());
+
+    for key in keys {
+        if seen.insert(key.as_str()) {
+            let document_id = encode_identifier(key, "key")?;
+            validate_document_name(documents_path, &collection_id, &document_id)?;
+            logical_by_document_id.insert(document_id.clone(), key.clone());
+            document_ids.push(document_id);
+        }
+    }
+
+    Ok((collection_id, document_ids, logical_by_document_id))
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct FirestoreDoc {
@@ -62,13 +114,16 @@ impl FirestoreStore {
 impl AsyncKeyValue for FirestoreStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
+        let collection_id = encode_identifier(cname, "collection")?;
+        let document_id = encode_identifier(key, "key")?;
+        validate_document_name(self.db().get_documents_path(), &collection_id, &document_id)?;
         let doc: Option<FirestoreDoc> = self
             .db()
             .fluent()
             .select()
-            .by_id_in(cname)
+            .by_id_in(&collection_id)
             .obj()
-            .one(key)
+            .one(&document_id)
             .await
             .map_err(|e| match e {
                 FirestoreError::DeserializeError(_) => Error::Deserialization(format!(
@@ -91,8 +146,8 @@ impl AsyncKeyValue for FirestoreStore {
             self.db()
                 .fluent()
                 .delete()
-                .from(cname)
-                .document_id(key)
+                .from(&collection_id)
+                .document_id(&document_id)
                 .execute()
                 .await
                 .map_err(|e| Error::StoreConnection {
@@ -112,13 +167,16 @@ impl AsyncKeyValue for FirestoreStore {
         collection: Option<&str>,
     ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
+        let collection_id = encode_identifier(cname, "collection")?;
+        let document_id = encode_identifier(key, "key")?;
+        validate_document_name(self.db().get_documents_path(), &collection_id, &document_id)?;
         let doc: Option<FirestoreDoc> = self
             .db()
             .fluent()
             .select()
-            .by_id_in(cname)
+            .by_id_in(&collection_id)
             .obj()
-            .one(key)
+            .one(&document_id)
             .await
             .map_err(|e| match e {
                 FirestoreError::DeserializeError(_) => Error::Deserialization(format!(
@@ -141,8 +199,8 @@ impl AsyncKeyValue for FirestoreStore {
             self.db()
                 .fluent()
                 .delete()
-                .from(cname)
-                .document_id(key)
+                .from(&collection_id)
+                .document_id(&document_id)
                 .execute()
                 .await
                 .map_err(|e| Error::StoreConnection {
@@ -172,12 +230,15 @@ impl AsyncKeyValue for FirestoreStore {
         let doc = FirestoreDoc {
             entry: Bytes::from(entry.encode()),
         };
+        let collection_id = encode_identifier(cname, "collection")?;
+        let document_id = encode_identifier(key, "key")?;
+        validate_document_name(self.db().get_documents_path(), &collection_id, &document_id)?;
 
         self.db()
             .fluent()
             .update()
-            .in_col(cname)
-            .document_id(key)
+            .in_col(&collection_id)
+            .document_id(&document_id)
             .object(&doc)
             .execute::<FirestoreDoc>()
             .await
@@ -194,13 +255,16 @@ impl AsyncKeyValue for FirestoreStore {
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
+        let collection_id = encode_identifier(cname, "collection")?;
+        let document_id = encode_identifier(key, "key")?;
+        validate_document_name(self.db().get_documents_path(), &collection_id, &document_id)?;
         let exists: Option<FirestoreDoc> = self
             .db()
             .fluent()
             .select()
-            .by_id_in(cname)
+            .by_id_in(&collection_id)
             .obj()
-            .one(key)
+            .one(&document_id)
             .await
             .map_err(|e| match e {
                 FirestoreError::DeserializeError(_) => Error::Deserialization(format!(
@@ -217,8 +281,8 @@ impl AsyncKeyValue for FirestoreStore {
         self.db()
             .fluent()
             .delete()
-            .from(cname)
-            .document_id(key)
+            .from(&collection_id)
+            .document_id(&document_id)
             .execute()
             .await
             .map_err(|e| Error::StoreConnection {
@@ -237,28 +301,24 @@ impl AsyncKeyValue for FirestoreStore {
         }
 
         let cname = self.collection_name(collection);
-        let mut seen = HashSet::with_capacity(keys.len());
-        let mut unique_keys = Vec::with_capacity(keys.len());
-        for key in keys {
-            if seen.insert(key.as_str()) {
-                unique_keys.push(key.clone());
-            }
-        }
+        let (collection_id, document_ids, logical_by_document_id) =
+            encode_batch_identifiers(self.db().get_documents_path(), cname, keys)?;
 
         let mut stream = self
             .db()
             .fluent()
             .select()
-            .by_id_in(cname)
+            .by_id_in(&collection_id)
             .obj::<FirestoreDoc>()
-            .batch_with_errors(unique_keys.clone())
+            .batch_with_errors(document_ids.clone())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to start Firestore batch read in {cname}: {e}"),
             })?;
-        let mut entries = HashMap::with_capacity(unique_keys.len());
+        let mut entries = HashMap::with_capacity(document_ids.len());
+        let mut returned = HashSet::with_capacity(document_ids.len());
         let mut expired = Vec::new();
-        while let Some((key, doc)) = stream.try_next().await.map_err(|e| match e {
+        while let Some((document_id, doc)) = stream.try_next().await.map_err(|e| match e {
             FirestoreError::DeserializeError(_) => Error::Deserialization(format!(
                 "failed to decode a Firestore batch document in {cname}: {e}"
             )),
@@ -266,10 +326,17 @@ impl AsyncKeyValue for FirestoreStore {
                 message: format!("failed during Firestore batch read in {cname}: {e}"),
             },
         })? {
-            if entries.contains_key(&key) {
+            let logical_key = logical_by_document_id.get(&document_id).ok_or_else(|| {
+                Error::StoreConnection {
+                    message: format!(
+                        "Firestore batch read returned unknown document ID {document_id:?} in {cname}"
+                    ),
+                }
+            })?;
+            if !returned.insert(document_id.clone()) {
                 return Err(Error::StoreConnection {
                     message: format!(
-                        "Firestore batch read returned document {cname}/{key} more than once"
+                        "Firestore batch read returned document {cname}/{logical_key} more than once"
                     ),
                 });
             }
@@ -277,24 +344,25 @@ impl AsyncKeyValue for FirestoreStore {
                 .map(|doc| {
                     ManagedEntry::decode(doc.entry).map_err(|e| {
                         Error::Deserialization(format!(
-                            "failed to decode OpenKeyV entry in Firestore document {cname}/{key}: {e}"
+                            "failed to decode OpenKeyV entry in Firestore document {cname}/{logical_key}: {e}"
                         ))
                     })
                 })
                 .transpose()?;
             if entry.as_ref().is_some_and(ManagedEntry::is_expired) {
-                expired.push(key.clone());
-                entries.insert(key, None);
+                expired.push((logical_key.clone(), document_id));
+                entries.insert(logical_key.clone(), None);
             } else {
-                entries.insert(key, entry);
+                entries.insert(logical_key.clone(), entry);
             }
         }
 
-        for key in &unique_keys {
-            if !entries.contains_key(key) {
+        for document_id in &document_ids {
+            if !returned.contains(document_id) {
+                let logical_key = &logical_by_document_id[document_id];
                 return Err(Error::StoreConnection {
                     message: format!(
-                        "Firestore batch read returned no result for document {cname}/{key}"
+                        "Firestore batch read returned no result for document {cname}/{logical_key}"
                     ),
                 });
             }
@@ -309,14 +377,14 @@ impl AsyncKeyValue for FirestoreStore {
                 }
             })?;
             let mut batch = writer.new_batch();
-            for key in &expired {
-                batch.delete_by_id(cname, key, None).map_err(|e| {
-                    Error::StoreConnection {
+            for (logical_key, document_id) in &expired {
+                batch
+                    .delete_by_id(&collection_id, document_id, None)
+                    .map_err(|e| Error::StoreConnection {
                         message: format!(
-                            "failed to prepare expired Firestore document deletion {cname}/{key}: {e}"
+                            "failed to prepare expired Firestore document deletion {cname}/{logical_key}: {e}"
                         ),
-                    }
-                })?;
+                    })?;
             }
             let expected = batch.writes.len();
             let response = batch.write().await.map_err(|e| Error::StoreConnection {
@@ -362,28 +430,24 @@ impl AsyncKeyValue for FirestoreStore {
         }
 
         let cname = self.collection_name(collection);
-        let mut seen = HashSet::with_capacity(keys.len());
-        let mut unique_keys = Vec::with_capacity(keys.len());
-        for key in keys {
-            if seen.insert(key.as_str()) {
-                unique_keys.push(key.clone());
-            }
-        }
+        let (collection_id, document_ids, logical_by_document_id) =
+            encode_batch_identifiers(self.db().get_documents_path(), cname, keys)?;
 
         let mut stream = self
             .db()
             .fluent()
             .select()
-            .by_id_in(cname)
+            .by_id_in(&collection_id)
             .obj::<FirestoreDoc>()
-            .batch_with_errors(unique_keys.clone())
+            .batch_with_errors(document_ids.clone())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!("failed to start Firestore TTL batch read in {cname}: {e}"),
             })?;
-        let mut entries = HashMap::with_capacity(unique_keys.len());
+        let mut entries = HashMap::with_capacity(document_ids.len());
+        let mut returned = HashSet::with_capacity(document_ids.len());
         let mut expired = Vec::new();
-        while let Some((key, doc)) = stream.try_next().await.map_err(|e| match e {
+        while let Some((document_id, doc)) = stream.try_next().await.map_err(|e| match e {
             FirestoreError::DeserializeError(_) => Error::Deserialization(format!(
                 "failed to decode a Firestore TTL batch document in {cname}: {e}"
             )),
@@ -391,10 +455,17 @@ impl AsyncKeyValue for FirestoreStore {
                 message: format!("failed during Firestore TTL batch read in {cname}: {e}"),
             },
         })? {
-            if entries.contains_key(&key) {
+            let logical_key = logical_by_document_id.get(&document_id).ok_or_else(|| {
+                Error::StoreConnection {
+                    message: format!(
+                        "Firestore TTL batch read returned unknown document ID {document_id:?} in {cname}"
+                    ),
+                }
+            })?;
+            if !returned.insert(document_id.clone()) {
                 return Err(Error::StoreConnection {
                     message: format!(
-                        "Firestore TTL batch read returned document {cname}/{key} more than once"
+                        "Firestore TTL batch read returned document {cname}/{logical_key} more than once"
                     ),
                 });
             }
@@ -402,24 +473,25 @@ impl AsyncKeyValue for FirestoreStore {
                 .map(|doc| {
                     ManagedEntry::decode(doc.entry).map_err(|e| {
                         Error::Deserialization(format!(
-                            "failed to decode OpenKeyV entry in Firestore document {cname}/{key}: {e}"
+                            "failed to decode OpenKeyV entry in Firestore document {cname}/{logical_key}: {e}"
                         ))
                     })
                 })
                 .transpose()?;
             if entry.as_ref().is_some_and(ManagedEntry::is_expired) {
-                expired.push(key.clone());
-                entries.insert(key, None);
+                expired.push((logical_key.clone(), document_id));
+                entries.insert(logical_key.clone(), None);
             } else {
-                entries.insert(key, entry);
+                entries.insert(logical_key.clone(), entry);
             }
         }
 
-        for key in &unique_keys {
-            if !entries.contains_key(key) {
+        for document_id in &document_ids {
+            if !returned.contains(document_id) {
+                let logical_key = &logical_by_document_id[document_id];
                 return Err(Error::StoreConnection {
                     message: format!(
-                        "Firestore TTL batch read returned no result for document {cname}/{key}"
+                        "Firestore TTL batch read returned no result for document {cname}/{logical_key}"
                     ),
                 });
             }
@@ -434,14 +506,14 @@ impl AsyncKeyValue for FirestoreStore {
                 }
             })?;
             let mut batch = writer.new_batch();
-            for key in &expired {
-                batch.delete_by_id(cname, key, None).map_err(|e| {
-                    Error::StoreConnection {
+            for (logical_key, document_id) in &expired {
+                batch
+                    .delete_by_id(&collection_id, document_id, None)
+                    .map_err(|e| Error::StoreConnection {
                         message: format!(
-                            "failed to prepare expired Firestore document deletion {cname}/{key}: {e}"
+                            "failed to prepare expired Firestore document deletion {cname}/{logical_key}: {e}"
                         ),
-                    }
-                })?;
+                    })?;
             }
             let expected = batch.writes.len();
             let response = batch.write().await.map_err(|e| Error::StoreConnection {
@@ -500,14 +572,33 @@ impl AsyncKeyValue for FirestoreStore {
         }
 
         let cname = self.collection_name(collection);
+        let collection_id = encode_identifier(cname, "collection")?;
         let mut seen = HashSet::with_capacity(keys.len());
-        let mut writes = Vec::with_capacity(keys.len());
-        for (key, value) in keys.iter().zip(values.iter()).rev() {
-            if seen.insert(key.as_str()) {
-                writes.push((key, value));
+        let mut write_indices = Vec::with_capacity(keys.len());
+        for index in (0..keys.len()).rev() {
+            if seen.insert(keys[index].as_str()) {
+                write_indices.push(index);
             }
         }
-        writes.reverse();
+        write_indices.reverse();
+
+        let mut writes = Vec::with_capacity(write_indices.len());
+        for index in write_indices {
+            let key = &keys[index];
+            let document_id = encode_identifier(key, "key")?;
+            validate_document_name(self.db().get_documents_path(), &collection_id, &document_id)?;
+            let entry = match ttl {
+                Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds)?,
+                None => ManagedEntry::new(values[index].clone()),
+            };
+            writes.push((
+                key,
+                document_id,
+                FirestoreDoc {
+                    entry: Bytes::from(entry.encode()),
+                },
+            ));
+        }
 
         let writer =
             self.db()
@@ -517,16 +608,9 @@ impl AsyncKeyValue for FirestoreStore {
                     message: format!("failed to create Firestore write batch for {cname}: {e}"),
                 })?;
         let mut batch = writer.new_batch();
-        for (key, value) in writes {
-            let entry = match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
-                None => ManagedEntry::new(value.clone()),
-            };
-            let doc = FirestoreDoc {
-                entry: Bytes::from(entry.encode()),
-            };
+        for (key, document_id, doc) in &writes {
             batch
-                .update_object(cname, key, &doc, None, None, Vec::new())
+                .update_object(&collection_id, document_id, doc, None, None, Vec::new())
                 .map_err(|e| match e {
                     FirestoreError::SerializeError(_) => Error::Serialization(format!(
                         "failed to encode Firestore document {cname}/{key}: {e}"
@@ -570,21 +654,16 @@ impl AsyncKeyValue for FirestoreStore {
         }
 
         let cname = self.collection_name(collection);
-        let mut seen = HashSet::with_capacity(keys.len());
-        let mut unique_keys = Vec::with_capacity(keys.len());
-        for key in keys {
-            if seen.insert(key.as_str()) {
-                unique_keys.push(key.clone());
-            }
-        }
+        let (collection_id, document_ids, logical_by_document_id) =
+            encode_batch_identifiers(self.db().get_documents_path(), cname, keys)?;
 
         let mut stream = self
             .db()
             .fluent()
             .select()
-            .by_id_in(cname)
+            .by_id_in(&collection_id)
             .obj::<FirestoreDoc>()
-            .batch_with_errors(unique_keys.clone())
+            .batch_with_errors(document_ids.clone())
             .await
             .map_err(|e| Error::StoreConnection {
                 message: format!(
@@ -592,8 +671,8 @@ impl AsyncKeyValue for FirestoreStore {
                 ),
             })?;
         let mut existing = Vec::new();
-        let mut returned = HashSet::with_capacity(unique_keys.len());
-        while let Some((key, doc)) = stream.try_next().await.map_err(|e| match e {
+        let mut returned = HashSet::with_capacity(document_ids.len());
+        while let Some((document_id, doc)) = stream.try_next().await.map_err(|e| match e {
             FirestoreError::DeserializeError(_) => Error::Deserialization(format!(
                 "failed to decode a Firestore document before batch delete in {cname}: {e}"
             )),
@@ -601,22 +680,30 @@ impl AsyncKeyValue for FirestoreStore {
                 message: format!("failed during Firestore delete existence batch in {cname}: {e}"),
             },
         })? {
-            if !returned.insert(key.clone()) {
+            let logical_key = logical_by_document_id.get(&document_id).ok_or_else(|| {
+                Error::StoreConnection {
+                    message: format!(
+                        "Firestore delete existence batch returned unknown document ID {document_id:?} in {cname}"
+                    ),
+                }
+            })?;
+            if !returned.insert(document_id.clone()) {
                 return Err(Error::StoreConnection {
                     message: format!(
-                        "Firestore delete existence batch returned document {cname}/{key} more than once"
+                        "Firestore delete existence batch returned document {cname}/{logical_key} more than once"
                     ),
                 });
             }
             if doc.is_some() {
-                existing.push(key);
+                existing.push((logical_key, document_id));
             }
         }
-        for key in &unique_keys {
-            if !returned.contains(key) {
+        for document_id in &document_ids {
+            if !returned.contains(document_id) {
+                let logical_key = &logical_by_document_id[document_id];
                 return Err(Error::StoreConnection {
                     message: format!(
-                        "Firestore delete existence batch returned no result for document {cname}/{key}"
+                        "Firestore delete existence batch returned no result for document {cname}/{logical_key}"
                     ),
                 });
             }
@@ -633,12 +720,12 @@ impl AsyncKeyValue for FirestoreStore {
                     message: format!("failed to create Firestore delete batch for {cname}: {e}"),
                 })?;
         let mut batch = writer.new_batch();
-        for key in &existing {
+        for (logical_key, document_id) in &existing {
             batch
-                .delete_by_id(cname, key, None)
+                .delete_by_id(&collection_id, document_id, None)
                 .map_err(|e| Error::StoreConnection {
                     message: format!(
-                        "failed to prepare Firestore document deletion {cname}/{key}: {e}"
+                        "failed to prepare Firestore document deletion {cname}/{logical_key}: {e}"
                     ),
                 })?;
         }
@@ -673,6 +760,59 @@ mod tests {
     use super::*;
     use gcloud_sdk::google::firestore::v1::value::ValueType;
     use gcloud_sdk::{ExternalJwtFunctionSource, SecretValue, Token, TokenSourceType};
+
+    #[test]
+    fn firestore_identity_transport_is_reversible_and_bounded() {
+        let logical_values = [
+            "",
+            "Users",
+            "users",
+            "é",
+            "e\u{301}",
+            "/",
+            ".",
+            "..",
+            "__name__",
+            "nul\0control\u{1f}",
+        ];
+        let mut encoded_values = HashSet::new();
+
+        for logical in logical_values {
+            let encoded = encode_identifier(logical, "test").unwrap();
+            assert!(encoded_values.insert(encoded.clone()));
+            assert!(encoded.starts_with(IDENTITY_PREFIX));
+            assert!(!encoded.contains('/'));
+            assert_ne!(encoded, ".");
+            assert_ne!(encoded, "..");
+            assert!(!(encoded.starts_with("__") && encoded.ends_with("__")));
+
+            let decoded = URL_SAFE_NO_PAD
+                .decode(encoded.strip_prefix(IDENTITY_PREFIX).unwrap())
+                .unwrap();
+            assert_eq!(decoded, logical.as_bytes());
+        }
+
+        let accepted = encode_identifier(&"a".repeat(1121), "test").unwrap();
+        assert_eq!(accepted.len(), MAX_IDENTIFIER_BYTES);
+        assert!(matches!(
+            encode_identifier(&"a".repeat(1122), "test"),
+            Err(Error::InvalidKey(_))
+        ));
+    }
+
+    #[test]
+    fn firestore_document_name_enforces_exact_byte_boundary() {
+        let collection_id = encode_identifier("collection", "collection").unwrap();
+        let document_id = encode_identifier("key", "key").unwrap();
+        let separators = 2;
+        let accepted_parent = "p"
+            .repeat(MAX_DOCUMENT_NAME_BYTES - collection_id.len() - document_id.len() - separators);
+        validate_document_name(&accepted_parent, &collection_id, &document_id).unwrap();
+        assert!(matches!(
+            validate_document_name(&format!("{accepted_parent}p"), &collection_id, &document_id,),
+            Err(Error::InvalidKey(_))
+        ));
+    }
 
     async fn emulator_db(project: String) -> firestore::FirestoreDb {
         let token_source = ExternalJwtFunctionSource::new(|| async {
@@ -719,11 +859,13 @@ mod tests {
             Some(Value::utf8("first"))
         );
 
+        let collection_id = encode_identifier(&collection, "collection").unwrap();
+        let document_id = encode_identifier("entry", "key").unwrap();
         let raw = db
             .fluent()
             .select()
-            .by_id_in(&collection)
-            .one("entry")
+            .by_id_in(&collection_id)
+            .one(&document_id)
             .await
             .unwrap()
             .unwrap();
@@ -821,6 +963,114 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires FIRESTORE_EMULATOR_HOST"]
+    async fn firestore_roundtrips_exact_identities_without_raw_fallback() {
+        let (db, store, _) = emulator_store("identities").await;
+        let keys = vec![
+            "".to_string(),
+            "Users".to_string(),
+            "users".to_string(),
+            "é".to_string(),
+            "e\u{301}".to_string(),
+            "/".to_string(),
+            ".".to_string(),
+            "..".to_string(),
+            "__name__".to_string(),
+            "nul\0control\u{1f}".to_string(),
+        ];
+        let values: Vec<Value> = keys.iter().map(|key| Value::utf8(key.clone())).collect();
+        store.put_many(&keys, &values, None, None).await.unwrap();
+        assert_eq!(
+            store.get_many(&keys, None).await.unwrap(),
+            values.into_iter().map(Some).collect::<Vec<_>>()
+        );
+
+        store
+            .put("shared", Value::utf8("upper"), Some("Users"), None)
+            .await
+            .unwrap();
+        store
+            .put("shared", Value::utf8("lower"), Some("users"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("shared", Some("Users")).await.unwrap(),
+            Some(Value::utf8("upper"))
+        );
+        assert_eq!(
+            store.get("shared", Some("users")).await.unwrap(),
+            Some(Value::utf8("lower"))
+        );
+
+        let raw_doc = FirestoreDoc {
+            entry: Bytes::from(ManagedEntry::new(Value::utf8("raw")).encode()),
+        };
+        db.fluent()
+            .update()
+            .in_col("raw-collection")
+            .document_id("raw-key")
+            .object(&raw_doc)
+            .execute::<FirestoreDoc>()
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("raw-key", Some("raw-collection")).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires FIRESTORE_EMULATOR_HOST"]
+    async fn firestore_prevalidates_identity_boundaries_before_batch_side_effects() {
+        let (_, store, _) = emulator_store("identity-boundaries").await;
+        let accepted_key = "a".repeat(1121);
+        store
+            .put(&accepted_key, Value::utf8("accepted"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get(&accepted_key, None).await.unwrap(),
+            Some(Value::utf8("accepted"))
+        );
+
+        let oversized_key = "a".repeat(1122);
+        let put_keys = vec!["must-not-be-written".to_string(), oversized_key.clone()];
+        let put_values = vec![Value::utf8("first"), Value::utf8("invalid")];
+        assert!(matches!(
+            store.put_many(&put_keys, &put_values, None, None).await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert_eq!(store.get("must-not-be-written", None).await.unwrap(), None);
+
+        store
+            .put("must-not-be-deleted", Value::utf8("kept"), None, None)
+            .await
+            .unwrap();
+        let delete_keys = vec!["must-not-be-deleted".to_string(), oversized_key];
+        assert!(matches!(
+            store.delete_many(&delete_keys, None).await,
+            Err(Error::InvalidKey(_))
+        ));
+        assert_eq!(
+            store.get("must-not-be-deleted", None).await.unwrap(),
+            Some(Value::utf8("kept"))
+        );
+
+        let oversized_collection = "c".repeat(1122);
+        assert!(matches!(
+            store
+                .put(
+                    "key",
+                    Value::utf8("value"),
+                    Some(&oversized_collection),
+                    None,
+                )
+                .await,
+            Err(Error::InvalidKey(_))
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires FIRESTORE_EMULATOR_HOST"]
     async fn firestore_expired_reads_delete_documents() {
         let (db, store, collection) = emulator_store("expired").await;
         let mut expired = ManagedEntry::new(Value::utf8("value"));
@@ -828,11 +1078,13 @@ mod tests {
         let doc = FirestoreDoc {
             entry: Bytes::from(expired.encode()),
         };
+        let collection_id = encode_identifier(&collection, "collection").unwrap();
         for key in ["get-expired", "ttl-expired"] {
+            let document_id = encode_identifier(key, "key").unwrap();
             db.fluent()
                 .update()
-                .in_col(&collection)
-                .document_id(key)
+                .in_col(&collection_id)
+                .document_id(&document_id)
                 .object(&doc)
                 .execute::<FirestoreDoc>()
                 .await
@@ -841,18 +1093,20 @@ mod tests {
 
         assert_eq!(store.get("get-expired", None).await.unwrap(), None);
         assert_eq!(store.ttl("ttl-expired", None).await.unwrap(), None);
+        let get_document_id = encode_identifier("get-expired", "key").unwrap();
+        let ttl_document_id = encode_identifier("ttl-expired", "key").unwrap();
         let get_raw = db
             .fluent()
             .select()
-            .by_id_in(&collection)
-            .one("get-expired")
+            .by_id_in(&collection_id)
+            .one(&get_document_id)
             .await
             .unwrap();
         let ttl_raw = db
             .fluent()
             .select()
-            .by_id_in(&collection)
-            .one("ttl-expired")
+            .by_id_in(&collection_id)
+            .one(&ttl_document_id)
             .await
             .unwrap();
         assert!(get_raw.is_none());
@@ -860,10 +1114,11 @@ mod tests {
 
         let batch_keys = vec!["batch-a".to_string(), "batch-b".to_string()];
         for key in &batch_keys {
+            let document_id = encode_identifier(key, "key").unwrap();
             db.fluent()
                 .update()
-                .in_col(&collection)
-                .document_id(key)
+                .in_col(&collection_id)
+                .document_id(&document_id)
                 .object(&doc)
                 .execute::<FirestoreDoc>()
                 .await
@@ -874,11 +1129,12 @@ mod tests {
             vec![None, None]
         );
         for key in &batch_keys {
+            let document_id = encode_identifier(key, "key").unwrap();
             assert!(
                 db.fluent()
                     .select()
-                    .by_id_in(&collection)
-                    .one(key)
+                    .by_id_in(&collection_id)
+                    .one(&document_id)
                     .await
                     .unwrap()
                     .is_none()
@@ -895,10 +1151,12 @@ mod tests {
     #[ignore = "requires FIRESTORE_EMULATOR_HOST"]
     async fn firestore_rejects_old_json_documents() {
         let (db, store, collection) = emulator_store("old-json").await;
+        let collection_id = encode_identifier(&collection, "collection").unwrap();
+        let document_id = encode_identifier("legacy", "key").unwrap();
         db.fluent()
             .update()
-            .in_col(&collection)
-            .document_id("legacy")
+            .in_col(&collection_id)
+            .document_id(&document_id)
             .object(&OldJsonDocument {
                 value: r#"{"value":{"bytes":[]}}"#.to_string(),
             })
