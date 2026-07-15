@@ -33,6 +33,7 @@
 //! | Firestore | `firestore` | Google Firestore |
 //! | OpenSearch | `opensearch` | OpenSearch |
 
+pub mod change;
 pub mod entry;
 pub mod error;
 pub mod protocol;
@@ -44,10 +45,14 @@ pub mod wrapper;
 #[cfg(feature = "python")]
 pub mod py;
 
+pub use change::{
+    ChangeCursor, ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream,
+    ChangeSubscription, StoreChange,
+};
 pub use entry::ManagedEntry;
 pub use error::{Error, Result};
 pub use protocol::{
-    AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
-    AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncChangeFeed, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
 };
 pub use value::{StructuredValue, Value, ValueKind};

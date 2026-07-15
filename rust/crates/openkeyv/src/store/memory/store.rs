@@ -1,21 +1,24 @@
 use super::client::MemoryClient;
 use super::config::{MemoryConfig, SeedData};
 use super::error::{Error, Result};
+use crate::change::{ChangeFeedRequest, ChangeOperation, ChangeSubscription};
 use crate::entry::ManagedEntry;
 use crate::protocol::{
-    AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
-    AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncChangeFeed, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
 };
 use crate::value::Value;
 use async_trait::async_trait;
 use dashmap::DashMap;
+use std::sync::Arc;
 
 const DEFAULT_PAGE_SIZE: usize = 10_000;
 const PAGE_LIMIT: usize = 10_000;
 
 /// A fixed-size in-memory key-value store using time-aware LRU cache per collection.
+#[derive(Clone)]
 pub struct MemoryStore {
-    client: MemoryClient,
+    client: Arc<MemoryClient>,
     config: MemoryConfig,
 }
 
@@ -38,7 +41,7 @@ impl MemoryStore {
 
     pub fn with_config(config: MemoryConfig) -> Self {
         Self {
-            client: MemoryClient::new(),
+            client: Arc::new(MemoryClient::new()),
             config,
         }
     }
@@ -158,10 +161,14 @@ impl AsyncKeyValue for MemoryStore {
             None => ManagedEntry::new(value),
         };
 
+        let _mutation = self.client.mutation_lock().lock().await;
         if let Some(col) = self.client.collections().get_mut(cname) {
             self.maybe_cull_collection(&col);
             col.insert(key.to_string(), entry);
         }
+        self.client
+            .record_change(cname, key, ChangeOperation::Put)
+            .await;
         Ok(())
     }
 
@@ -169,8 +176,15 @@ impl AsyncKeyValue for MemoryStore {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
+        let _mutation = self.client.mutation_lock().lock().await;
         let col = self.get_collection(cname)?;
-        Ok(col.remove(key).is_some())
+        let deleted = col.remove(key).is_some();
+        if deleted {
+            self.client
+                .record_change(cname, key, ChangeOperation::Delete)
+                .await;
+        }
+        Ok(deleted)
     }
 
     async fn get_many(
@@ -234,15 +248,25 @@ impl AsyncKeyValue for MemoryStore {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
+        let entries = values
+            .iter()
+            .map(|value| match ttl {
+                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
+                None => Ok(ManagedEntry::new(value.clone())),
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let _mutation = self.client.mutation_lock().lock().await;
         if let Some(col) = self.client.collections().get_mut(cname) {
             self.maybe_cull_collection(&col);
-            for (key, value) in keys.iter().zip(values.iter()) {
-                let entry = match ttl {
-                    Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
-                    None => ManagedEntry::new(value.clone()),
-                };
+            for (key, entry) in keys.iter().zip(entries) {
                 col.insert(key.clone(), entry);
             }
+        }
+        for key in keys {
+            self.client
+                .record_change(cname, key, ChangeOperation::Put)
+                .await;
         }
         Ok(())
     }
@@ -251,14 +275,28 @@ impl AsyncKeyValue for MemoryStore {
         let cname = self.collection_name(collection);
         self.setup_collection(cname).await?;
 
+        let _mutation = self.client.mutation_lock().lock().await;
         let col = self.get_collection(cname)?;
-        let mut count = 0;
+        let mut deleted = Vec::new();
         for key in keys {
             if col.remove(key).is_some() {
-                count += 1;
+                deleted.push(key);
             }
         }
-        Ok(count)
+        for key in &deleted {
+            self.client
+                .record_change(cname, key, ChangeOperation::Delete)
+                .await;
+        }
+        Ok(deleted.len())
+    }
+}
+
+#[async_trait]
+impl AsyncChangeFeed for MemoryStore {
+    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<ChangeSubscription> {
+        let stream = self.client.subscribe(request.start, request.filter).await?;
+        Ok(ChangeSubscription::new(stream))
     }
 }
 
@@ -412,6 +450,152 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results, vec![Some(v1), Some(v2)]);
+    }
+
+    #[tokio::test]
+    async fn test_change_feed_delivers_live_mutations_across_clones() {
+        let store = MemoryStore::new();
+        let writer = store.clone();
+        let mut changes = store.subscribe(ChangeFeedRequest::default()).await.unwrap();
+
+        writer
+            .put("service-1", Value::utf8("ready"), Some("events"), None)
+            .await
+            .unwrap();
+        writer.delete("service-1", Some("events")).await.unwrap();
+
+        let put = tokio::time::timeout(std::time::Duration::from_secs(1), changes.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let delete = tokio::time::timeout(std::time::Duration::from_secs(1), changes.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(put.revision, 1);
+        assert_eq!(put.collection, "events");
+        assert_eq!(put.key, "service-1");
+        assert_eq!(put.operation, ChangeOperation::Put);
+        assert_eq!(delete.revision, 2);
+        assert_eq!(delete.operation, ChangeOperation::Delete);
+    }
+
+    #[tokio::test]
+    async fn test_change_feed_replays_and_resumes_after_cursor() {
+        let store = MemoryStore::new();
+        store
+            .put("event-1", Value::integer(1), Some("events"), None)
+            .await
+            .unwrap();
+        store
+            .put("event-2", Value::integer(2), Some("events"), None)
+            .await
+            .unwrap();
+
+        let mut replay = store
+            .subscribe(ChangeFeedRequest {
+                start: crate::change::ChangeStart::Beginning,
+                filter: crate::change::ChangeFilter::collection("events"),
+            })
+            .await
+            .unwrap();
+        let first = replay.recv().await.unwrap().unwrap();
+        let second = replay.recv().await.unwrap().unwrap();
+        assert_eq!(first.key, "event-1");
+        assert_eq!(second.key, "event-2");
+
+        let mut resumed = store
+            .subscribe(ChangeFeedRequest {
+                start: crate::change::ChangeStart::After(first.cursor),
+                filter: crate::change::ChangeFilter::collection("events"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(resumed.recv().await.unwrap().unwrap().key, "event-2");
+
+        store
+            .put("event-3", Value::integer(3), Some("events"), None)
+            .await
+            .unwrap();
+        assert_eq!(resumed.recv().await.unwrap().unwrap().key, "event-3");
+    }
+
+    #[tokio::test]
+    async fn test_change_feed_filters_collections_and_operations() {
+        let store = MemoryStore::new();
+        let mut changes = store
+            .subscribe(ChangeFeedRequest {
+                start: crate::change::ChangeStart::Latest,
+                filter: crate::change::ChangeFilter {
+                    collections: vec!["events".to_string()],
+                    operations: vec![ChangeOperation::Put],
+                },
+            })
+            .await
+            .unwrap();
+
+        store
+            .put("ignored", Value::null(), Some("state"), None)
+            .await
+            .unwrap();
+        store
+            .put("deleted", Value::null(), Some("events"), None)
+            .await
+            .unwrap();
+        store.delete("deleted", Some("events")).await.unwrap();
+        store
+            .put("matched", Value::null(), Some("events"), None)
+            .await
+            .unwrap();
+
+        let first = changes.recv().await.unwrap().unwrap();
+        let second = changes.recv().await.unwrap().unwrap();
+        assert_eq!(first.key, "deleted");
+        assert_eq!(second.key, "matched");
+        assert_eq!(second.operation, ChangeOperation::Put);
+    }
+
+    #[tokio::test]
+    async fn test_change_feed_does_not_report_missing_delete() {
+        let store = MemoryStore::new();
+        let mut changes = store.subscribe(ChangeFeedRequest::default()).await.unwrap();
+
+        assert!(!store.delete("missing", Some("events")).await.unwrap());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), changes.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_change_feed_rejects_expired_cursor() {
+        let store = MemoryStore::new();
+        for revision in 0..=super::super::client::CHANGE_RETENTION {
+            store
+                .put(
+                    &format!("event-{revision}"),
+                    Value::integer(revision as i64),
+                    Some("events"),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let result = store
+            .subscribe(ChangeFeedRequest {
+                start: crate::change::ChangeStart::After(crate::change::ChangeCursor::new("0")),
+                filter: crate::change::ChangeFilter::default(),
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::ChangeCursorExpired { .. })
+        ));
     }
 
     #[tokio::test]

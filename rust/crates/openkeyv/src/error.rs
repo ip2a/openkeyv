@@ -60,4 +60,13 @@ pub enum Error {
 
     #[error("batch size mismatch: keys={keys} values={values}")]
     BatchSizeMismatch { keys: usize, values: usize },
+
+    #[error("invalid change cursor: {0}")]
+    InvalidChangeCursor(String),
+
+    #[error("change cursor {requested} is older than retained history starting at {oldest}")]
+    ChangeCursorExpired { requested: String, oldest: String },
+
+    #[error("change subscriber lagged by {skipped} records")]
+    ChangeFeedLagged { skipped: u64 },
 }
