@@ -4,8 +4,9 @@ use super::error::{Error, Result};
 use crate::change::{ChangeFeedRequest, ChangeOperation, ChangeSubscription};
 use crate::entry::ManagedEntry;
 use crate::protocol::{
-    AsyncChangeFeed, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
-    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
+    CompareAndSwapResult, Revision, RevisionedValue,
 };
 use crate::value::Value;
 use async_trait::async_trait;
@@ -77,6 +78,17 @@ impl MemoryStore {
             .entry(collection.to_string())
             .or_default();
         Ok(())
+    }
+
+    fn revision_key(collection: &str, key: &str) -> String {
+        format!("{collection}\0{key}")
+    }
+
+    fn current_revision(&self, collection: &str, key: &str) -> Option<Revision> {
+        self.client
+            .revisions()
+            .get(&Self::revision_key(collection, key))
+            .map(|entry| *entry)
     }
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
@@ -166,9 +178,13 @@ impl AsyncKeyValue for MemoryStore {
             self.maybe_cull_collection(&col);
             col.insert(key.to_string(), entry);
         }
-        self.client
+        let revision = self
+            .client
             .record_change(cname, key, ChangeOperation::Put)
             .await;
+        self.client
+            .revisions()
+            .insert(Self::revision_key(cname, key), revision);
         Ok(())
     }
 
@@ -180,9 +196,13 @@ impl AsyncKeyValue for MemoryStore {
         let col = self.get_collection(cname)?;
         let deleted = col.remove(key).is_some();
         if deleted {
-            self.client
+            let revision = self
+                .client
                 .record_change(cname, key, ChangeOperation::Delete)
                 .await;
+            self.client
+                .revisions()
+                .insert(Self::revision_key(cname, key), revision);
         }
         Ok(deleted)
     }
@@ -244,51 +264,134 @@ impl AsyncKeyValue for MemoryStore {
         if let Some(seconds) = ttl {
             ManagedEntry::validate_ttl(seconds)?;
         }
-
-        let cname = self.collection_name(collection);
-        self.setup_collection(cname).await?;
-
-        let entries = values
-            .iter()
-            .map(|value| match ttl {
-                Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds),
-                None => Ok(ManagedEntry::new(value.clone())),
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let _mutation = self.client.mutation_lock().lock().await;
-        if let Some(col) = self.client.collections().get_mut(cname) {
-            self.maybe_cull_collection(&col);
-            for (key, entry) in keys.iter().zip(entries) {
-                col.insert(key.clone(), entry);
-            }
-        }
-        for key in keys {
-            self.client
-                .record_change(cname, key, ChangeOperation::Put)
-                .await;
+        let cname = self.collection_name(collection).to_string();
+        for (key, value) in keys.iter().zip(values.iter()) {
+            self.put(key, value.clone(), Some(&cname), ttl).await?;
         }
         Ok(())
     }
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
-        let cname = self.collection_name(collection);
-        self.setup_collection(cname).await?;
-
-        let _mutation = self.client.mutation_lock().lock().await;
-        let col = self.get_collection(cname)?;
-        let mut deleted = Vec::new();
+        let cname = self.collection_name(collection).to_string();
+        let mut deleted = 0;
         for key in keys {
-            if col.remove(key).is_some() {
-                deleted.push(key);
+            if self.delete(key, Some(&cname)).await? {
+                deleted += 1;
             }
         }
-        for key in &deleted {
-            self.client
-                .record_change(cname, key, ChangeOperation::Delete)
-                .await;
+        Ok(deleted)
+    }
+}
+
+#[async_trait]
+impl AsyncCompareAndSwap for MemoryStore {
+    async fn get_with_revision(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<RevisionedValue>> {
+        let cname = self.collection_name(collection);
+        self.setup_collection(cname).await?;
+        let _mutation = self.client.mutation_lock().lock().await;
+        let entry = self
+            .get_collection(cname)?
+            .get(key)
+            .map(|entry| entry.clone())
+            .filter(|entry| !entry.is_expired());
+        let Some(entry) = entry else { return Ok(None) };
+        let revision = self
+            .current_revision(cname, key)
+            .ok_or(Error::CorruptedData)?;
+        let ttl = entry.ttl();
+        Ok(Some(RevisionedValue {
+            value: entry.value,
+            revision,
+            ttl,
+        }))
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected: Option<&Revision>,
+        value: Value,
+        collection: Option<&str>,
+        ttl: Option<f64>,
+    ) -> Result<CompareAndSwapResult> {
+        let cname = self.collection_name(collection);
+        self.setup_collection(cname).await?;
+        let entry = match ttl {
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
+            None => ManagedEntry::new(value),
+        };
+        let _mutation = self.client.mutation_lock().lock().await;
+        let current = self
+            .get_collection(cname)?
+            .get(key)
+            .map(|entry| entry.clone())
+            .filter(|entry| !entry.is_expired());
+        let current_revision = current
+            .as_ref()
+            .and_then(|_| self.current_revision(cname, key));
+        if current_revision.as_ref() != expected {
+            return Ok(CompareAndSwapResult::Conflict {
+                current: current
+                    .zip(current_revision)
+                    .map(|(entry, revision)| RevisionedValue {
+                        ttl: entry.ttl(),
+                        value: entry.value,
+                        revision,
+                    }),
+            });
         }
-        Ok(deleted.len())
+        self.get_collection(cname)?.insert(key.to_string(), entry);
+        let revision = self
+            .client
+            .record_change(cname, key, ChangeOperation::Put)
+            .await;
+        self.client
+            .revisions()
+            .insert(Self::revision_key(cname, key), revision);
+        Ok(CompareAndSwapResult::Applied { revision })
+    }
+
+    async fn compare_and_delete(
+        &self,
+        key: &str,
+        expected: &Revision,
+        collection: Option<&str>,
+    ) -> Result<CompareAndDeleteResult> {
+        let cname = self.collection_name(collection);
+        self.setup_collection(cname).await?;
+        let _mutation = self.client.mutation_lock().lock().await;
+        let current = self
+            .get_collection(cname)?
+            .get(key)
+            .map(|entry| entry.clone())
+            .filter(|entry| !entry.is_expired());
+        let current_revision = current
+            .as_ref()
+            .and_then(|_| self.current_revision(cname, key));
+        if current_revision.as_ref() != Some(expected) {
+            return Ok(CompareAndDeleteResult::Conflict {
+                current: current
+                    .zip(current_revision)
+                    .map(|(entry, revision)| RevisionedValue {
+                        ttl: entry.ttl(),
+                        value: entry.value,
+                        revision,
+                    }),
+            });
+        }
+        self.get_collection(cname)?.remove(key);
+        let revision = self
+            .client
+            .record_change(cname, key, ChangeOperation::Delete)
+            .await;
+        self.client
+            .revisions()
+            .insert(Self::revision_key(cname, key), revision);
+        Ok(CompareAndDeleteResult::Deleted)
     }
 }
 

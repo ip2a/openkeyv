@@ -3,6 +3,7 @@ use crate::change::{
 };
 use crate::entry::ManagedEntry;
 use crate::error::{Error, Result};
+use crate::protocol::Revision;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
@@ -53,6 +54,7 @@ pub struct MemoryClient {
     setup_complete: RwLock<bool>,
     mutation_lock: Mutex<()>,
     changes: Mutex<MemoryChangeState>,
+    revisions: DashMap<String, Revision>,
 }
 
 impl Default for MemoryClient {
@@ -68,6 +70,7 @@ impl MemoryClient {
             collections: MemoryCollections::new(),
             setup_complete: RwLock::new(false),
             mutation_lock: Mutex::new(()),
+            revisions: DashMap::new(),
             changes: Mutex::new(MemoryChangeState {
                 revision: 0,
                 entries: VecDeque::with_capacity(CHANGE_RETENTION),
@@ -84,6 +87,10 @@ impl MemoryClient {
         &self.setup_complete
     }
 
+    pub(crate) fn revisions(&self) -> &DashMap<String, Revision> {
+        &self.revisions
+    }
+
     pub(crate) fn mutation_lock(&self) -> &Mutex<()> {
         &self.mutation_lock
     }
@@ -93,7 +100,7 @@ impl MemoryClient {
         collection: &str,
         key: &str,
         operation: ChangeOperation,
-    ) {
+    ) -> Revision {
         let mut state = self.changes.lock().await;
         state.revision += 1;
         let change = StoreChange {
@@ -109,7 +116,10 @@ impl MemoryClient {
             state.entries.pop_front();
         }
         state.entries.push_back(change.clone());
+        let revision =
+            Revision::from_bytes(state.revision.to_be_bytes().repeat(2).try_into().unwrap());
         let _ = state.sender.send(change);
+        revision
     }
 
     pub(crate) async fn subscribe(
