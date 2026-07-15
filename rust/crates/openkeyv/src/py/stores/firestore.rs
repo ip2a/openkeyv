@@ -30,10 +30,7 @@ impl PyFirestoreStore {
     #[new]
     #[pyo3(signature = (project_id))]
     fn new(project_id: String) -> PyResult<Self> {
-        let store = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?
+        let store = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async { crate::store::firestore::FirestoreStore::new(&project_id).await })
             .map_err(error_to_py)?;
         Ok(Self {

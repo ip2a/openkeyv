@@ -33,10 +33,7 @@ impl PyDynamoDBStore {
     #[new]
     #[pyo3(signature = (table_name))]
     fn new(table_name: String) -> PyResult<Self> {
-        let store = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?
+        let store = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async { crate::store::dynamodb::DynamoDBStore::new(&table_name).await })
             .map_err(error_to_py)?;
         Ok(Self {

@@ -33,10 +33,7 @@ impl PyS3Store {
     #[new]
     #[pyo3(signature = (bucket_name))]
     fn new(bucket_name: String) -> PyResult<Self> {
-        let store = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?
+        let store = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async { crate::store::s3::S3Store::new(&bucket_name).await })
             .map_err(error_to_py)?;
         Ok(Self {

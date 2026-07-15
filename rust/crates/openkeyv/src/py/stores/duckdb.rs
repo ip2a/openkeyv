@@ -35,10 +35,7 @@ impl PyDuckDBStore {
     fn new(path: Option<String>, table_name: Option<String>) -> PyResult<Self> {
         let path = path.as_deref();
         let table_name = table_name.as_deref();
-        let store = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?
+        let store = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async { crate::store::duckdb::DuckDBStore::new(path, table_name).await })
             .map_err(error_to_py)?;
         Ok(Self {

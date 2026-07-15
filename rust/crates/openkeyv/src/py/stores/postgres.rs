@@ -34,10 +34,7 @@ impl PyPostgresStore {
     #[pyo3(signature = (url, table_name = None))]
     fn new(url: String, table_name: Option<String>) -> PyResult<Self> {
         let table_name = table_name.as_deref();
-        let store = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?
+        let store = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async { crate::store::postgres::PostgresStore::new(&url, table_name).await })
             .map_err(error_to_py)?;
         Ok(Self {

@@ -33,10 +33,7 @@ impl PyOpenSearchStore {
     #[new]
     #[pyo3(signature = (url, index_prefix))]
     fn new(url: String, index_prefix: String) -> PyResult<Self> {
-        let store = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))?
+        let store = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async {
                 crate::store::opensearch::OpenSearchStore::from_url(&url, &index_prefix).await
             })
