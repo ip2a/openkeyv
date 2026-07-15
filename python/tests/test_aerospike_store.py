@@ -3,7 +3,9 @@ from typing import Any
 import aerospike
 import pytest
 
+from openkeyv.errors import InvalidKeyError
 from openkeyv.stores.aerospike import AerospikeStore
+from openkeyv.stores.aerospike.store import MAX_COMPOUND_KEY_BYTES
 
 
 class FakeScan:
@@ -154,3 +156,74 @@ async def test_aerospike_namespace_validation_accepts_real_client_response() -> 
     store = AerospikeStore(client=client, namespace="test", auto_create=False)  # type: ignore[arg-type]
 
     await store._setup()
+
+
+@pytest.mark.parametrize(
+    ("operation", "kwargs"),
+    [
+        ("get", {"key": "bad\x00key"}),
+        ("ttl", {"key": "bad\x00key"}),
+        ("put", {"key": "bad\x00key", "value": {"value": "new"}}),
+        ("delete", {"key": "bad\x00key"}),
+        ("get_many", {"keys": ["valid", "bad\x00key"]}),
+        ("ttl_many", {"keys": ["valid", "bad\x00key"]}),
+        ("put_many", {"keys": ["valid", "bad\x00key"], "values": [{"value": "first"}, {"value": "second"}]}),
+        ("delete_many", {"keys": ["valid", "bad\x00key"]}),
+    ],
+)
+async def test_aerospike_rejects_nul_before_connect(operation: str, kwargs: dict[str, Any]) -> None:
+    client = FakeAerospikeClient()
+    store = AerospikeStore(client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(InvalidKeyError, match="cannot contain NUL"):
+        await getattr(store, operation)(collection="items", **kwargs)
+
+    assert client.connected is False
+    assert client.put_calls == []
+    assert client.records == {}
+
+
+async def test_aerospike_batch_invalid_identity_has_no_side_effect() -> None:
+    client = FakeAerospikeClient()
+    store = AerospikeStore(client=client)  # type: ignore[arg-type]
+
+    await store.put("existing", {"value": "before"}, collection="items")
+    put_call_count = len(client.put_calls)
+
+    with pytest.raises(InvalidKeyError, match="cannot contain NUL"):
+        await store.put_many(
+            ["new", "bad\x00key"],
+            [{"value": "new"}, {"value": "invalid"}],
+            collection="items",
+        )
+
+    assert len(client.put_calls) == put_call_count
+    assert await store.get("existing", collection="items") == {"value": "before"}
+    assert await store.get("new", collection="items") is None
+
+
+async def test_aerospike_rejects_identity_over_deterministic_boundary_before_connect() -> None:
+    client = FakeAerospikeClient()
+    store = AerospikeStore(client=client)  # type: ignore[arg-type]
+    valid_key = "v" * (MAX_COMPOUND_KEY_BYTES - 2)
+    invalid_key = "v" * (MAX_COMPOUND_KEY_BYTES - 1)
+
+    assert len(store._physical_key(collection="", key=valid_key).encode("utf-8")) == MAX_COMPOUND_KEY_BYTES
+
+    with pytest.raises(InvalidKeyError, match="maximum size"):
+        await store.put(invalid_key, {"value": "invalid"}, collection="")
+
+    assert client.connected is False
+    assert client.put_calls == []
+
+
+async def test_aerospike_scan_ignores_foreign_non_string_keys_but_rejects_owned_nul() -> None:
+    client = FakeAerospikeClient()
+    store = AerospikeStore(client=client, namespace="test", set_name="entries")  # type: ignore[arg-type]
+    await store.put("visible", {"value": "ok"}, collection="items")
+
+    client.records[("test", "entries", 123)] = ({}, {})  # type: ignore[assignment]
+    client.records[("test", "entries", "5:itemsbad\x00foreign")] = ({}, {})
+
+    with pytest.raises(InvalidKeyError, match="primary key cannot contain NUL"):
+        await store.keys(collection="items", limit=1)

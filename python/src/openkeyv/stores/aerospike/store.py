@@ -1,12 +1,15 @@
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from math import ceil
-from typing import cast, overload
+from typing import Any, SupportsFloat, cast, overload
 
 from typing_extensions import override
 
 from openkeyv._internal import _decode_entry, _encode_entry
-from openkeyv._utils.compound import compound_key, get_keys_from_compound_keys
+from openkeyv._utils.beartype import bear_enforce
+from openkeyv._utils.compound import compound_key, get_keys_from_compound_keys, uncompound_key
 from openkeyv._utils.managed_entry import ManagedEntry
+from openkeyv.errors import InvalidKeyError
 from openkeyv.stores.base import BaseContextManagerStore, BaseDestroyStore, BaseEnumerateKeysStore, BaseStore
 
 try:
@@ -19,6 +22,7 @@ DEFAULT_NAMESPACE = "test"
 DEFAULT_SET = "kv-store"
 DEFAULT_PAGE_SIZE = 10000
 PAGE_LIMIT = 10000
+MAX_COMPOUND_KEY_BYTES = 1_048_000
 
 
 class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManagerStore, BaseStore):
@@ -121,6 +125,105 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
             stable_api=True,
         )
 
+    def _physical_key(self, *, collection: str, key: str) -> str:
+        combo_key = compound_key(collection=collection, key=key)
+        if "\x00" in combo_key:
+            msg = "Aerospike canonical identities cannot contain NUL"
+            raise InvalidKeyError(msg)
+        if len(combo_key.encode("utf-8")) > MAX_COMPOUND_KEY_BYTES:
+            msg = f"Aerospike canonical identity exceeds the maximum size of {MAX_COMPOUND_KEY_BYTES} UTF-8 bytes"
+            raise InvalidKeyError(msg)
+        return combo_key
+
+    def _validate_keys(self, *, collection: str, keys: Sequence[str]) -> None:
+        for key in keys:
+            self._physical_key(collection=collection, key=key)
+
+    @bear_enforce
+    @override
+    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+        collection = self.default_collection if collection is None else collection
+        self._physical_key(collection=collection, key=key)
+        return await super().get(key=key, collection=collection)
+
+    @bear_enforce
+    @override
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+        collection = self.default_collection if collection is None else collection
+        self._validate_keys(collection=collection, keys=keys)
+        return await super().get_many(keys=keys, collection=collection)
+
+    @bear_enforce
+    @override
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+        collection = self.default_collection if collection is None else collection
+        self._physical_key(collection=collection, key=key)
+        return await super().ttl(key=key, collection=collection)
+
+    @bear_enforce
+    @override
+    async def ttl_many(
+        self,
+        keys: Sequence[str],
+        *,
+        collection: str | None = None,
+    ) -> list[tuple[dict[str, Any] | None, float | None]]:
+        collection = self.default_collection if collection is None else collection
+        self._validate_keys(collection=collection, keys=keys)
+        return await super().ttl_many(keys=keys, collection=collection)
+
+    @bear_enforce
+    @override
+    async def put(
+        self,
+        key: str,
+        value: Mapping[str, Any],
+        *,
+        collection: str | None = None,
+        ttl: SupportsFloat | None = None,
+    ) -> None:
+        collection = self.default_collection if collection is None else collection
+        self._physical_key(collection=collection, key=key)
+        await super().put(key=key, value=value, collection=collection, ttl=ttl)
+
+    @bear_enforce
+    @override
+    async def put_many(
+        self,
+        keys: Sequence[str],
+        values: Sequence[Mapping[str, Any]],
+        *,
+        collection: str | None = None,
+        ttl: SupportsFloat | None = None,
+    ) -> None:
+        if len(keys) != len(values):
+            msg = "put_many called but a different number of keys and values were provided"
+            raise ValueError(msg) from None
+        collection = self.default_collection if collection is None else collection
+        self._validate_keys(collection=collection, keys=keys)
+        await super().put_many(keys=keys, values=values, collection=collection, ttl=ttl)
+
+    @bear_enforce
+    @override
+    async def delete(self, key: str, *, collection: str | None = None) -> bool:
+        collection = self.default_collection if collection is None else collection
+        self._physical_key(collection=collection, key=key)
+        return await super().delete(key=key, collection=collection)
+
+    @bear_enforce
+    @override
+    async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
+        collection = self.default_collection if collection is None else collection
+        self._validate_keys(collection=collection, keys=keys)
+        return await super().delete_many(keys=keys, collection=collection)
+
+    @bear_enforce
+    @override
+    async def keys(self, collection: str | None = None, *, limit: int | None = None) -> list[str]:
+        collection = self.default_collection if collection is None else collection
+        self._physical_key(collection=collection, key="")
+        return await super().keys(collection=collection, limit=limit)
+
     @override
     async def _setup(self) -> None:
         """Connect to Aerospike and register cleanup."""
@@ -163,7 +266,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
 
     @override
     async def _get_managed_entry(self, *, key: str, collection: str) -> ManagedEntry | None:
-        combo_key: str = compound_key(collection=collection, key=key)
+        combo_key = self._physical_key(collection=collection, key=key)
         aerospike_key = (self._namespace, self._set, combo_key)
 
         try:
@@ -218,7 +321,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
         collection: str,
         managed_entry: ManagedEntry,
     ) -> None:
-        combo_key: str = compound_key(collection=collection, key=key)
+        combo_key = self._physical_key(collection=collection, key=key)
         aerospike_key = (self._namespace, self._set, combo_key)
         created_at_millis = None if managed_entry.created_at is None else int(managed_entry.created_at.timestamp() * 1000)
         expires_at_millis = None if managed_entry.expires_at is None else int(managed_entry.expires_at.timestamp() * 1000)
@@ -235,7 +338,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
 
     @override
     async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:
-        combo_key: str = compound_key(collection=collection, key=key)
+        combo_key = self._physical_key(collection=collection, key=key)
         aerospike_key = (self._namespace, self._set, combo_key)
 
         try:
@@ -248,7 +351,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
     async def _get_collection_keys(self, *, collection: str, limit: int | None = None) -> list[str]:
         limit = min(DEFAULT_PAGE_SIZE if limit is None else limit, PAGE_LIMIT)
 
-        pattern = compound_key(collection=collection, key="")
+        pattern = self._physical_key(collection=collection, key="")
 
         keys: list[str] = []
 
@@ -273,8 +376,23 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
                 msg = "Aerospike scan bins must be a dict"
                 raise TypeError(msg)
 
-            if isinstance(primary_key, str) and primary_key.startswith(pattern):
-                keys.append(primary_key)
+            if not isinstance(primary_key, str) or not primary_key.startswith(pattern):
+                return
+            if "\x00" in primary_key:
+                msg = "Aerospike scan primary key cannot contain NUL"
+                raise InvalidKeyError(msg)
+            try:
+                parsed_collection, parsed_key = uncompound_key(primary_key)
+            except TypeError as error:
+                msg = "Aerospike scan primary key is not a canonical compound identity"
+                raise TypeError(msg) from error
+            if parsed_collection != collection:
+                msg = "Aerospike scan primary key is not a canonical compound identity"
+                raise TypeError(msg)
+            if self._physical_key(collection=parsed_collection, key=parsed_key) != primary_key:
+                msg = "Aerospike scan primary key is not a canonical compound identity"
+                raise TypeError(msg)
+            keys.append(primary_key)
 
         scan = self._client.scan(self._namespace, self._set)
         scan.foreach(callback)  # pyright: ignore[reportUnknownMemberType]
