@@ -1,4 +1,6 @@
 mod codec;
+#[cfg(feature = "json")]
+mod json;
 mod kind;
 mod structured;
 

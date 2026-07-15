@@ -49,6 +49,7 @@ pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"], optional
 
 [features]
 default = ["disk", "redis", "rocksdb"]
+json = ["dep:serde_json"]
 disk = ["dep:sled"]
 redis = ["dep:redis"]
 postgres = ["dep:sqlx"]
@@ -70,3 +71,16 @@ python-full = ["python", "disk", "redis", "postgres", "mongodb", "rocksdb", "dyn
 gcloud-sdk = "0.29"
 tokio-test = "0.4"
 tempfile = "3.14"
+criterion.workspace = true
+
+[[bench]]
+name = "value_codec"
+harness = false
+
+[[bench]]
+name = "memory_store"
+harness = false
+
+[[bench]]
+name = "redis_store"
+harness = false
