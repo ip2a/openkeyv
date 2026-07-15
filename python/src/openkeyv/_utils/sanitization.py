@@ -4,9 +4,9 @@ This module provides strategies for sanitizing keys and collection names to comp
 with backend store requirements. Different stores have different character restrictions
 and length limits, so multiple strategies are provided.
 
-The strategies also prevent collision between user-provided keys and sanitized keys
-by using reserved prefixes (H_ for hashed keys, S_ for sanitized keys) and validating
-that user input doesn't use these prefixes.
+Reserved prefixes (H_ for hashed keys and S_ for sanitized keys) separate transformed
+outputs from accepted raw inputs. Hash truncation only reduces collision probability; these
+strategies are caller-selected naming transforms and do not guarantee a one-to-one mapping.
 """
 
 import hashlib
@@ -37,8 +37,11 @@ class SanitizationStrategy(ABC):
     formats that are compatible with backend store requirements. This includes:
     - Replacing invalid characters
     - Truncating to maximum length
-    - Adding hash fragments for uniqueness
-    - Prefixing to prevent collisions with user keys
+    - Adding hash fragments to reduce collision probability
+    - Prefixing to separate transformed outputs from accepted raw inputs
+
+    Non-passthrough strategies may be lossy. Callers that select one own the resulting
+    naming semantics.
     """
 
     @abstractmethod
@@ -102,7 +105,11 @@ MAXIMUM_HASH_LENGTH = 64
 
 
 class AlwaysHashStrategy(SanitizationStrategy):
-    """Strategy that always hashes keys."""
+    """Strategy that always hashes keys.
+
+    Truncating SHA-256 output is irreversible and provides probabilistic, not guaranteed,
+    collision resistance.
+    """
 
     def __init__(self, hash_length: int = 64) -> None:
         """Initialize the always hash strategy.
@@ -123,17 +130,14 @@ class AlwaysHashStrategy(SanitizationStrategy):
     def validate(self, value: str) -> None:
         """No validation needed for always hash strategy."""
 
-    def try_unsanitize(self, value: str) -> str | None:
-        """Return the value unchanged since no sanitization occurred."""
-        return value
-
 
 class HashExcessLengthStrategy(SanitizationStrategy):
     """Strategy that hashes keys exceeding a maximum length.
 
     This strategy is used by stores like Memcached that accept any characters but
-    have strict length limits. Keys exceeding the limit are hashed using SHA256
-    and prefixed with 'H_' to prevent collisions with user-provided keys.
+    have strict length limits. Keys exceeding the limit are hashed using SHA-256
+    and prefixed with 'H_' to separate transformed outputs from accepted raw inputs.
+    A truncated hash reduces collision probability but cannot guarantee uniqueness.
 
     Args:
         max_length: Maximum key length before hashing is applied. Defaults to 240.
@@ -184,8 +188,9 @@ class HybridSanitizationStrategy(SanitizationStrategy):
 
     This strategy is used by stores with character restrictions (e.g., Elasticsearch,
     Keyring, Windows Registry). Invalid characters are replaced with a safe character,
-    and a hash fragment is added for uniqueness. The result is prefixed with 'S_' to
-    prevent collisions with user-provided keys.
+    and an optional hash fragment reduces collision probability. The result is prefixed
+    with 'S_' to separate transformed outputs from accepted raw inputs. This transform is
+    not guaranteed to be collision-free, especially when hashing is disabled.
 
     Args:
         max_length: Maximum length after sanitization. Defaults to 240.

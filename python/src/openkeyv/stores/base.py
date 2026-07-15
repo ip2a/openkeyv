@@ -89,8 +89,10 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         """Initialize the managed key-value store.
 
         Args:
-            key_sanitization_strategy: The sanitization strategy to use for keys.
-            collection_sanitization_strategy: The sanitization strategy to use for collections.
+            key_sanitization_strategy: The caller-selected naming transform for keys. Defaults to pass-through;
+                non-passthrough strategies may be lossy.
+            collection_sanitization_strategy: The caller-selected naming transform for collections. Defaults to
+                pass-through; non-passthrough strategies may be lossy.
             default_collection: The default collection to use if no collection is provided.
                 Defaults to "default_collection".
             seed: Optional seed data to pre-populate the store. Format: {collection: {key: {field: value, ...}}}.
