@@ -246,6 +246,7 @@ fn collection_scan_pattern(collection: &str) -> String {
 ///
 /// Each collection is represented by a key prefix in Redis.
 /// Values are stored as `OKVE1`-encoded `ManagedEntry` bytes.
+#[derive(Clone)]
 pub struct RedisStore {
     client: RedisClient,
     config: RedisConfig,

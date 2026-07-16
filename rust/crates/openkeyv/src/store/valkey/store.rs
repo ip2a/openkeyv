@@ -68,6 +68,7 @@ fn collection_scan_pattern(collection: &str) -> String {
 ///
 /// Each collection is represented by a key prefix in Valkey.
 /// Values are stored as `OKVE1`-encoded `ManagedEntry` bytes.
+#[derive(Clone)]
 pub struct ValkeyStore {
     client: ValkeyClient,
     config: ValkeyConfig,
