@@ -8,7 +8,6 @@ This package provides internal utilities used across store implementations:
 - managed_entry: ManagedEntry dataclass for storing values with metadata
 - sanitization: Key/collection sanitization strategies
 - sanitize: Low-level string sanitization functions
-- serialization: Serialization adapters for ManagedEntry objects
 - time_to_live: TTL handling and datetime utilities
 - wait: Async wait utilities for testing
 """

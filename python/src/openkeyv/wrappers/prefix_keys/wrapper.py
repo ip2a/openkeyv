@@ -1,10 +1,10 @@
-from collections.abc import Mapping, Sequence
-from typing import Any, SupportsFloat
+from collections.abc import Sequence
+from typing import SupportsFloat
 
 from typing_extensions import override
 
 from openkeyv._utils.compound import prefix_key, unprefix_key
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper
 
 
@@ -29,27 +29,27 @@ class PrefixKeysWrapper(BaseWrapper):
         return unprefix_key(prefix=self.prefix, key=key)
 
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         new_key: str = self._prefix_key(key=key)
         return await self.key_value.get(key=new_key, collection=collection)
 
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         new_keys: Sequence[str] = [self._prefix_key(key=key) for key in keys]
         return await self.key_value.get_many(keys=new_keys, collection=collection)
 
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         new_key: str = self._prefix_key(key=key)
         return await self.key_value.ttl(key=new_key, collection=collection)
 
     @override
-    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[dict[str, Any] | None, float | None]]:
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
         new_keys: Sequence[str] = [self._prefix_key(key=key) for key in keys]
         return await self.key_value.ttl_many(keys=new_keys, collection=collection)
 
     @override
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         new_key: str = self._prefix_key(key=key)
         return await self.key_value.put(key=new_key, value=value, collection=collection, ttl=ttl)
 
@@ -57,7 +57,7 @@ class PrefixKeysWrapper(BaseWrapper):
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,

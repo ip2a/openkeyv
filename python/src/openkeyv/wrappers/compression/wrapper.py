@@ -1,14 +1,14 @@
 import base64
 import binascii
 import gzip
-from collections.abc import Mapping, Sequence
-from typing import Any, SupportsFloat
+from collections.abc import Sequence
+from typing import SupportsFloat
 
 from typing_extensions import override
 
 from openkeyv._utils.managed_entry import dump_to_json_bytes, load_from_json
 from openkeyv.errors import DecompressionError, DeserializationError
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper
 
 # Special keys used to store compressed data
@@ -29,11 +29,11 @@ _COMPRESSION_KEYS = frozenset(
 class CompressionWrapper(BaseWrapper):
     """Wrapper that compresses values before storing and decompresses on retrieval.
 
-    This wrapper compresses the JSON-serialized value using the specified compression algorithm and stores it as a
-    base64-encoded string within a special key in the dictionary. This allows compression
-    while maintaining the dict[str, Any] interface.
+    This wrapper compresses the JSON-serialized value using gzip and stores it as a
+    base64-encoded string within a special envelope dict. This allows compression
+    for any JSON-serializable StoreValue (dict, list, str, int, etc.).
 
-    The compressed format looks like:
+    The compressed envelope looks like:
     {
         "__compressed_data__": "base64-encoded-compressed-data",
         "__compression_algorithm__": "gzip",
@@ -58,11 +58,12 @@ class CompressionWrapper(BaseWrapper):
 
         super().__init__()
 
-    def _compress_value(self, value: dict[str, Any]) -> dict[str, Any]:
-        """Compress a value into the compressed format."""
-        if _COMPRESSED_DATA_KEY in value:
-            self._decompress_value(value)
-            return value
+    def _compress_value(self, value: StoreValue) -> StoreValue:
+        """Compress a value into the compressed envelope format."""
+        # If already a compressed envelope, decompress first then re-compress
+        if isinstance(value, dict) and _COMPRESSED_DATA_KEY in value:
+            decompressed = self._decompress_value(value)
+            return self._compress_value(decompressed)
 
         # Serialize to compact JSON bytes once and check size
         json_bytes = dump_to_json_bytes(obj=value)
@@ -81,12 +82,12 @@ class CompressionWrapper(BaseWrapper):
             _COMPRESSION_ALGORITHM_KEY: _COMPRESSION_ALGORITHM,
         }
 
-    def _decompress_value(self, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Decompress a value from the compressed format."""
+    def _decompress_value(self, value: StoreValue) -> StoreValue:
+        """Decompress a value from the compressed envelope format."""
         if value is None:
             return None
 
-        if _COMPRESSED_DATA_KEY not in value:
+        if not (isinstance(value, dict) and _COMPRESSED_DATA_KEY in value):
             return value
 
         if value.keys() != _COMPRESSION_KEYS:
@@ -117,38 +118,38 @@ class CompressionWrapper(BaseWrapper):
             raise DecompressionError(msg) from e
 
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         value = await self.key_value.get(key=key, collection=collection)
         return self._decompress_value(value)
 
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         values = await self.key_value.get_many(keys=keys, collection=collection)
         return [self._decompress_value(value) for value in values]
 
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         value, ttl = await self.key_value.ttl(key=key, collection=collection)
         return self._decompress_value(value), ttl
 
     @override
-    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[dict[str, Any] | None, float | None]]:
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
         results = await self.key_value.ttl_many(keys=keys, collection=collection)
         return [(self._decompress_value(value), ttl) for value, ttl in results]
 
     @override
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
-        compressed_value = self._compress_value(dict(value))
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+        compressed_value = self._compress_value(value)
         return await self.key_value.put(key=key, value=compressed_value, collection=collection, ttl=ttl)
 
     @override
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
     ) -> None:
-        compressed_values = [self._compress_value(dict(value)) for value in values]
+        compressed_values = [self._compress_value(value) for value in values]
         return await self.key_value.put_many(keys=keys, values=compressed_values, collection=collection, ttl=ttl)

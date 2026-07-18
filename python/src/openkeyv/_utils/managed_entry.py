@@ -4,10 +4,9 @@ The ManagedEntry class wraps stored values with metadata including creation time
 and expiration time. This allows stores to track TTL information consistently.
 """
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, SupportsFloat, cast
+from typing import Any, SupportsFloat
 
 import orjson
 from typing_extensions import Self
@@ -15,6 +14,7 @@ from typing_extensions import Self
 from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.time_to_live import now, now_plus, prepare_ttl, seconds_to
 from openkeyv.errors import DeserializationError, SerializationError
+from openkeyv.protocols.key_value import StoreValue
 
 
 @dataclass(kw_only=True)
@@ -26,7 +26,7 @@ class ManagedEntry:
     - If `expires_at` is provided but `ttl` is not, a live TTL will be computed on access.
     """
 
-    value: Mapping[str, Any]
+    value: StoreValue
 
     created_at: datetime | None = field(default=None)
     expires_at: datetime | None = field(default=None)
@@ -46,11 +46,7 @@ class ManagedEntry:
     @property
     def value_as_json(self) -> str:
         """Return the value as a JSON string."""
-        return dump_to_json(obj=self.value_as_dict)
-
-    @property
-    def value_as_dict(self) -> dict[str, Any]:
-        return verify_dict(obj=self.value)
+        return dump_to_json(obj=self.value)
 
     @property
     def created_at_isoformat(self) -> str | None:
@@ -61,7 +57,7 @@ class ManagedEntry:
         return self.expires_at.isoformat() if self.expires_at else None
 
     @classmethod
-    def from_ttl(cls, *, value: Mapping[str, Any], created_at: datetime | None = None, ttl: SupportsFloat) -> Self:
+    def from_ttl(cls, *, value: StoreValue, created_at: datetime | None = None, ttl: SupportsFloat) -> Self:
         ttl_seconds = prepare_ttl(t=ttl)
         return cls(
             value=value,
@@ -71,8 +67,8 @@ class ManagedEntry:
 
 
 @bear_enforce
-def dump_to_json(obj: dict[str, Any]) -> str:
-    """Serialize a dictionary to a sorted JSON string."""
+def dump_to_json(obj: StoreValue) -> str:
+    """Serialize a value to a sorted JSON string."""
     try:
         return orjson.dumps(obj, option=orjson.OPT_SORT_KEYS).decode()
     except (ValueError, TypeError) as e:
@@ -81,8 +77,8 @@ def dump_to_json(obj: dict[str, Any]) -> str:
 
 
 @bear_enforce
-def dump_to_json_bytes(obj: dict[str, Any]) -> bytes:
-    """Serialize a dictionary to compact JSON bytes."""
+def dump_to_json_bytes(obj: StoreValue) -> bytes:
+    """Serialize a value to compact JSON bytes."""
     try:
         return orjson.dumps(obj)
     except (ValueError, TypeError) as e:
@@ -91,37 +87,16 @@ def dump_to_json_bytes(obj: dict[str, Any]) -> bytes:
 
 
 @bear_enforce
-def load_from_json(json_str: str | bytes) -> dict[str, Any]:
-    """Deserialize JSON string or bytes to a dictionary."""
+def load_from_json(json_str: str | bytes) -> Any:
+    """Deserialize JSON string or bytes to a native Python value."""
     try:
-        loaded = orjson.loads(json_str)
+        return orjson.loads(json_str)
     except (ValueError, TypeError) as e:
         msg: str = f"Failed to deserialize JSON string: {e}"
         raise DeserializationError(msg) from e
 
-    # JSON parse results from standard loaders are already dict[str, Any].
-    # Skip the verify_dict copy for the common path.
-    if isinstance(loaded, dict):
-        return cast("dict[str, Any]", loaded)
 
-    return verify_dict(obj=loaded)
-
-
-@bear_enforce
-def verify_dict(obj: Any) -> dict[str, Any]:
-    """Verify that an object is a mapping with string keys."""
-    if not isinstance(obj, Mapping):
-        msg = "Object is not a Mapping"
-        raise TypeError(msg)
-
-    if not all(isinstance(key, str) for key in obj):  # pyright: ignore[reportUnknownVariableType]
-        msg = "Object contains non-string keys"
-        raise TypeError(msg)
-
-    return dict(cast("Mapping[str, Any]", obj))
-
-
-def estimate_serialized_size(value: Mapping[str, Any]) -> int:
+def estimate_serialized_size(value: StoreValue) -> int:
     """Estimate the serialized size of a value without creating a ManagedEntry.
 
     This function provides a more efficient way to estimate the size of a value
@@ -129,9 +104,9 @@ def estimate_serialized_size(value: Mapping[str, Any]) -> int:
     This is useful for size-based checks in wrappers.
 
     Args:
-        value: The value mapping to estimate the size for.
+        value: The value to estimate the size for.
 
     Returns:
         The estimated size in bytes when serialized to JSON.
     """
-    return len(dump_to_json_bytes(obj=dict(value)))
+    return len(dump_to_json_bytes(obj=value))

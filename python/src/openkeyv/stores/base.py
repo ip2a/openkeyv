@@ -27,6 +27,7 @@ from openkeyv.protocols.key_value import (
     AsyncEnumerateCollectionsProtocol,
     AsyncEnumerateKeysProtocol,
     AsyncKeyValueProtocol,
+    StoreValue,
 )
 
 SEED_DATA_TYPE = Mapping[str, Mapping[str, Mapping[str, Any]]]
@@ -212,7 +213,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         key: str,
         *,
         collection: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> StoreValue:
         """Retrieve a value by key from the specified collection.
 
         Args:
@@ -233,24 +234,24 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         if managed_entry.is_expired:
             return None
 
-        return dict(managed_entry.value)
+        return managed_entry.value
 
     @bear_enforce
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
         entries = await self._get_managed_entries(keys=keys, collection=collection)
         current_time = now()
         return [
-            dict(entry.value) if entry is not None and (entry.expires_at is None or entry.expires_at > current_time) else None
+            entry.value if entry is not None and (entry.expires_at is None or entry.expires_at > current_time) else None
             for entry in entries
         ]
 
     @bear_enforce
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
 
@@ -259,7 +260,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         if managed_entry is None or managed_entry.is_expired:
             return (None, None)
 
-        return (dict(managed_entry.value), managed_entry.ttl)
+        return (managed_entry.value, managed_entry.ttl)
 
     @bear_enforce
     @override
@@ -268,7 +269,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         keys: Sequence[str],
         *,
         collection: str | None = None,
-    ) -> list[tuple[dict[str, Any] | None, float | None]]:
+    ) -> list[tuple[StoreValue, float | None]]:
         """Retrieve multiple values and TTLs by key from the specified collection.
 
         Returns a list of tuples of the form (value, ttl_seconds). Missing or expired
@@ -281,7 +282,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
         current_time = now()
         return [
             (
-                dict(entry.value),
+                entry.value,
                 (entry.expires_at - current_time).total_seconds() if entry.expires_at is not None else None,
             )
             if entry is not None and (entry.expires_at is None or entry.expires_at > current_time)
@@ -333,7 +334,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
 
     @bear_enforce
     @override
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         """Store a key-value pair in the specified collection with optional TTL."""
         collection = self.default_collection if collection is None else collection
         await self.setup_collection(collection=collection)
@@ -353,7 +354,7 @@ class BaseStore(AsyncKeyValueProtocol, ABC):
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,

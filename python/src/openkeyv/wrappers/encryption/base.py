@@ -1,13 +1,13 @@
 import base64
 import binascii
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, SupportsFloat
 
 from typing_extensions import override
 
 from openkeyv._utils.managed_entry import dump_to_json_bytes, load_from_json
 from openkeyv.errors import CorruptedDataError, DecryptionError, DeserializationError, EncryptionError
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper
 
 _ENCRYPTED_DATA_KEY = "__encrypted_data__"
@@ -23,8 +23,14 @@ class BaseEncryptionWrapper(BaseWrapper):
     """Wrapper that encrypts values before storing and decrypts on retrieval.
 
     This wrapper encrypts the JSON-serialized value using a custom encryption function
-    and stores it as a base64-encoded string within a special key in the dictionary.
-    This allows encryption while maintaining the dict[str, Any] interface.
+    and stores it as a base64-encoded string within a special envelope dict. This allows
+    encryption for any JSON-serializable StoreValue (dict, list, str, int, etc.).
+
+    The encrypted envelope looks like:
+    {
+        "__encrypted_data__": "base64-encoded-encrypted-data",
+        "__encryption_version__": 1
+    }
     """
 
     def __init__(
@@ -56,16 +62,8 @@ class BaseEncryptionWrapper(BaseWrapper):
 
         super().__init__()
 
-    def _encrypt_value(self, value: dict[str, Any]) -> dict[str, Any]:
-        """Encrypt a value into the encrypted format.
-
-        The encrypted format looks like:
-        {
-            "__encrypted_data__": "base64-encoded-encrypted-data",
-            "__encryption_version__": 1
-        }
-        """
-
+    def _encrypt_value(self, value: StoreValue) -> dict[str, int | str]:
+        """Encrypt a value into the encrypted envelope format."""
         json_bytes = dump_to_json_bytes(obj=value)
 
         try:
@@ -99,10 +97,19 @@ class BaseEncryptionWrapper(BaseWrapper):
 
         return encryption_version, encrypted_data
 
-    def _decrypt_value(self, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Decrypt a value from the encrypted format."""
+    def _decrypt_value(self, value: StoreValue) -> StoreValue:
+        """Decrypt a value from the encrypted envelope format.
+
+        Non-dict values pass through unchanged (they may be raw bytes, ints, etc.
+        written outside the encryption wrapper). Dict values must be valid encrypted
+        envelopes — a dict that resembles data but is not encrypted is treated as
+        corrupted.
+        """
         if value is None:
             return None
+
+        if not isinstance(value, dict):
+            return value
 
         encryption_version, encrypted_data = self._validate_encrypted_payload(value)
 
@@ -127,38 +134,38 @@ class BaseEncryptionWrapper(BaseWrapper):
             raise CorruptedDataError(msg) from e
 
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         value = await self.key_value.get(key=key, collection=collection)
         return self._decrypt_value(value)
 
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         values = await self.key_value.get_many(keys=keys, collection=collection)
         return [self._decrypt_value(value) for value in values]
 
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         value, ttl = await self.key_value.ttl(key=key, collection=collection)
         return self._decrypt_value(value), ttl
 
     @override
-    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[dict[str, Any] | None, float | None]]:
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
         results = await self.key_value.ttl_many(keys=keys, collection=collection)
         return [(self._decrypt_value(value), ttl) for value, ttl in results]
 
     @override
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
-        encrypted_value = self._encrypt_value(dict(value))
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+        encrypted_value = self._encrypt_value(value)
         return await self.key_value.put(key=key, value=encrypted_value, collection=collection, ttl=ttl)
 
     @override
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
     ) -> None:
-        encrypted_values = [self._encrypt_value(dict(value)) for value in values]
+        encrypted_values = [self._encrypt_value(value) for value in values]
         return await self.key_value.put_many(keys=keys, values=encrypted_values, collection=collection, ttl=ttl)

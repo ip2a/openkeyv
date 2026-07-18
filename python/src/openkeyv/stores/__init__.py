@@ -21,6 +21,7 @@ from openkeyv._internal import (
     RocksDBStore,
     S3Store,
     SimpleStore,
+    SqliteStore,
     ValkeyStore,
     VaultStore,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "RocksDBStore",
     "S3Store",
     "SimpleStore",
+    "SqliteStore",
     "ValkeyStore",
     "VaultStore",
 ]

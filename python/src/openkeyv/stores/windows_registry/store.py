@@ -1,8 +1,8 @@
 """Windows Registry-based key-value store."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Literal, SupportsFloat, cast
+from typing import Literal, SupportsFloat, cast
 
 from typing_extensions import override
 
@@ -10,6 +10,7 @@ from openkeyv._internal import _decode_entry, _encode_entry
 from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.managed_entry import ManagedEntry
 from openkeyv.errors import InvalidKeyError
+from openkeyv.protocols.key_value import StoreValue
 from openkeyv.stores.base import BaseStore
 
 try:
@@ -98,21 +99,21 @@ class WindowsRegistryStore(BaseStore):
 
     @bear_enforce
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         resolved_collection = self.default_collection if collection is None else collection
         self._validate_identities(collection=resolved_collection, keys=(key,))
         return await super().get(key=key, collection=collection)
 
     @bear_enforce
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         resolved_collection = self.default_collection if collection is None else collection
         self._validate_identities(collection=resolved_collection, keys=keys)
         return await super().get_many(keys=keys, collection=collection)
 
     @bear_enforce
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         resolved_collection = self.default_collection if collection is None else collection
         self._validate_identities(collection=resolved_collection, keys=(key,))
         return await super().ttl(key=key, collection=collection)
@@ -124,7 +125,7 @@ class WindowsRegistryStore(BaseStore):
         keys: Sequence[str],
         *,
         collection: str | None = None,
-    ) -> list[tuple[dict[str, Any] | None, float | None]]:
+    ) -> list[tuple[StoreValue, float | None]]:
         resolved_collection = self.default_collection if collection is None else collection
         self._validate_identities(collection=resolved_collection, keys=keys)
         return await super().ttl_many(keys=keys, collection=collection)
@@ -134,7 +135,7 @@ class WindowsRegistryStore(BaseStore):
     async def put(
         self,
         key: str,
-        value: Mapping[str, Any],
+        value: StoreValue,
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
@@ -148,7 +149,7 @@ class WindowsRegistryStore(BaseStore):
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
@@ -204,7 +205,11 @@ class WindowsRegistryStore(BaseStore):
         registry_path = self._get_registry_path(collection=collection)
         created_at_millis = None if managed_entry.created_at is None else int(managed_entry.created_at.timestamp() * 1000)
         expires_at_millis = None if managed_entry.expires_at is None else int(managed_entry.expires_at.timestamp() * 1000)
-        encoded = _encode_entry(dict(managed_entry.value), created_at_millis, expires_at_millis)
+        encoded = _encode_entry(
+            dict(managed_entry.value) if isinstance(managed_entry.value, dict) else managed_entry.value,
+            created_at_millis,
+            expires_at_millis,
+        )
 
         with winreg.OpenKey(self._hive, registry_path, access=winreg.KEY_SET_VALUE) as registry_key:
             winreg.SetValueEx(registry_key, physical_key, 0, winreg.REG_BINARY, encoded)

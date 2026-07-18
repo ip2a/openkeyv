@@ -7,7 +7,7 @@ from pydantic.type_adapter import TypeAdapter
 from pydantic_core import PydanticSerializationError
 
 from openkeyv.errors import DeserializationError, SerializationError
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 
 T = TypeVar("T")
 
@@ -34,7 +34,7 @@ class BasePydanticAdapter(Generic[T], ABC):
         """
         ...
 
-    def _validate_model(self, value: dict[str, Any]) -> T:
+    def _validate_model(self, value: StoreValue) -> T:
         """Validate and deserialize a dict into the configured model type.
 
         This method handles both wrapped and unwrapped values. For types that need wrapping,
@@ -50,6 +50,9 @@ class BasePydanticAdapter(Generic[T], ABC):
         Raises:
             DeserializationError: If the payload shape or model validation is invalid.
         """
+        if not isinstance(value, dict):
+            msg = f"Invalid {self._get_model_type_name()} payload: expected a dict"
+            raise DeserializationError(msg)
         try:
             if self._needs_wrapping:
                 if "items" not in value:
@@ -139,7 +142,7 @@ class BasePydanticAdapter(Generic[T], ABC):
         """
         collection = self._default_collection if collection is None else collection
 
-        values: list[dict[str, Any] | None] = await self._key_value.get_many(keys=keys, collection=collection)
+        values: list[StoreValue] = await self._key_value.get_many(keys=keys, collection=collection)
 
         result: list[T | None] = []
         for value in values:
@@ -197,7 +200,7 @@ class BasePydanticAdapter(Generic[T], ABC):
         """
         collection = self._default_collection if collection is None else collection
 
-        entry: dict[str, Any] | None
+        entry: StoreValue
         ttl_info: float | None
 
         entry, ttl_info = await self._key_value.ttl(key=key, collection=collection)
@@ -211,6 +214,6 @@ class BasePydanticAdapter(Generic[T], ABC):
         """Batch get models with TTLs. Each element is (model|None, ttl_seconds|None)."""
         collection = self._default_collection if collection is None else collection
 
-        entries: list[tuple[dict[str, Any] | None, float | None]] = await self._key_value.ttl_many(keys=keys, collection=collection)
+        entries: list[tuple[StoreValue, float | None]] = await self._key_value.ttl_many(keys=keys, collection=collection)
 
         return [(self._validate_model(value=entry) if entry is not None else None, ttl_info) for entry, ttl_info in entries]

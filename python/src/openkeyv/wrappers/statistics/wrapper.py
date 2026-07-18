@@ -1,11 +1,11 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, SupportsFloat
+from typing import SupportsFloat
 
 from typing_extensions import override
 
 from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper
 
 
@@ -110,7 +110,7 @@ class StatisticsWrapper(BaseWrapper):
         return self._statistics
 
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         collection = DEFAULT_COLLECTION_NAME if collection is None else collection
 
         value = await self.key_value.get(collection=collection, key=key)
@@ -124,7 +124,7 @@ class StatisticsWrapper(BaseWrapper):
         return None
 
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         collection = DEFAULT_COLLECTION_NAME if collection is None else collection
 
         value, ttl = await self.key_value.ttl(collection=collection, key=key)
@@ -137,7 +137,7 @@ class StatisticsWrapper(BaseWrapper):
         return None, None
 
     @override
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         collection = DEFAULT_COLLECTION_NAME if collection is None else collection
 
         await self.key_value.put(collection=collection, key=key, value=value, ttl=ttl)
@@ -157,10 +157,10 @@ class StatisticsWrapper(BaseWrapper):
         return False
 
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         collection = DEFAULT_COLLECTION_NAME if collection is None else collection
 
-        results: list[dict[str, Any] | None] = await self.key_value.get_many(keys=keys, collection=collection)
+        results: list[StoreValue] = await self.key_value.get_many(keys=keys, collection=collection)
 
         hits = 0
         for result in results:
@@ -177,7 +177,7 @@ class StatisticsWrapper(BaseWrapper):
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
@@ -203,10 +203,10 @@ class StatisticsWrapper(BaseWrapper):
         return deleted_count
 
     @override
-    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[dict[str, Any] | None, float | None]]:
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
         collection = DEFAULT_COLLECTION_NAME if collection is None else collection
 
-        results: list[tuple[dict[str, Any] | None, float | None]] = await self.key_value.ttl_many(keys=keys, collection=collection)
+        results: list[tuple[StoreValue, float | None]] = await self.key_value.ttl_many(keys=keys, collection=collection)
 
         hits = 0
         for result in results:

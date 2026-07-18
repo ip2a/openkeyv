@@ -17,7 +17,7 @@ from openkeyv.errors import (
     ReadOnlyError,
     RoutingError,
 )
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers import (
     BaseEncryptionWrapper,
     CollectionRoutingWrapper,
@@ -296,7 +296,7 @@ class _SlowGetWrapper(BaseWrapper):
         self.key_value = key_value
 
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         await asyncio.sleep(0.05)
         return await super().get(key, collection=collection)
 

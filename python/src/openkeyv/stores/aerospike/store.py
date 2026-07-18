@@ -1,7 +1,7 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from math import ceil
-from typing import Any, SupportsFloat, cast, overload
+from typing import SupportsFloat, cast, overload
 
 from typing_extensions import override
 
@@ -10,6 +10,7 @@ from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.compound import compound_key, get_keys_from_compound_keys, uncompound_key
 from openkeyv._utils.managed_entry import ManagedEntry
 from openkeyv.errors import InvalidKeyError
+from openkeyv.protocols.key_value import StoreValue
 from openkeyv.stores.base import BaseContextManagerStore, BaseDestroyStore, BaseEnumerateKeysStore, BaseStore
 
 try:
@@ -141,21 +142,21 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
 
     @bear_enforce
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         collection = self.default_collection if collection is None else collection
         self._physical_key(collection=collection, key=key)
         return await super().get(key=key, collection=collection)
 
     @bear_enforce
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         collection = self.default_collection if collection is None else collection
         self._validate_keys(collection=collection, keys=keys)
         return await super().get_many(keys=keys, collection=collection)
 
     @bear_enforce
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         collection = self.default_collection if collection is None else collection
         self._physical_key(collection=collection, key=key)
         return await super().ttl(key=key, collection=collection)
@@ -167,7 +168,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
         keys: Sequence[str],
         *,
         collection: str | None = None,
-    ) -> list[tuple[dict[str, Any] | None, float | None]]:
+    ) -> list[tuple[StoreValue, float | None]]:
         collection = self.default_collection if collection is None else collection
         self._validate_keys(collection=collection, keys=keys)
         return await super().ttl_many(keys=keys, collection=collection)
@@ -177,7 +178,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
     async def put(
         self,
         key: str,
-        value: Mapping[str, Any],
+        value: StoreValue,
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
@@ -191,7 +192,7 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
@@ -325,7 +326,11 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
         aerospike_key = (self._namespace, self._set, combo_key)
         created_at_millis = None if managed_entry.created_at is None else int(managed_entry.created_at.timestamp() * 1000)
         expires_at_millis = None if managed_entry.expires_at is None else int(managed_entry.expires_at.timestamp() * 1000)
-        encoded = _encode_entry(dict(managed_entry.value), created_at_millis, expires_at_millis)
+        encoded = _encode_entry(
+            dict(managed_entry.value) if isinstance(managed_entry.value, dict) else managed_entry.value,
+            created_at_millis,
+            expires_at_millis,
+        )
 
         ttl = managed_entry.ttl
         native_ttl = aerospike.TTL_NEVER_EXPIRE if ttl is None else max(1, ceil(ttl))

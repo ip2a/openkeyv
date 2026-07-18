@@ -8,8 +8,9 @@ from elastic_transport import SerializationError as ElasticsearchSerializationEr
 
 from openkeyv._utils.managed_entry import ManagedEntry
 from openkeyv.errors import DeserializationError, InvalidKeyError, InvalidTTLError, StoreConnectionError
+from openkeyv.stores.elasticsearch.codec import ElasticsearchDocumentCodec
 from openkeyv.stores.elasticsearch.serializers import LessCapableJsonSerializer
-from openkeyv.stores.elasticsearch.store import ElasticsearchSerializationAdapter, ElasticsearchStore
+from openkeyv.stores.elasticsearch.store import ElasticsearchStore
 
 
 class FakeResponse:
@@ -97,34 +98,32 @@ def document_id(key: str) -> str:
 
 
 def source_document(*, key: str = "key", collection: str = "items") -> dict[str, Any]:
-    return ElasticsearchSerializationAdapter().dump_dict(entry=managed_entry(), key=key, collection=collection)
+    return ElasticsearchDocumentCodec().dump_dict(entry=managed_entry(), key=key, collection=collection)
 
 
-def test_elasticsearch_serialization_adapter_roundtrip() -> None:
-    adapter = ElasticsearchSerializationAdapter()
-    document = adapter.dump_dict(entry=managed_entry(), key="key", collection="items")
+def test_elasticsearch_document_codec_roundtrip() -> None:
+    codec = ElasticsearchDocumentCodec()
+    document = codec.dump_dict(entry=managed_entry(), key="key", collection="items")
 
     assert document == {
-        "version": 1,
         "key": "key",
         "collection": "items",
         "created_at": "2026-01-02T00:00:00+00:00",
         "value": {"flattened": {"nested": {"value": 1}}},
     }
-    assert adapter.load_dict(data=document) == managed_entry()
+    assert codec.load_dict(data=document) == managed_entry()
 
 
 @pytest.mark.parametrize(
     ("document", "message"),
     [
-        ({"version": 2}, "version must be 1"),
-        ({"version": 1, "created_at": 1}, "created_at must be"),
-        ({"version": 1, "created_at": "2026-01-02T00:00:00+00:00", "value": {"flattened": []}}, "flattened must be"),
+        ({"created_at": 1}, "created_at must be"),
+        ({"created_at": "2026-01-02T00:00:00+00:00", "value": {"flattened": []}}, "flattened must be"),
     ],
 )
-def test_elasticsearch_serialization_adapter_rejects_invalid_documents(document: dict[str, Any], message: str) -> None:
+def test_elasticsearch_document_codec_rejects_invalid_documents(document: dict[str, Any], message: str) -> None:
     with pytest.raises(DeserializationError, match=message):
-        ElasticsearchSerializationAdapter().load_dict(data=document)
+        ElasticsearchDocumentCodec().load_dict(data=document)
 
 
 def test_elasticsearch_json_serializer_rejects_unknown_objects() -> None:

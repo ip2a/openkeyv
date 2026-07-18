@@ -1,12 +1,12 @@
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any, Literal, SupportsFloat
 
 from typing_extensions import override
 
 from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
 from openkeyv._utils.managed_entry import dump_to_json_bytes
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper
 
 
@@ -59,7 +59,7 @@ class LoggingWrapper(BaseWrapper):
         action: str,
         keys: Sequence[str] | str,
         collection: str | None,
-        values: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+        values: StoreValue | Sequence[StoreValue] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> str:
         if self.structured_logs:
@@ -92,7 +92,7 @@ class LoggingWrapper(BaseWrapper):
         action: str,
         keys: Sequence[str] | str,
         collection: str | None,
-        values: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+        values: StoreValue | Sequence[StoreValue] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
         self.logger.log(
@@ -100,7 +100,7 @@ class LoggingWrapper(BaseWrapper):
         )
 
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         self._log(state="start", action="GET", keys=key, collection=collection)
 
         result = await self.key_value.get(key=key, collection=collection)
@@ -110,7 +110,7 @@ class LoggingWrapper(BaseWrapper):
         return result
 
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         self._log(state="start", action="GET_MANY", keys=keys, collection=collection, extra={"keys": keys[:5]})
 
         results = await self.key_value.get_many(keys=keys, collection=collection)
@@ -123,7 +123,7 @@ class LoggingWrapper(BaseWrapper):
         return results
 
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         self._log(state="start", action="TTL", keys=key, collection=collection)
 
         value, ttl = await self.key_value.ttl(key=key, collection=collection)
@@ -133,7 +133,7 @@ class LoggingWrapper(BaseWrapper):
         return value, ttl
 
     @override
-    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[dict[str, Any] | None, float | None]]:
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
         self._log(state="start", action="TTL_MANY", keys=keys, collection=collection, extra={"keys": keys[:5]})
 
         results = await self.key_value.ttl_many(keys=keys, collection=collection)
@@ -146,7 +146,7 @@ class LoggingWrapper(BaseWrapper):
         return results
 
     @override
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         self._log(state="start", action="PUT", keys=key, collection=collection, values=value, extra={"ttl": ttl})
 
         await self.key_value.put(key=key, value=value, collection=collection, ttl=ttl)
@@ -157,7 +157,7 @@ class LoggingWrapper(BaseWrapper):
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,

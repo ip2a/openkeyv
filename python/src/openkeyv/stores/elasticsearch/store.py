@@ -1,5 +1,5 @@
 import base64
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any, SupportsFloat, cast, overload
@@ -8,9 +8,9 @@ from typing_extensions import override
 
 from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.managed_entry import ManagedEntry
-from openkeyv._utils.serialization import SerializationAdapter
 from openkeyv._utils.time_to_live import now_as_epoch, prepare_ttl
 from openkeyv.errors import DeserializationError, InvalidKeyError, SerializationError, StoreConnectionError
+from openkeyv.protocols.key_value import StoreValue
 from openkeyv.stores.base import (
     BaseContextManagerStore,
     BaseCullStore,
@@ -19,6 +19,7 @@ from openkeyv.stores.base import (
     BaseEnumerateKeysStore,
     BaseStore,
 )
+from openkeyv.stores.elasticsearch.codec import ElasticsearchDocumentCodec
 from openkeyv.stores.elasticsearch.serializers import LessCapableJsonSerializer, LessCapableNdjsonSerializer
 
 try:
@@ -45,9 +46,6 @@ DEFAULT_MAPPING = {
         "key": {
             "type": "keyword",
         },
-        "version": {
-            "type": "integer",
-        },
         "value": {
             "properties": {
                 "flattened": {
@@ -65,60 +63,6 @@ INDEX_ENCODING_PREFIX = "okv1-"
 MAX_INDEX_BYTES = 255
 MAX_DOCUMENT_ID_BYTES = 512
 ALLOWED_INDEX_PREFIX_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-.")
-
-
-class ElasticsearchSerializationAdapter(SerializationAdapter):
-    """Adapter for Elasticsearch."""
-
-    def __init__(self) -> None:
-        """Initialize the Elasticsearch adapter"""
-        super().__init__()
-
-        self._date_format = "isoformat"
-        self._value_format = "dict"
-
-    @override
-    def prepare_dump(self, data: dict[str, Any]) -> dict[str, Any]:
-        value = data.pop("value")
-
-        data["value"] = {
-            "flattened": value,
-        }
-
-        return data
-
-    @override
-    def prepare_load(self, data: dict[str, Any]) -> dict[str, Any]:
-        if data.get("version") != 1:
-            msg = "Elasticsearch document version must be 1"
-            raise DeserializationError(msg)
-
-        if not isinstance(data.get("created_at"), str):
-            msg = "Elasticsearch document created_at must be an ISO datetime string"
-            raise DeserializationError(msg)
-
-        if "expires_at" in data and not isinstance(data["expires_at"], str):
-            msg = "Elasticsearch document expires_at must be an ISO datetime string"
-            raise DeserializationError(msg)
-
-        value = data.get("value")
-        if not isinstance(value, dict):
-            msg = "Elasticsearch document value must be an object"
-            raise DeserializationError(msg)
-        value = cast("dict[str, Any]", value)
-
-        flattened = value.get("flattened")
-        if not isinstance(flattened, dict):
-            msg = "Elasticsearch document value.flattened must be an object with string keys"
-            raise DeserializationError(msg)
-        flattened = cast("dict[Any, Any]", flattened)
-        if not all(isinstance(key, str) for key in flattened):
-            msg = "Elasticsearch document value.flattened must be an object with string keys"
-            raise DeserializationError(msg)
-
-        data["value"] = cast("dict[str, Any]", flattened)
-
-        return data
 
 
 class ElasticsearchStore(
@@ -141,7 +85,7 @@ class ElasticsearchStore(
 
     _default_collection: str | None
 
-    _serializer: SerializationAdapter
+    _serializer: ElasticsearchDocumentCodec
 
     _auto_create: bool
 
@@ -240,7 +184,7 @@ class ElasticsearchStore(
         self._index_prefix = normalized_index_prefix
         self._is_serverless = False
 
-        self._serializer = ElasticsearchSerializationAdapter()
+        self._serializer = ElasticsearchDocumentCodec()
         self._auto_create = auto_create
 
         super().__init__(
@@ -255,20 +199,20 @@ class ElasticsearchStore(
 
     @bear_enforce
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         self._get_document_id(key=key)
         return await super().get(key=key, collection=collection)
 
     @bear_enforce
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         for key in keys:
             self._get_document_id(key=key)
         return await super().get_many(keys=keys, collection=collection)
 
     @bear_enforce
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         self._get_document_id(key=key)
         return await super().ttl(key=key, collection=collection)
 
@@ -279,7 +223,7 @@ class ElasticsearchStore(
         keys: Sequence[str],
         *,
         collection: str | None = None,
-    ) -> list[tuple[dict[str, Any] | None, float | None]]:
+    ) -> list[tuple[StoreValue, float | None]]:
         for key in keys:
             self._get_document_id(key=key)
         return await super().ttl_many(keys=keys, collection=collection)
@@ -289,7 +233,7 @@ class ElasticsearchStore(
     async def put(
         self,
         key: str,
-        value: Mapping[str, Any],
+        value: StoreValue,
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
@@ -303,7 +247,7 @@ class ElasticsearchStore(
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,

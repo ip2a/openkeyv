@@ -1,10 +1,10 @@
-from collections.abc import Mapping, Sequence
-from typing import Any, SupportsFloat
+from collections.abc import Sequence
+from typing import SupportsFloat
 
 from typing_extensions import override
 
 from openkeyv._utils.beartype import bear_enforce
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 
 
 class BaseWrapper(AsyncKeyValue):
@@ -31,27 +31,27 @@ class BaseWrapper(AsyncKeyValue):
 
     @bear_enforce
     @override
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         return await self.key_value.get(collection=collection, key=key)
 
     @bear_enforce
     @override
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         return await self.key_value.get_many(collection=collection, keys=keys)
 
     @bear_enforce
     @override
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         return await self.key_value.ttl(collection=collection, key=key)
 
     @bear_enforce
     @override
-    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[dict[str, Any] | None, float | None]]:
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
         return await self.key_value.ttl_many(collection=collection, keys=keys)
 
     @bear_enforce
     @override
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         return await self.key_value.put(collection=collection, key=key, value=value, ttl=ttl)
 
     @bear_enforce
@@ -59,7 +59,7 @@ class BaseWrapper(AsyncKeyValue):
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,

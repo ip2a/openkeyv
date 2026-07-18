@@ -1,11 +1,11 @@
-from collections.abc import Mapping, Sequence
-from typing import Any, SupportsFloat
+from collections.abc import Sequence
+from typing import SupportsFloat
 
 from typing_extensions import override
 
 from openkeyv._utils.managed_entry import estimate_serialized_size
 from openkeyv.errors import EntryTooLargeError, EntryTooSmallError
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper
 
 
@@ -39,7 +39,7 @@ class LimitSizeWrapper(BaseWrapper):
 
         super().__init__()
 
-    def _validate_size(self, value: Mapping[str, Any], *, collection: str | None = None, key: str | None = None) -> None:
+    def _validate_size(self, value: StoreValue, *, collection: str | None = None, key: str | None = None) -> None:
         """Raise when a value is outside the configured size limits.
 
         Args:
@@ -61,7 +61,7 @@ class LimitSizeWrapper(BaseWrapper):
             raise EntryTooLargeError(size=item_size, max_size=self.max_size, collection=collection, key=key)
 
     @override
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         self._validate_size(value=value, collection=collection, key=key)
         await self.key_value.put(collection=collection, key=key, value=value, ttl=ttl)
 
@@ -69,7 +69,7 @@ class LimitSizeWrapper(BaseWrapper):
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,

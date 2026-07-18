@@ -1,8 +1,8 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any, Literal, SupportsFloat, overload
 
 from openkeyv.errors import MissingKeyError
-from openkeyv.protocols.key_value import AsyncKeyValue
+from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 
 
 class RaiseOnMissingAdapter:
@@ -15,7 +15,7 @@ class RaiseOnMissingAdapter:
         self.key_value: AsyncKeyValue = key_value
 
     @overload
-    async def get(self, key: str, *, collection: str | None = None, raise_on_missing: Literal[False] = False) -> dict[str, Any] | None: ...
+    async def get(self, key: str, *, collection: str | None = None, raise_on_missing: Literal[False] = False) -> StoreValue: ...
 
     @overload
     async def get(self, key: str, *, collection: str | None = None, raise_on_missing: Literal[True]) -> dict[str, Any]: ...
@@ -26,7 +26,7 @@ class RaiseOnMissingAdapter:
         *,
         collection: str | None = None,
         raise_on_missing: bool = False,
-    ) -> dict[str, Any] | None:
+    ) -> StoreValue:
         """Retrieve a value by key from the specified collection.
 
         Args:
@@ -50,7 +50,7 @@ class RaiseOnMissingAdapter:
     @overload
     async def get_many(
         self, keys: Sequence[str], *, collection: str | None = None, raise_on_missing: Literal[False] = False
-    ) -> list[dict[str, Any] | None]: ...
+    ) -> list[StoreValue]: ...
 
     @overload
     async def get_many(
@@ -59,7 +59,7 @@ class RaiseOnMissingAdapter:
 
     async def get_many(
         self, keys: Sequence[str], *, collection: str | None = None, raise_on_missing: bool = False
-    ) -> list[dict[str, Any]] | list[dict[str, Any] | None]:
+    ) -> list[dict[str, Any]] | list[StoreValue]:
         """Retrieve multiple values by key from the specified collection.
 
         Args:
@@ -69,7 +69,7 @@ class RaiseOnMissingAdapter:
         Returns:
             The values for the keys, or [] if the key is not found.
         """
-        results: list[dict[str, Any] | None] = await self.key_value.get_many(collection=collection, keys=keys)
+        results: list[StoreValue] = await self.key_value.get_many(collection=collection, keys=keys)
 
         for i, key in enumerate(keys):
             if results[i] is None and raise_on_missing:
@@ -80,16 +80,14 @@ class RaiseOnMissingAdapter:
     @overload
     async def ttl(
         self, key: str, *, collection: str | None = None, raise_on_missing: Literal[False] = False
-    ) -> tuple[dict[str, Any] | None, float | None]: ...
+    ) -> tuple[StoreValue, float | None]: ...
 
     @overload
     async def ttl(
         self, key: str, *, collection: str | None = None, raise_on_missing: Literal[True]
     ) -> tuple[dict[str, Any], float | None]: ...
 
-    async def ttl(
-        self, key: str, *, collection: str | None = None, raise_on_missing: bool = False
-    ) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None, raise_on_missing: bool = False) -> tuple[StoreValue, float | None]:
         """Retrieve the value and TTL information for a key-value pair from the specified collection.
 
         Args:
@@ -113,7 +111,7 @@ class RaiseOnMissingAdapter:
     @overload
     async def ttl_many(
         self, keys: Sequence[str], *, collection: str | None = None, raise_on_missing: Literal[False] = False
-    ) -> list[tuple[dict[str, Any] | None, float | None]]: ...
+    ) -> list[tuple[StoreValue, float | None]]: ...
 
     @overload
     async def ttl_many(
@@ -122,14 +120,14 @@ class RaiseOnMissingAdapter:
 
     async def ttl_many(
         self, keys: Sequence[str], *, collection: str | None = None, raise_on_missing: bool = False
-    ) -> list[tuple[dict[str, Any], float | None]] | list[tuple[dict[str, Any] | None, float | None]]:
+    ) -> list[tuple[dict[str, Any], float | None]] | list[tuple[StoreValue, float | None]]:
         """Retrieve multiple values and TTL information by key from the specified collection.
 
         Args:
             keys: The keys to retrieve the values and TTL information from.
             collection: The collection to retrieve keys from. If no collection is provided, it will use the default collection.
         """
-        results: list[tuple[dict[str, Any] | None, float | None]] = await self.key_value.ttl_many(collection=collection, keys=keys)
+        results: list[tuple[StoreValue, float | None]] = await self.key_value.ttl_many(collection=collection, keys=keys)
 
         for i, key in enumerate(keys):
             if results[i][0] is None and raise_on_missing:
@@ -137,7 +135,7 @@ class RaiseOnMissingAdapter:
 
         return results
 
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         """Store a key-value pair in the specified collection with optional TTL.
 
         Args:
@@ -152,7 +150,7 @@ class RaiseOnMissingAdapter:
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,

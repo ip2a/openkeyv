@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, SupportsFloat, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from openkeyv._internal import (
         CompareAndDeleteResult,
@@ -11,6 +11,12 @@ if TYPE_CHECKING:
         Revision,
         RevisionedValue,
     )
+
+# The union of all value types that an openkeyv store can accept and return.
+# This mirrors the Rust ``Value`` -> Python projection (see ``py/value.rs::value_to_py``):
+# Binary -> bytes, Utf8 -> str, Integer -> int, UnsignedInteger -> int,
+# Float -> float, Bool -> bool, Null -> None, Structured(Dict) -> dict, Structured(List) -> list.
+StoreValue = int | str | bytes | float | bool | list[Any] | dict[str, Any] | None
 
 
 @runtime_checkable
@@ -28,7 +34,7 @@ class AsyncKeyValueProtocol(Protocol):
         key: str,
         *,
         collection: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> StoreValue:
         """Retrieve a value by key from the specified collection.
 
         Args:
@@ -40,7 +46,7 @@ class AsyncKeyValueProtocol(Protocol):
         """
         ...
 
-    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[dict[str, Any] | None, float | None]:
+    async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         """Retrieve the value and TTL information for a key-value pair from the specified collection.
 
         Args:
@@ -53,7 +59,7 @@ class AsyncKeyValueProtocol(Protocol):
         """
         ...
 
-    async def put(self, key: str, value: Mapping[str, Any], *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         """Store a key-value pair in the specified collection with optional TTL.
 
         Args:
@@ -77,7 +83,7 @@ class AsyncKeyValueProtocol(Protocol):
         """
         ...
 
-    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[dict[str, Any] | None]:
+    async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         """Retrieve multiple values by key from the specified collection.
 
         Args:
@@ -85,11 +91,11 @@ class AsyncKeyValueProtocol(Protocol):
             collection: The collection to retrieve keys from. If no collection is provided, it will use the default collection.
 
         Returns:
-            A list of values for the keys. Each value is either a dict or None if the key is not found.
+            A list of values for the keys. Each value is either a StoreValue or None if the key is not found.
         """
         ...
 
-    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[dict[str, Any] | None, float | None]]:
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
         """Retrieve multiple values and TTL information by key from the specified collection.
 
         Args:
@@ -97,7 +103,7 @@ class AsyncKeyValueProtocol(Protocol):
             collection: The collection to retrieve keys from. If no collection is provided, it will use the default collection.
 
         Returns:
-            A list of tuples containing (value, ttl) for each key. Each tuple contains either (dict, float) or (None, None) if the
+            A list of tuples containing (value, ttl) for each key. Each tuple contains either (StoreValue, float) or (None, None) if the
             key is not found.
         """
         ...
@@ -105,7 +111,7 @@ class AsyncKeyValueProtocol(Protocol):
     async def put_many(
         self,
         keys: Sequence[str],
-        values: Sequence[Mapping[str, Any]],
+        values: Sequence[StoreValue],
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
@@ -231,7 +237,7 @@ class AsyncCompareAndSwapProtocol(Protocol):
         self,
         key: str,
         expected: Revision | None,
-        value: Mapping[str, Any],
+        value: StoreValue,
         *,
         collection: str | None = None,
         ttl: SupportsFloat | None = None,
