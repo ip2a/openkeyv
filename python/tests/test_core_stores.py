@@ -1,8 +1,9 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
-from openkeyv import MemoryStore, NullStore, SimpleStore
+from openkeyv import MemoryStore, NullStore, SimpleStore, SqliteStore
 
 
 @pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore])
@@ -62,6 +63,18 @@ async def test_local_store_ttl_expires(store_type: type[MemoryStore] | type[Simp
 
     assert await store.get("temporary") is None
     assert await store.ttl("temporary") == (None, None)
+
+
+async def test_sqlite_store_persists_values(tmp_path: Path) -> None:
+    path = str(tmp_path / "openkeyv.sqlite3")
+    store = SqliteStore(path)
+    value = {"bytes": b"payload", "items": [1, True, None]}
+
+    await store.put("key", value, collection="items")
+
+    reopened = SqliteStore(path)
+    assert await reopened.get("key", collection="items") == value
+    assert await reopened.destroy() is True
 
 
 async def test_batch_size_mismatch_raises() -> None:
