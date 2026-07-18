@@ -26,6 +26,7 @@
 //! | DynamoDB | `dynamodb` | AWS DynamoDB |
 //! | S3 | `s3` | AWS S3 |
 //! | DuckDB | `duckdb` | DuckDB embedded |
+//! | SQLite | `sqlite` | SQLite embedded |
 //! | Memcached | `memcached` | Memcached |
 //! | Valkey | `valkey` | Valkey (Redis-compatible) |
 //! | Vault | `vault` | HashiCorp Vault |
@@ -33,6 +34,7 @@
 //! | Firestore | `firestore` | Google Firestore |
 //! | OpenSearch | `opensearch` | OpenSearch |
 
+#[cfg(any(feature = "redis", feature = "valkey"))]
 mod cas;
 pub mod change;
 pub mod entry;

@@ -27,6 +27,8 @@ mod redis;
 mod rocksdb;
 #[cfg(feature = "s3")]
 mod s3;
+#[cfg(feature = "sqlite")]
+mod sqlite;
 #[cfg(feature = "valkey")]
 mod valkey;
 #[cfg(feature = "vault")]
@@ -57,6 +59,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<s3::PyS3Store>()?;
     #[cfg(feature = "duckdb")]
     m.add_class::<duckdb::PyDuckDBStore>()?;
+    #[cfg(feature = "sqlite")]
+    m.add_class::<sqlite::PySqliteStore>()?;
     #[cfg(feature = "memcached")]
     m.add_class::<memcached::PyMemcachedStore>()?;
     #[cfg(feature = "vault")]

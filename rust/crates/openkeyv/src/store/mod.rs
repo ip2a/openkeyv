@@ -26,6 +26,8 @@ pub mod rocksdb;
 #[cfg(feature = "s3")]
 pub mod s3;
 pub mod simple;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 #[cfg(feature = "valkey")]
 pub mod valkey;
 #[cfg(feature = "vault")]

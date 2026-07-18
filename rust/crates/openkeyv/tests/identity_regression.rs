@@ -160,3 +160,13 @@ async fn duckdb_identity_regression() {
     assert_exact_identity(&store).await;
     assert_collection_identity_and_destruction(&store).await;
 }
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_identity_regression() {
+    let store = openkeyv::store::sqlite::SqliteStore::new(None, None)
+        .await
+        .unwrap();
+    assert_exact_identity(&store).await;
+    assert_collection_identity_and_destruction(&store).await;
+}

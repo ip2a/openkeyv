@@ -39,6 +39,7 @@ aws-config = { version = "1", optional = true }
 aws-sdk-dynamodb = { version = "1", optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 duckdb = { version = "1.2", features = ["bundled", "chrono"], optional = true }
+rusqlite = { version = "0.32", features = ["bundled", "chrono"], optional = true }
 memcache = { version = "0.19", optional = true }
 vaultrs = { version = "0.8", optional = true }
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"], optional = true }
@@ -58,6 +59,7 @@ rocksdb = ["dep:rocksdb"]
 dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
 s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 duckdb = ["dep:duckdb"]
+sqlite = ["dep:rusqlite"]
 memcached = ["dep:memcache"]
 valkey = ["dep:redis"]
 vault = ["dep:vaultrs", "dep:futures-util", "dep:serde", "dep:serde_json"]
@@ -65,7 +67,7 @@ keyring = ["dep:keyring"]
 firestore = ["dep:firestore", "dep:futures-util", "dep:serde", "bytes/serde"]
 opensearch = ["dep:opensearch", "dep:serde", "dep:serde_json"]
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
-python-full = ["python", "disk", "redis", "postgres", "mongodb", "rocksdb", "dynamodb", "s3", "duckdb", "memcached", "valkey", "vault", "keyring", "firestore", "opensearch"]
+python-full = ["python", "disk", "redis", "postgres", "mongodb", "rocksdb", "dynamodb", "s3", "duckdb", "sqlite", "memcached", "valkey", "vault", "keyring", "firestore", "opensearch"]
 
 [dev-dependencies]
 gcloud-sdk = "0.29"
