@@ -100,29 +100,59 @@ def source_document(*, key: str = "key", collection: str = "items") -> dict[str,
     return ElasticsearchDocumentCodec().dump_dict(entry=managed_entry(), key=key, collection=collection)
 
 
-def test_elasticsearch_document_codec_roundtrip() -> None:
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"nested": {"value": 1}},
+        [None, True, 1.5, "text", b"bytes"],
+        b"binary",
+        "text",
+        -(2**63),
+        2**63,
+        2**64 - 1,
+        1.5,
+        True,
+        None,
+    ],
+)
+def test_elasticsearch_document_codec_roundtrip(value: object) -> None:
     codec = ElasticsearchDocumentCodec()
-    document = codec.dump_dict(entry=managed_entry(), key="key", collection="items")
+    entry = ManagedEntry(
+        value=value,  # type: ignore[arg-type]
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+    document = codec.dump_dict(entry=entry, key="key", collection="items")
 
-    assert document == {
-        "key": "key",
-        "collection": "items",
-        "created_at": "2026-01-02T00:00:00+00:00",
-        "value": {"flattened": {"nested": {"value": 1}}},
-    }
-    assert codec.load_dict(data=document) == managed_entry()
+    assert document["key"] == "key"
+    assert document["collection"] == "items"
+    assert document["created_at"] == "2026-01-02T00:00:00+00:00"
+    assert document["expires_at"] == "2026-01-03T00:00:00+00:00"
+    assert isinstance(document["entry"], str)
+    assert "value" not in document
+    assert codec.load_dict(data=document) == entry
+    assert codec.load_json(codec.dump_json(entry, key="key", collection="items")) == entry
 
 
 @pytest.mark.parametrize(
     ("document", "message"),
     [
-        ({"created_at": 1}, "created_at must be"),
-        ({"created_at": "2026-01-02T00:00:00+00:00", "value": {"flattened": []}}, "flattened must be"),
+        ({}, "entry must be a base64 string"),
+        ({"entry": 1}, "entry must be a base64 string"),
+        ({"entry": "not base64!"}, "Invalid Elasticsearch entry"),
+        ({"entry": base64.b64encode(b"not OKVE1").decode("ascii")}, "Invalid Elasticsearch entry"),
+        ({"value": {"flattened": {}}}, "entry must be a base64 string"),
     ],
 )
 def test_elasticsearch_document_codec_rejects_invalid_documents(document: dict[str, Any], message: str) -> None:
     with pytest.raises(DeserializationError, match=message):
         ElasticsearchDocumentCodec().load_dict(data=document)
+
+
+@pytest.mark.parametrize("document", ["[]", "{1", '"value"'])
+def test_elasticsearch_document_codec_rejects_invalid_json(document: str) -> None:
+    with pytest.raises(DeserializationError):
+        ElasticsearchDocumentCodec().load_json(document)
 
 
 def test_elasticsearch_json_serializer_rejects_unknown_objects() -> None:

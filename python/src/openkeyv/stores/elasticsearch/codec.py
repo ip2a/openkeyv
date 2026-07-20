@@ -1,105 +1,60 @@
-"""Elasticsearch-specific document codec.
+"""Elasticsearch document encoding at the external JSON boundary."""
 
-Converts between ManagedEntry objects and Elasticsearch document format.
-This is an internal implementation detail of the Elasticsearch store, not a public API.
-"""
+import base64
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, cast
 
-from datetime import datetime
-from typing import Any, Literal, TypeVar, cast
+import orjson
 
-from openkeyv._utils.beartype import bear_enforce
-from openkeyv._utils.managed_entry import ManagedEntry, dump_to_json, load_from_json
+from openkeyv._internal import _decode_entry, _encode_entry
+from openkeyv._utils.managed_entry import ManagedEntry
 from openkeyv.errors import DeserializationError, SerializationError
 
-T = TypeVar("T")
+if TYPE_CHECKING:
+    from openkeyv.protocols.key_value import StoreValue
 
 
-@bear_enforce
-def key_must_be(dictionary: dict[str, Any], /, key: str, expected_type: type[T]) -> T | None:
-    """Check that a dictionary key is of the expected type, returning None if missing."""
-    if key not in dictionary:
-        return None
-    if not isinstance(dictionary[key], expected_type):
-        msg = f"{key} must be a {expected_type.__name__}"
-        raise TypeError(msg)
-    return dictionary[key]
+def _milliseconds(value: datetime | None) -> int | None:
+    return None if value is None else int(value.timestamp() * 1000)
 
 
-@bear_enforce
-def parse_datetime_str(value: str) -> datetime:
-    """Parse an ISO format datetime string."""
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        msg = f"Invalid datetime string: {value}"
-        raise DeserializationError(message=msg) from None
+def _datetime(value: int | None) -> datetime | None:
+    return None if value is None else datetime.fromtimestamp(value / 1000, tz=timezone.utc)
 
 
 class ElasticsearchDocumentCodec:
-    """Document codec for Elasticsearch documents.
-
-    Converts between ManagedEntry objects and the Elasticsearch document format
-    where values are stored under a ``value.flattened`` key and timestamps are
-    ISO-format strings.
-    """
-
-    _date_format: Literal["isoformat", "datetime"]
-    _value_format: Literal["string", "dict"]
-
-    def __init__(
-        self, *, date_format: Literal["isoformat", "datetime"] = "isoformat", value_format: Literal["string", "dict"] = "dict"
-    ) -> None:
-        self._date_format = date_format
-        self._value_format = value_format
+    """Store the Rust core ``OKVE1`` entry inside an Elasticsearch binary field."""
 
     def load_json(self, json_str: str) -> ManagedEntry:
-        """Convert a JSON string to a ManagedEntry."""
-        loaded_data: dict[str, Any] = load_from_json(json_str=json_str)
-        return self.load_dict(data=loaded_data)
+        try:
+            loaded: object = orjson.loads(json_str)
+        except (orjson.JSONDecodeError, TypeError) as error:
+            msg = f"Invalid Elasticsearch document JSON: {error}"
+            raise DeserializationError(msg) from error
+        if not isinstance(loaded, dict):
+            msg = "Elasticsearch document must be an object with string keys"
+            raise DeserializationError(msg)
+        data = cast("dict[object, object]", loaded)
+        if not all(isinstance(key, str) for key in data):
+            msg = "Elasticsearch document must be an object with string keys"
+            raise DeserializationError(msg)
+        return self.load_dict(cast("dict[str, Any]", data))
 
     def load_dict(self, data: dict[str, Any]) -> ManagedEntry:
-        """Convert an Elasticsearch document dict to a ManagedEntry."""
-        if not isinstance(data.get("created_at"), str):
-            msg = "Elasticsearch document created_at must be an ISO datetime string"
+        encoded = data.get("entry")
+        if not isinstance(encoded, str):
+            msg = "Elasticsearch document entry must be a base64 string"
             raise DeserializationError(msg)
-
-        if "expires_at" in data and not isinstance(data["expires_at"], str):
-            msg = "Elasticsearch document expires_at must be an ISO datetime string"
-            raise DeserializationError(msg)
-
-        managed_entry_proto: dict[str, Any] = {}
-
-        if created_at := key_must_be(data, key="created_at", expected_type=str):
-            managed_entry_proto["created_at"] = parse_datetime_str(created_at)
-        if expires_at := key_must_be(data, key="expires_at", expected_type=str):
-            managed_entry_proto["expires_at"] = parse_datetime_str(expires_at)
-
-        if "value" not in data:
-            msg = "Value field not found"
-            raise DeserializationError(message=msg)
-
-        value = data["value"]
-
-        if not isinstance(value, dict):
-            msg = "Elasticsearch document value must be an object"
-            raise DeserializationError(msg)
-
-        value_object = cast("dict[object, object]", value)
-        flattened = value_object.get("flattened")
-        if not isinstance(flattened, dict):
-            msg = "Elasticsearch document value.flattened must be an object with string keys"
-            raise DeserializationError(msg)
-        flattened_object = cast("dict[object, object]", flattened)
-        if not all(isinstance(key, str) for key in flattened_object):
-            msg = "Elasticsearch document value.flattened must be an object with string keys"
-            raise DeserializationError(msg)
-
-        managed_entry_value = dict(cast("dict[str, Any]", flattened_object))
-
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+            value, created_at_millis, expires_at_millis = cast("tuple[object, int | None, int | None]", _decode_entry(raw))
+        except (ValueError, TypeError) as error:
+            msg = f"Invalid Elasticsearch entry: {error}"
+            raise DeserializationError(msg) from error
         return ManagedEntry(
-            value=managed_entry_value,
-            created_at=managed_entry_proto.get("created_at"),
-            expires_at=managed_entry_proto.get("expires_at"),
+            value=cast("StoreValue", value),
+            created_at=_datetime(created_at_millis),
+            expires_at=_datetime(expires_at_millis),
         )
 
     def dump_dict(
@@ -110,49 +65,19 @@ class ElasticsearchDocumentCodec:
         key: str | None = None,
         collection: str | None = None,
     ) -> dict[str, Any]:
-        """Convert a ManagedEntry to an Elasticsearch document dict.
-
-        Args:
-            entry: The ManagedEntry to serialize
-            exclude_none: Whether to exclude None values from the output
-            key: Optional unsanitized key name to include in the document
-            collection: Optional unsanitized collection name to include in the document
-
-        Returns:
-            A dictionary representation of the ManagedEntry for Elasticsearch.
-        """
-
-        if self._value_format == "dict":
-            raw = entry.value
-            if not isinstance(raw, dict):
-                msg = "Elasticsearch value_format='dict' requires a dict value"
-                raise SerializationError(msg)
-            value: dict[str, Any] | str = raw
-        else:
-            value = entry.value_as_json
-
+        try:
+            encoded = _encode_entry(entry.value, _milliseconds(entry.created_at), _milliseconds(entry.expires_at))
+        except (ValueError, TypeError) as error:
+            msg = f"Invalid Elasticsearch entry: {error}"
+            raise SerializationError(msg) from error
         data: dict[str, Any] = {
-            "value": {"flattened": value},
+            "entry": base64.b64encode(encoded).decode("ascii"),
+            "created_at": entry.created_at_isoformat,
+            "expires_at": entry.expires_at_isoformat,
+            "key": key,
+            "collection": collection,
         }
-
-        if key is not None:
-            data["key"] = key
-
-        if collection is not None:
-            data["collection"] = collection
-
-        if self._date_format == "isoformat":
-            data["created_at"] = entry.created_at_isoformat
-            data["expires_at"] = entry.expires_at_isoformat
-
-        if self._date_format == "datetime":
-            data["created_at"] = entry.created_at
-            data["expires_at"] = entry.expires_at
-
-        if exclude_none:
-            data = {k: v for k, v in data.items() if v is not None}
-
-        return data
+        return {name: value for name, value in data.items() if value is not None} if exclude_none else data
 
     def dump_json(
         self,
@@ -162,18 +87,8 @@ class ElasticsearchDocumentCodec:
         key: str | None = None,
         collection: str | None = None,
     ) -> str:
-        """Convert a ManagedEntry to a JSON string.
-
-        Args:
-            entry: The ManagedEntry to serialize
-            exclude_none: Whether to exclude None values from the output
-            key: Optional unsanitized key name to include in the document
-            collection: Optional unsanitized collection name to include in the document
-
-        Returns:
-            A JSON string representation of the ManagedEntry for Elasticsearch.
-        """
-        if self._date_format == "datetime":
-            msg = 'dump_json is incompatible with date_format="datetime"; use date_format="isoformat" or dump_dict().'
-            raise SerializationError(msg)
-        return dump_to_json(obj=self.dump_dict(entry=entry, exclude_none=exclude_none, key=key, collection=collection))
+        try:
+            return orjson.dumps(self.dump_dict(entry, exclude_none, key=key, collection=collection)).decode()
+        except (orjson.JSONEncodeError, TypeError) as error:
+            msg = f"Failed to serialize Elasticsearch document: {error}"
+            raise SerializationError(msg) from error

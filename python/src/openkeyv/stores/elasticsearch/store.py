@@ -25,25 +25,11 @@ DEFAULT_INDEX_PREFIX = "kv_store"
 
 DEFAULT_MAPPING = {
     "properties": {
-        "created_at": {
-            "type": "date",
-        },
-        "expires_at": {
-            "type": "date",
-        },
-        "collection": {
-            "type": "keyword",
-        },
-        "key": {
-            "type": "keyword",
-        },
-        "value": {
-            "properties": {
-                "flattened": {
-                    "type": "flattened",
-                },
-            },
-        },
+        "created_at": {"type": "date"},
+        "expires_at": {"type": "date"},
+        "collection": {"type": "keyword"},
+        "key": {"type": "keyword"},
+        "entry": {"type": "binary", "doc_values": False},
     },
 }
 
