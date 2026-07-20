@@ -102,6 +102,16 @@ async def test_aerospike_public_roundtrip_uses_binary_entries_and_native_ttl() -
     assert client.records == {}
 
 
+@pytest.mark.parametrize("value", [b"bytes", "text", 42, 2**63, 2**64 - 1, 1.5, True, None, ["nested", 1]])
+async def test_aerospike_roundtrips_all_store_values(value: object) -> None:
+    client = FakeAerospikeClient()
+    store = AerospikeStore(client=client, namespace="test", set_name="entries")  # type: ignore[arg-type]
+
+    await store.put("key", value, collection="items")  # type: ignore[arg-type]
+
+    assert await store.get("key", collection="items") == value
+
+
 @pytest.mark.parametrize(
     ("record", "error", "message"),
     [

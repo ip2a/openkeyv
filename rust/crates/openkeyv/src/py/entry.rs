@@ -54,9 +54,9 @@ fn decode_entry(py: Python<'_>, encoded: &[u8]) -> PyResult<(Py<PyAny>, Option<i
 
 #[pyfunction]
 #[pyo3(name = "_prepare_entry_timestamps")]
-fn prepare_entry_timestamps(ttl_secs: Option<f64>) -> PyResult<(i64, Option<i64>)> {
-    let entry = match ttl_secs {
-        Some(ttl_secs) => ManagedEntry::with_ttl(crate::Value::null(), ttl_secs),
+fn prepare_entry_timestamps(ttl: Option<f64>) -> PyResult<(i64, Option<i64>)> {
+    let entry = match ttl {
+        Some(ttl) => ManagedEntry::with_ttl(crate::Value::null(), ttl),
         None => Ok(ManagedEntry::new(crate::Value::null())),
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;

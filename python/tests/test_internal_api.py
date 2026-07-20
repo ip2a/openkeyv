@@ -60,5 +60,5 @@ def test_codec_api_matches_type_stub() -> None:
     module = ast.parse(STUB_PATH.read_text())
     stub_functions = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
 
-    for function_name in ("_encode_entry", "_decode_entry"):
+    for function_name in ("_encode_entry", "_decode_entry", "_prepare_entry_timestamps"):
         assert _stub_signature(stub_functions[function_name]) == _runtime_signature(getattr(_internal, function_name))

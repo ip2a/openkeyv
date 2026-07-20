@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from openkeyv import MemoryStore, NullStore, SimpleStore, SqliteStore
+from openkeyv.protocols import AsyncCompareAndSwapProtocol
 
 
 @pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore])
@@ -122,3 +123,9 @@ async def test_stores_reject_invalid_ttl(store_type: type[MemoryStore] | type[Si
 
     with pytest.raises(RuntimeError, match="invalid ttl"):
         await store.put_many([], [], ttl=ttl)
+
+
+def test_compare_and_swap_capability_is_only_advertised_by_atomic_store() -> None:
+    assert isinstance(MemoryStore(), AsyncCompareAndSwapProtocol)
+    assert not isinstance(SimpleStore(), AsyncCompareAndSwapProtocol)
+    assert not isinstance(NullStore(), AsyncCompareAndSwapProtocol)
