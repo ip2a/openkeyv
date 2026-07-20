@@ -273,6 +273,7 @@ async def test_windows_registry_single_invalid_identity_has_no_registry_side_eff
 
     assert fake_winreg.request_count == 0
 
+
 @pytest.mark.filterwarnings("ignore:A configured store is unstable")
 @pytest.mark.parametrize("value", [b"bytes", "text", 42, 2**63, 1.5, True, None, ["nested", 1]])
 async def test_windows_registry_roundtrips_all_store_values(value: object) -> None:

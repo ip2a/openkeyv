@@ -4,14 +4,13 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Literal, SupportsFloat, cast
 
-from typing_extensions import override
-
 from openkeyv._internal import _decode_entry, _encode_entry
 from openkeyv._utils.beartype import bear_enforce
+from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
 from openkeyv._utils.managed_entry import ManagedEntry
+from openkeyv._utils.time_to_live import now, prepare_entry_timestamps
 from openkeyv.errors import InvalidKeyError
 from openkeyv.protocols.key_value import StoreValue
-from openkeyv.stores.base import BaseStore
 
 try:
     import winreg
@@ -26,7 +25,7 @@ MAX_REGISTRY_KEY_PATH_LENGTH = 255
 MAX_REGISTRY_VALUE_NAME_LENGTH = 16_383
 
 
-class WindowsRegistryStore(BaseStore):
+class WindowsRegistryStore:
     """Windows Registry-based key-value store.
 
     Each collection is a Registry subkey and each key is a REG_BINARY value. Logical
@@ -58,7 +57,7 @@ class WindowsRegistryStore(BaseStore):
         self._hive_name = hive_name
         self._registry_path = DEFAULT_REGISTRY_PATH if registry_path is None else registry_path
 
-        super().__init__(default_collection=default_collection)
+        self.default_collection = DEFAULT_COLLECTION_NAME if default_collection is None else default_collection
 
     def _get_registry_collection_name(self, *, collection: str) -> str:
         physical_name = REGISTRY_ENCODING_PREFIX + collection.encode("utf-8").hex()
@@ -86,66 +85,68 @@ class WindowsRegistryStore(BaseStore):
         physical_collection = self._get_registry_collection_name(collection=collection)
         return f"{self._registry_path}\\{physical_collection}"
 
-    @override
     async def setup_collection(self, *, collection: str) -> None:
-        self._get_registry_collection_name(collection=collection)
-        await super().setup_collection(collection=collection)
-
-    @override
-    async def _setup_collection(self, *, collection: str) -> None:
         registry_path = self._get_registry_path(collection=collection)
         with winreg.CreateKey(self._hive, registry_path):
             pass
 
+    def _collection(self, collection: str | None) -> str:
+        return self.default_collection if collection is None else collection
+
     @bear_enforce
-    @override
     async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
-        resolved_collection = self.default_collection if collection is None else collection
-        self._validate_identities(collection=resolved_collection, keys=(key,))
-        return await super().get(key=key, collection=collection)
+        resolved = self._collection(collection)
+        self._validate_identities(collection=resolved, keys=(key,))
+        await self.setup_collection(collection=resolved)
+        entry = await self._get_managed_entry(key=key, collection=resolved)
+        return None if entry is None or entry.is_expired else entry.value
 
     @bear_enforce
-    @override
     async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
-        resolved_collection = self.default_collection if collection is None else collection
-        self._validate_identities(collection=resolved_collection, keys=keys)
-        return await super().get_many(keys=keys, collection=collection)
+        resolved = self._collection(collection)
+        self._validate_identities(collection=resolved, keys=keys)
+        await self.setup_collection(collection=resolved)
+        current = now()
+        entries = [await self._get_managed_entry(key=key, collection=resolved) for key in keys]
+        return [
+            entry.value if entry is not None and (entry.expires_at is None or entry.expires_at > current) else None for entry in entries
+        ]
 
     @bear_enforce
-    @override
     async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
-        resolved_collection = self.default_collection if collection is None else collection
-        self._validate_identities(collection=resolved_collection, keys=(key,))
-        return await super().ttl(key=key, collection=collection)
+        resolved = self._collection(collection)
+        self._validate_identities(collection=resolved, keys=(key,))
+        await self.setup_collection(collection=resolved)
+        entry = await self._get_managed_entry(key=key, collection=resolved)
+        return (None, None) if entry is None or entry.is_expired else (entry.value, entry.ttl)
 
     @bear_enforce
-    @override
-    async def ttl_many(
-        self,
-        keys: Sequence[str],
-        *,
-        collection: str | None = None,
-    ) -> list[tuple[StoreValue, float | None]]:
-        resolved_collection = self.default_collection if collection is None else collection
-        self._validate_identities(collection=resolved_collection, keys=keys)
-        return await super().ttl_many(keys=keys, collection=collection)
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
+        resolved = self._collection(collection)
+        self._validate_identities(collection=resolved, keys=keys)
+        await self.setup_collection(collection=resolved)
+        current = now()
+        entries = [await self._get_managed_entry(key=key, collection=resolved) for key in keys]
+        return [
+            (entry.value, (entry.expires_at - current).total_seconds() if entry.expires_at is not None else None)
+            if entry is not None and (entry.expires_at is None or entry.expires_at > current)
+            else (None, None)
+            for entry in entries
+        ]
 
     @bear_enforce
-    @override
-    async def put(
-        self,
-        key: str,
-        value: StoreValue,
-        *,
-        collection: str | None = None,
-        ttl: SupportsFloat | None = None,
-    ) -> None:
-        resolved_collection = self.default_collection if collection is None else collection
-        self._validate_identities(collection=resolved_collection, keys=(key,))
-        await super().put(key=key, value=value, collection=collection, ttl=ttl)
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+        resolved = self._collection(collection)
+        self._validate_identities(collection=resolved, keys=(key,))
+        await self.setup_collection(collection=resolved)
+        created_at, _, expires_at = prepare_entry_timestamps(ttl=ttl)
+        await self._put_managed_entry(
+            key=key,
+            collection=resolved,
+            managed_entry=ManagedEntry(value=value, created_at=created_at, expires_at=expires_at),
+        )
 
     @bear_enforce
-    @override
     async def put_many(
         self,
         keys: Sequence[str],
@@ -156,13 +157,18 @@ class WindowsRegistryStore(BaseStore):
     ) -> None:
         if len(keys) != len(values):
             msg = "put_many called but a different number of keys and values were provided"
-            raise ValueError(msg) from None
+            raise ValueError(msg)
+        resolved = self._collection(collection)
+        self._validate_identities(collection=resolved, keys=keys)
+        await self.setup_collection(collection=resolved)
+        created_at, _, expires_at = prepare_entry_timestamps(ttl=ttl)
+        for key, value in zip(keys, values, strict=True):
+            await self._put_managed_entry(
+                key=key,
+                collection=resolved,
+                managed_entry=ManagedEntry(value=value, created_at=created_at, expires_at=expires_at),
+            )
 
-        resolved_collection = self.default_collection if collection is None else collection
-        self._validate_identities(collection=resolved_collection, keys=keys)
-        await super().put_many(keys=keys, values=values, collection=collection, ttl=ttl)
-
-    @override
     async def _get_managed_entry(self, *, key: str, collection: str) -> ManagedEntry | None:
         physical_key = self._get_registry_value_name(key=key)
         registry_path = self._get_registry_path(collection=collection)
@@ -193,7 +199,6 @@ class WindowsRegistryStore(BaseStore):
             expires_at=expires_at,
         )
 
-    @override
     async def _put_managed_entry(self, *, key: str, collection: str, managed_entry: ManagedEntry) -> None:
         physical_key = self._get_registry_value_name(key=key)
         registry_path = self._get_registry_path(collection=collection)
@@ -209,20 +214,19 @@ class WindowsRegistryStore(BaseStore):
             winreg.SetValueEx(registry_key, physical_key, 0, winreg.REG_BINARY, encoded)
 
     @bear_enforce
-    @override
     async def delete(self, key: str, *, collection: str | None = None) -> bool:
-        resolved_collection = self.default_collection if collection is None else collection
-        self._validate_identities(collection=resolved_collection, keys=(key,))
-        return await super().delete(key=key, collection=collection)
+        resolved = self._collection(collection)
+        self._validate_identities(collection=resolved, keys=(key,))
+        await self.setup_collection(collection=resolved)
+        return await self._delete_managed_entry(key=key, collection=resolved)
 
     @bear_enforce
-    @override
     async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
-        resolved_collection = self.default_collection if collection is None else collection
-        self._validate_identities(collection=resolved_collection, keys=keys)
-        return await super().delete_many(keys=keys, collection=collection)
+        resolved = self._collection(collection)
+        self._validate_identities(collection=resolved, keys=keys)
+        await self.setup_collection(collection=resolved)
+        return sum([await self._delete_managed_entry(key=key, collection=resolved) for key in keys])
 
-    @override
     async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:
         physical_key = self._get_registry_value_name(key=key)
         registry_path = self._get_registry_path(collection=collection)
