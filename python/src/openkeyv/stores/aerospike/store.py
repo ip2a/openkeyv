@@ -1,17 +1,17 @@
+from asyncio import Lock
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from math import ceil
 from typing import SupportsFloat, cast, overload
 
-from typing_extensions import override
-
 from openkeyv._internal import _decode_entry, _encode_entry
 from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.compound import compound_key, get_keys_from_compound_keys, uncompound_key
+from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
 from openkeyv._utils.managed_entry import ManagedEntry
+from openkeyv._utils.time_to_live import now, prepare_entry_timestamps
 from openkeyv.errors import InvalidKeyError
 from openkeyv.protocols.key_value import StoreValue
-from openkeyv.stores.base import BaseContextManagerStore, BaseDestroyStore, BaseEnumerateKeysStore, BaseStore
 
 try:
     import aerospike
@@ -26,7 +26,7 @@ PAGE_LIMIT = 10000
 MAX_COMPOUND_KEY_BYTES = 1_048_000
 
 
-class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManagerStore, BaseStore):
+class AerospikeStore:
     """Aerospike-based key-value store.
 
     Note: Aerospike namespaces must be pre-configured on the server. Sets are created
@@ -120,11 +120,10 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
         self._set = set_name
         self._auto_create = auto_create
 
-        super().__init__(
-            default_collection=default_collection,
-            client_provided_by_user=client_provided,
-            stable_api=True,
-        )
+        self.default_collection = DEFAULT_COLLECTION_NAME if default_collection is None else default_collection
+        self._client_provided_by_user = client_provided
+        self._setup_complete = False
+        self._setup_lock = Lock()
 
     def _physical_key(self, *, collection: str, key: str) -> str:
         combo_key = compound_key(collection=collection, key=key)
@@ -140,98 +139,120 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
         for key in keys:
             self._physical_key(collection=collection, key=key)
 
+    def _collection(self, collection: str | None) -> str:
+        return self.default_collection if collection is None else collection
+
+    async def setup(self) -> None:
+        if self._setup_complete:
+            return
+        async with self._setup_lock:
+            if self._setup_complete:
+                return
+            await self._setup()
+            self._setup_complete = True
+
+    async def __aenter__(self) -> "AerospikeStore":
+        await self.setup()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        if not self._client_provided_by_user:
+            self._client.close()
+
     @bear_enforce
-    @override
     async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
-        collection = self.default_collection if collection is None else collection
-        self._physical_key(collection=collection, key=key)
-        return await super().get(key=key, collection=collection)
+        resolved = self._collection(collection)
+        self._physical_key(collection=resolved, key=key)
+        await self.setup()
+        entry = await self._get_managed_entry(key=key, collection=resolved)
+        return None if entry is None or entry.is_expired else entry.value
 
     @bear_enforce
-    @override
     async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
-        collection = self.default_collection if collection is None else collection
-        self._validate_keys(collection=collection, keys=keys)
-        return await super().get_many(keys=keys, collection=collection)
+        resolved = self._collection(collection)
+        self._validate_keys(collection=resolved, keys=keys)
+        await self.setup()
+        current = now()
+        entries = [await self._get_managed_entry(key=key, collection=resolved) for key in keys]
+        return [
+            entry.value if entry is not None and (entry.expires_at is None or entry.expires_at > current) else None for entry in entries
+        ]
 
     @bear_enforce
-    @override
     async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
-        collection = self.default_collection if collection is None else collection
-        self._physical_key(collection=collection, key=key)
-        return await super().ttl(key=key, collection=collection)
+        resolved = self._collection(collection)
+        self._physical_key(collection=resolved, key=key)
+        await self.setup()
+        entry = await self._get_managed_entry(key=key, collection=resolved)
+        return (None, None) if entry is None or entry.is_expired else (entry.value, entry.ttl)
 
     @bear_enforce
-    @override
-    async def ttl_many(
-        self,
-        keys: Sequence[str],
-        *,
-        collection: str | None = None,
-    ) -> list[tuple[StoreValue, float | None]]:
-        collection = self.default_collection if collection is None else collection
-        self._validate_keys(collection=collection, keys=keys)
-        return await super().ttl_many(keys=keys, collection=collection)
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
+        resolved = self._collection(collection)
+        self._validate_keys(collection=resolved, keys=keys)
+        await self.setup()
+        current = now()
+        entries = [await self._get_managed_entry(key=key, collection=resolved) for key in keys]
+        return [
+            (entry.value, (entry.expires_at - current).total_seconds() if entry.expires_at is not None else None)
+            if entry is not None and (entry.expires_at is None or entry.expires_at > current)
+            else (None, None)
+            for entry in entries
+        ]
 
     @bear_enforce
-    @override
-    async def put(
-        self,
-        key: str,
-        value: StoreValue,
-        *,
-        collection: str | None = None,
-        ttl: SupportsFloat | None = None,
-    ) -> None:
-        collection = self.default_collection if collection is None else collection
-        self._physical_key(collection=collection, key=key)
-        await super().put(key=key, value=value, collection=collection, ttl=ttl)
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
+        resolved = self._collection(collection)
+        self._physical_key(collection=resolved, key=key)
+        await self.setup()
+        created_at, _, expires_at = prepare_entry_timestamps(ttl=ttl)
+        await self._put_managed_entry(
+            key=key, collection=resolved, managed_entry=ManagedEntry(value=value, created_at=created_at, expires_at=expires_at)
+        )
 
     @bear_enforce
-    @override
     async def put_many(
-        self,
-        keys: Sequence[str],
-        values: Sequence[StoreValue],
-        *,
-        collection: str | None = None,
-        ttl: SupportsFloat | None = None,
+        self, keys: Sequence[str], values: Sequence[StoreValue], *, collection: str | None = None, ttl: SupportsFloat | None = None
     ) -> None:
         if len(keys) != len(values):
             msg = "put_many called but a different number of keys and values were provided"
-            raise ValueError(msg) from None
-        collection = self.default_collection if collection is None else collection
-        self._validate_keys(collection=collection, keys=keys)
-        await super().put_many(keys=keys, values=values, collection=collection, ttl=ttl)
+            raise ValueError(msg)
+        resolved = self._collection(collection)
+        self._validate_keys(collection=resolved, keys=keys)
+        await self.setup()
+        created_at, _, expires_at = prepare_entry_timestamps(ttl=ttl)
+        for key, value in zip(keys, values, strict=True):
+            await self._put_managed_entry(
+                key=key, collection=resolved, managed_entry=ManagedEntry(value=value, created_at=created_at, expires_at=expires_at)
+            )
 
     @bear_enforce
-    @override
     async def delete(self, key: str, *, collection: str | None = None) -> bool:
-        collection = self.default_collection if collection is None else collection
-        self._physical_key(collection=collection, key=key)
-        return await super().delete(key=key, collection=collection)
+        resolved = self._collection(collection)
+        self._physical_key(collection=resolved, key=key)
+        await self.setup()
+        return await self._delete_managed_entry(key=key, collection=resolved)
 
     @bear_enforce
-    @override
     async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
-        collection = self.default_collection if collection is None else collection
-        self._validate_keys(collection=collection, keys=keys)
-        return await super().delete_many(keys=keys, collection=collection)
+        resolved = self._collection(collection)
+        self._validate_keys(collection=resolved, keys=keys)
+        await self.setup()
+        return sum([await self._delete_managed_entry(key=key, collection=resolved) for key in keys])
 
     @bear_enforce
-    @override
     async def keys(self, collection: str | None = None, *, limit: int | None = None) -> list[str]:
-        collection = self.default_collection if collection is None else collection
-        self._physical_key(collection=collection, key="")
-        return await super().keys(collection=collection, limit=limit)
+        resolved = self._collection(collection)
+        self._physical_key(collection=resolved, key="")
+        await self.setup()
+        return await self._get_collection_keys(collection=resolved, limit=limit)
 
-    @override
     async def _setup(self) -> None:
         """Connect to Aerospike and register cleanup."""
         self._client.connect()
-
-        if not self._client_provided_by_user:
-            self._exit_stack.callback(self._client.close)
 
         if not self._auto_create:
             info_response = cast("object", self._client.info_all("namespaces"))  # pyright: ignore[reportUnknownMemberType]
@@ -265,7 +286,6 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
                 )
                 raise ValueError(msg)
 
-    @override
     async def _get_managed_entry(self, *, key: str, collection: str) -> ManagedEntry | None:
         combo_key = self._physical_key(collection=collection, key=key)
         aerospike_key = (self._namespace, self._set, combo_key)
@@ -308,7 +328,6 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
             expires_at=expires_at,
         )
 
-    @override
     async def _put_managed_entry(
         self,
         *,
@@ -335,7 +354,6 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
             policy={"key": aerospike.POLICY_KEY_SEND},
         )
 
-    @override
     async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:
         combo_key = self._physical_key(collection=collection, key=key)
         aerospike_key = (self._namespace, self._set, combo_key)
@@ -346,7 +364,6 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
             return False
         return True
 
-    @override
     async def _get_collection_keys(self, *, collection: str, limit: int | None = None) -> list[str]:
         limit = min(DEFAULT_PAGE_SIZE if limit is None else limit, PAGE_LIMIT)
 
@@ -400,7 +417,10 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
 
         return result_keys[:limit]
 
-    @override
+    async def destroy(self) -> bool:
+        await self.setup()
+        return await self._delete_store()
+
     async def _delete_store(self) -> bool:
         """Truncate the set (delete all records in the set)."""
         self._client.truncate(self._namespace, self._set, 0)  # pyright: ignore[reportUnknownMemberType]
