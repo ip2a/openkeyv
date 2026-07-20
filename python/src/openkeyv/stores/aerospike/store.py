@@ -298,18 +298,12 @@ class AerospikeStore(BaseDestroyStore, BaseEnumerateKeysStore, BaseContextManage
 
         decoded = cast("tuple[object, int | None, int | None]", _decode_entry(encoded))
         value, created_at_millis, expires_at_millis = decoded
-        if not isinstance(value, dict):
-            msg = "Aerospike entry value must be a dict with string keys"
-            raise TypeError(msg)
-        typed_value = cast("dict[object, object]", value)
-        if not all(isinstance(item_key, str) for item_key in typed_value):
-            msg = "Aerospike entry value must be a dict with string keys"
-            raise TypeError(msg)
+        typed_value = cast("StoreValue", value)
 
         created_at = None if created_at_millis is None else datetime.fromtimestamp(created_at_millis / 1000, tz=timezone.utc)
         expires_at = None if expires_at_millis is None else datetime.fromtimestamp(expires_at_millis / 1000, tz=timezone.utc)
         return ManagedEntry(
-            value=cast("dict[str, object]", typed_value),
+            value=typed_value,
             created_at=created_at,
             expires_at=expires_at,
         )

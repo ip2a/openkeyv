@@ -156,7 +156,6 @@ async def test_windows_registry_identity_preserves_exact_logical_names() -> None
     [
         ((b"OKVE1", 1), ValueError, "must use REG_BINARY"),
         (("not-bytes", FakeWinreg.REG_BINARY), TypeError, "must contain bytes"),
-        ((_encode_entry(["not-a-dict"], None, None), FakeWinreg.REG_BINARY), TypeError, "must be a dict"),
     ],
 )
 async def test_windows_registry_rejects_malformed_values(raw_value: tuple[object, int], error: type[Exception], message: str) -> None:
@@ -273,3 +272,12 @@ async def test_windows_registry_single_invalid_identity_has_no_registry_side_eff
         await operation_call
 
     assert fake_winreg.request_count == 0
+
+@pytest.mark.filterwarnings("ignore:A configured store is unstable")
+@pytest.mark.parametrize("value", [b"bytes", "text", 42, 2**63, 1.5, True, None, ["nested", 1]])
+async def test_windows_registry_roundtrips_all_store_values(value: object) -> None:
+    store = WindowsRegistryStore(registry_path="Software\\tests")
+
+    await store.put("key", value, collection="items")  # type: ignore[arg-type]
+
+    assert await store.get("key", collection="items") == value
