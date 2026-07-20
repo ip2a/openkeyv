@@ -1,24 +1,15 @@
 import base64
+from asyncio import Lock
 from collections.abc import Sequence
-from datetime import datetime
 from http import HTTPStatus
 from typing import Any, SupportsFloat, cast, overload
 
-from typing_extensions import override
-
 from openkeyv._utils.beartype import bear_enforce
+from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
 from openkeyv._utils.managed_entry import ManagedEntry
-from openkeyv._utils.time_to_live import now_as_epoch, prepare_ttl
+from openkeyv._utils.time_to_live import now, now_as_epoch, prepare_entry_timestamps, prepare_ttl
 from openkeyv.errors import DeserializationError, InvalidKeyError, SerializationError, StoreConnectionError
 from openkeyv.protocols.key_value import StoreValue
-from openkeyv.stores.base import (
-    BaseContextManagerStore,
-    BaseCullStore,
-    BaseDestroyCollectionStore,
-    BaseEnumerateCollectionsStore,
-    BaseEnumerateKeysStore,
-    BaseStore,
-)
 from openkeyv.stores.elasticsearch.codec import ElasticsearchDocumentCodec
 from openkeyv.stores.elasticsearch.serializers import LessCapableJsonSerializer, LessCapableNdjsonSerializer
 
@@ -65,9 +56,7 @@ MAX_DOCUMENT_ID_BYTES = 512
 ALLOWED_INDEX_PREFIX_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-.")
 
 
-class ElasticsearchStore(
-    BaseEnumerateCollectionsStore, BaseEnumerateKeysStore, BaseDestroyCollectionStore, BaseCullStore, BaseContextManagerStore, BaseStore
-):
+class ElasticsearchStore:
     """An Elasticsearch-based store.
 
     Stores collections in their own indices and stores values in Flattened fields.
@@ -187,103 +176,148 @@ class ElasticsearchStore(
         self._serializer = ElasticsearchDocumentCodec()
         self._auto_create = auto_create
 
-        super().__init__(
-            default_collection=default_collection,
-            client_provided_by_user=client_provided,
-        )
+        self.default_collection = DEFAULT_COLLECTION_NAME if default_collection is None else default_collection
+        self._client_provided_by_user = client_provided
+        self._setup_complete = False
+        self._setup_lock = Lock()
 
-    @override
+    def _collection(self, collection: str | None) -> str:
+        return self.default_collection if collection is None else collection
+
+    async def setup(self) -> None:
+        if self._setup_complete:
+            return
+        async with self._setup_lock:
+            if self._setup_complete:
+                return
+            await self._setup()
+            self._setup_complete = True
+
     async def setup_collection(self, *, collection: str) -> None:
         self._get_index_name(collection=collection)
-        await super().setup_collection(collection=collection)
+        await self.setup()
+        await self._setup_collection(collection=collection)
+
+    async def __aenter__(self) -> "ElasticsearchStore":
+        await self.setup()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        if not self._client_provided_by_user:
+            await self._client.close()
 
     @bear_enforce
-    @override
     async def get(self, key: str, *, collection: str | None = None) -> StoreValue:
         self._get_document_id(key=key)
-        return await super().get(key=key, collection=collection)
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        entry = await self._get_managed_entry(key=key, collection=resolved)
+        return None if entry is None or entry.is_expired else entry.value
 
     @bear_enforce
-    @override
     async def get_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[StoreValue]:
         for key in keys:
             self._get_document_id(key=key)
-        return await super().get_many(keys=keys, collection=collection)
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        current = now()
+        entries = await self._get_managed_entries(keys=keys, collection=resolved)
+        return [
+            entry.value if entry is not None and (entry.expires_at is None or entry.expires_at > current) else None for entry in entries
+        ]
 
     @bear_enforce
-    @override
     async def ttl(self, key: str, *, collection: str | None = None) -> tuple[StoreValue, float | None]:
         self._get_document_id(key=key)
-        return await super().ttl(key=key, collection=collection)
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        entry = await self._get_managed_entry(key=key, collection=resolved)
+        return (None, None) if entry is None or entry.is_expired else (entry.value, entry.ttl)
 
     @bear_enforce
-    @override
-    async def ttl_many(
-        self,
-        keys: Sequence[str],
-        *,
-        collection: str | None = None,
-    ) -> list[tuple[StoreValue, float | None]]:
+    async def ttl_many(self, keys: Sequence[str], *, collection: str | None = None) -> list[tuple[StoreValue, float | None]]:
         for key in keys:
             self._get_document_id(key=key)
-        return await super().ttl_many(keys=keys, collection=collection)
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        current = now()
+        entries = await self._get_managed_entries(keys=keys, collection=resolved)
+        return [
+            (entry.value, (entry.expires_at - current).total_seconds() if entry.expires_at is not None else None)
+            if entry is not None and (entry.expires_at is None or entry.expires_at > current)
+            else (None, None)
+            for entry in entries
+        ]
 
     @bear_enforce
-    @override
-    async def put(
-        self,
-        key: str,
-        value: StoreValue,
-        *,
-        collection: str | None = None,
-        ttl: SupportsFloat | None = None,
-    ) -> None:
+    async def put(self, key: str, value: StoreValue, *, collection: str | None = None, ttl: SupportsFloat | None = None) -> None:
         self._get_document_id(key=key)
-        validated_ttl = prepare_ttl(t=ttl)
-        await super().put(key=key, value=value, collection=collection, ttl=validated_ttl)
+        created_at, _, expires_at = prepare_entry_timestamps(ttl=ttl)
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        await self._put_managed_entry(
+            key=key, collection=resolved, managed_entry=ManagedEntry(value=value, created_at=created_at, expires_at=expires_at)
+        )
 
     @bear_enforce
-    @override
     async def put_many(
-        self,
-        keys: Sequence[str],
-        values: Sequence[StoreValue],
-        *,
-        collection: str | None = None,
-        ttl: SupportsFloat | None = None,
+        self, keys: Sequence[str], values: Sequence[StoreValue], *, collection: str | None = None, ttl: SupportsFloat | None = None
     ) -> None:
         if len(keys) != len(values):
             msg = "put_many called but a different number of keys and values were provided"
-            raise ValueError(msg) from None
+            raise ValueError(msg)
         for key in keys:
             self._get_document_id(key=key)
         validated_ttl = prepare_ttl(t=ttl)
-        await super().put_many(keys=keys, values=values, collection=collection, ttl=validated_ttl)
+        created_at, _, expires_at = prepare_entry_timestamps(ttl=validated_ttl)
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        entries = [ManagedEntry(value=value, created_at=created_at, expires_at=expires_at) for value in values]
+        await self._put_managed_entries(keys=keys, managed_entries=entries, collection=resolved)
 
     @bear_enforce
-    @override
     async def delete(self, key: str, *, collection: str | None = None) -> bool:
         self._get_document_id(key=key)
-        return await super().delete(key=key, collection=collection)
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        return await self._delete_managed_entry(key=key, collection=resolved)
 
     @bear_enforce
-    @override
     async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
         for key in keys:
             self._get_document_id(key=key)
-        return await super().delete_many(keys=keys, collection=collection)
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        return await self._delete_managed_entries(keys=keys, collection=resolved)
 
-    @override
+    async def keys(self, collection: str | None = None, *, limit: int | None = None) -> list[str]:
+        resolved = self._collection(collection)
+        await self.setup_collection(collection=resolved)
+        return await self._get_collection_keys(collection=resolved, limit=limit)
+
+    async def collections(self, *, limit: int | None = None) -> list[str]:
+        await self.setup()
+        return await self._get_collection_names(limit=limit)
+
     async def destroy_collection(self, collection: str) -> bool:
         self._get_index_name(collection=collection)
-        return await super().destroy_collection(collection=collection)
+        await self.setup()
+        return await self._delete_collection(collection=collection)
 
-    @override
+    async def destroy(self) -> bool:
+        await self.setup()
+        for collection in await self._get_collection_names():
+            await self._delete_collection(collection=collection)
+        return True
+
+    async def cull(self) -> None:
+        await self.setup()
+        await self._cull()
+
     async def _setup(self) -> None:
-        # Register client cleanup if we own the client
-        if not self._client_provided_by_user:
-            self._exit_stack.push_async_callback(self._client.close)
-
         cluster_info = await self._client.options(ignore_status=404).info()
         body = cluster_info.body
         if not isinstance(body, dict):
@@ -308,7 +342,6 @@ class ElasticsearchStore(
 
         self._is_serverless = build_flavor == "serverless"
 
-    @override
     async def _setup_collection(self, *, collection: str) -> None:
         index_name = self._get_index_name(collection=collection)
 
@@ -409,7 +442,6 @@ class ElasticsearchStore(
 
         return index_name, document_id
 
-    @override
     async def _get_managed_entry(self, *, key: str, collection: str) -> ManagedEntry | None:
         index_name, document_id = self._get_destination(collection=collection, key=key)
 
@@ -450,7 +482,6 @@ class ElasticsearchStore(
 
         return self._serializer.load_dict(data=source)
 
-    @override
     async def _get_managed_entries(  # noqa: PLR0912, PLR0915
         self, *, collection: str, keys: Sequence[str]
     ) -> list[ManagedEntry | None]:
@@ -525,7 +556,6 @@ class ElasticsearchStore(
     def _should_refresh_on_put(self) -> bool:
         return not self._is_serverless
 
-    @override
     async def _put_managed_entry(
         self,
         *,
@@ -571,16 +601,12 @@ class ElasticsearchStore(
             msg = "Elasticsearch index response reported failed shards"
             raise StoreConnectionError(msg)
 
-    @override
     async def _put_managed_entries(  # noqa: PLR0912, PLR0915
         self,
         *,
         collection: str,
         keys: Sequence[str],
         managed_entries: Sequence[ManagedEntry],
-        ttl: float | None,
-        created_at: datetime,
-        expires_at: datetime | None,
     ) -> None:
         if not keys:
             return
@@ -649,7 +675,6 @@ class ElasticsearchStore(
                 msg = "Elasticsearch bulk-index item returned an invalid status"
                 raise StoreConnectionError(msg)
 
-    @override
     async def _delete_managed_entry(self, *, key: str, collection: str) -> bool:
         index_name: str = self._get_index_name(collection=collection)
         document_id: str = self._get_document_id(key=key)
@@ -679,7 +704,6 @@ class ElasticsearchStore(
 
         return True
 
-    @override
     async def _delete_managed_entries(  # noqa: PLR0912
         self, *, keys: Sequence[str], collection: str
     ) -> int:
@@ -747,7 +771,6 @@ class ElasticsearchStore(
 
         return deleted_count
 
-    @override
     async def _get_collection_keys(  # noqa: PLR0912, PLR0915
         self, *, collection: str, limit: int | None = None
     ) -> list[str]:
@@ -831,7 +854,6 @@ class ElasticsearchStore(
 
         return all_keys[:limit]
 
-    @override
     async def _get_collection_names(self, *, limit: int | None = None) -> list[str]:
         """List up to 10,000 canonical OpenKeyV collection names."""
 
@@ -840,7 +862,6 @@ class ElasticsearchStore(
         collection_names = [self._decode_index_name(index_name=index_name) for index_name in index_names]
         return collection_names[:limit]
 
-    @override
     async def _delete_collection(self, *, collection: str) -> bool:
         result: ObjectApiResponse[Any] = await self._client.options(ignore_status=404).delete_by_query(
             index=self._get_index_name(collection=collection),
@@ -878,7 +899,6 @@ class ElasticsearchStore(
 
         return deleted > 0
 
-    @override
     async def _cull(self) -> None:
         index_names = await self._get_owned_index_names()
         if not index_names:

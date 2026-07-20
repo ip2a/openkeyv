@@ -79,8 +79,7 @@ class FakeElasticsearchClient:
 @pytest.fixture
 def elasticsearch_store() -> tuple[ElasticsearchStore, FakeElasticsearchClient]:
     client = FakeElasticsearchClient()
-    with pytest.warns(UserWarning, match="unstable"):
-        store = ElasticsearchStore(elasticsearch_client=client, index_prefix="OpenKeyV")  # type: ignore[arg-type]
+    store = ElasticsearchStore(elasticsearch_client=client, index_prefix="OpenKeyV")  # type: ignore[arg-type]
     return store, client
 
 
@@ -220,9 +219,6 @@ async def test_elasticsearch_bulk_put_validates_each_item(elasticsearch_store: t
         collection="items",
         keys=["one", "two"],
         managed_entries=entries,
-        ttl=None,
-        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
-        expires_at=None,
     )
 
     assert client.bulk_calls[-1]["refresh"] is True
@@ -255,9 +251,6 @@ async def test_elasticsearch_bulk_put_rejects_malformed_results(
             collection="items",
             keys=["key"],
             managed_entries=[entry],
-            ttl=None,
-            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
-            expires_at=None,
         )
 
 
@@ -368,9 +361,6 @@ async def test_elasticsearch_batch_identity_preflight_has_no_partial_request(
             collection="items",
             keys=["valid", "x" * 381],
             managed_entries=entries,
-            ttl=None,
-            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
-            expires_at=None,
         )
     assert client.bulk_calls == []
 
