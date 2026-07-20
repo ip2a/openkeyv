@@ -6,7 +6,7 @@ from typing import SupportsFloat
 
 from typing_extensions import override
 
-from openkeyv._utils.managed_entry import dump_to_json_bytes, load_from_json
+from openkeyv._utils.serialization import dump_to_json_bytes, load_from_json
 from openkeyv.errors import DecompressionError, DeserializationError
 from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper

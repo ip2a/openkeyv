@@ -5,7 +5,7 @@ from typing import Any, Literal, SupportsFloat
 from typing_extensions import override
 
 from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
-from openkeyv._utils.managed_entry import dump_to_json_bytes
+from openkeyv._utils.serialization import dump_to_json_bytes
 from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper
 

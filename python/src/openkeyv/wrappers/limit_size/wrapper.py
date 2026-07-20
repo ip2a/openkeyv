@@ -3,7 +3,7 @@ from typing import SupportsFloat
 
 from typing_extensions import override
 
-from openkeyv._utils.managed_entry import estimate_serialized_size
+from openkeyv._internal import _encode_entry
 from openkeyv.errors import EntryTooLargeError, EntryTooSmallError
 from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 from openkeyv.wrappers.base import BaseWrapper
@@ -13,7 +13,7 @@ class LimitSizeWrapper(BaseWrapper):
     """Wrapper that rejects entries outside the configured serialized size limits.
 
     This wrapper checks the serialized size of values before storing them. This incurs a performance penalty
-    as it requires JSON serialization of the value separate from serialization that occurs when the value is stored.
+    as it encodes the value with the Rust core Entry codec before storage.
 
     This wrapper does not prevent returning objects (get, ttl, get_many, ttl_many) that exceed the size limit, just storing
     them (put, put_many).
@@ -52,7 +52,7 @@ class LimitSizeWrapper(BaseWrapper):
             EntryTooLargeError: The value is larger than max_size.
         """
 
-        item_size: int = estimate_serialized_size(value=value)
+        item_size: int = len(_encode_entry(value, None, None))
 
         if self.min_size is not None and item_size < self.min_size:
             raise EntryTooSmallError(size=item_size, min_size=self.min_size, collection=collection, key=key)

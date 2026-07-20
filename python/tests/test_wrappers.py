@@ -169,7 +169,7 @@ async def test_default_value_returns_independent_values_without_persisting_them(
 
 async def test_limit_size_rejects_single_and_batch_writes_before_storage() -> None:
     backing = MemoryStore()
-    store = LimitSizeWrapper(cast("AsyncKeyValue", backing), min_size=20, max_size=40)
+    store = LimitSizeWrapper(cast("AsyncKeyValue", backing), min_size=40, max_size=100)
 
     with pytest.raises(EntryTooSmallError):
         await store.put("small", {"x": "y"})
