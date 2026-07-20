@@ -12,7 +12,7 @@ import orjson
 from typing_extensions import Self
 
 from openkeyv._utils.beartype import bear_enforce
-from openkeyv._utils.time_to_live import now, now_plus, prepare_ttl, seconds_to
+from openkeyv._utils.time_to_live import now, now_plus, prepare_ttl
 from openkeyv.errors import DeserializationError, SerializationError
 from openkeyv.protocols.key_value import StoreValue
 
@@ -35,13 +35,14 @@ class ManagedEntry:
     def is_expired(self) -> bool:
         if self.expires_at is None:
             return False
-        return self.expires_at <= now()
+        return int(self.expires_at.timestamp() * 1000) <= int(now().timestamp() * 1000)
 
     @property
     def ttl(self) -> float | None:
         if self.expires_at is None:
             return None
-        return seconds_to(datetime=self.expires_at)
+        remaining_millis = int(self.expires_at.timestamp() * 1000) - int(now().timestamp() * 1000)
+        return max(remaining_millis, 0) / 1000
 
     @property
     def value_as_json(self) -> str:

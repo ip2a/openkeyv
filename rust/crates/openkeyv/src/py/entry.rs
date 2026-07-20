@@ -52,8 +52,27 @@ fn decode_entry(py: Python<'_>, encoded: &[u8]) -> PyResult<(Py<PyAny>, Option<i
     Ok((value, created_at_millis, expires_at_millis))
 }
 
+#[pyfunction]
+#[pyo3(name = "_prepare_entry_timestamps")]
+fn prepare_entry_timestamps(ttl_secs: Option<f64>) -> PyResult<(i64, Option<i64>)> {
+    let entry = match ttl_secs {
+        Some(ttl_secs) => ManagedEntry::with_ttl(crate::Value::null(), ttl_secs),
+        None => Ok(ManagedEntry::new(crate::Value::null())),
+    }
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+
+    Ok((
+        entry
+            .created_at
+            .expect("new entries have creation timestamps")
+            .timestamp_millis(),
+        entry.expires_at.map(|value| value.timestamp_millis()),
+    ))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_entry, m)?)?;
     m.add_function(wrap_pyfunction!(decode_entry, m)?)?;
+    m.add_function(wrap_pyfunction!(prepare_entry_timestamps, m)?)?;
     Ok(())
 }

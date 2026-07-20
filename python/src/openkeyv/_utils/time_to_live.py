@@ -4,12 +4,11 @@ This module provides functions for working with TTL (time-to-live) values
 and datetime conversions used throughout the key-value stores.
 """
 
-import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, SupportsFloat, overload
 
-from openkeyv._utils.beartype import bear_enforce
+from openkeyv._internal import _prepare_entry_timestamps
 from openkeyv.errors import InvalidTTLError
 
 
@@ -58,49 +57,29 @@ def prepare_ttl(t: SupportsFloat | None) -> float | None: ...
 
 
 def prepare_ttl(t: SupportsFloat | None) -> float | None:
-    """Prepare a TTL for use in a put operation.
-
-    If a TTL is provided, it will be validated and returned as a float.
-    If a None is provided, None will be returned.
-
-    If the provided TTL is not a float or float-adjacent type, an InvalidTTLError will be raised. In addition,
-    if a bool is provided, an InvalidTTLError will be raised. If the user passes TTL=True, true becomes `1` and the
-    entry immediately expires which is likely not what the user intended.
-    """
-    try:
-        return _validate_ttl(t=t)
-    except TypeError as e:
-        raise InvalidTTLError(ttl=t, extra_info={"type": type(t).__name__}) from e
-
-
-@bear_enforce
-def _validate_ttl(t: SupportsFloat | None) -> float | None:
+    """Validate a TTL with the Rust core and return it as seconds."""
     if t is None:
         return None
-
     if isinstance(t, bool):
         raise InvalidTTLError(ttl=t, extra_info={"type": type(t).__name__})
-
-    ttl = float(t)
-
-    if not math.isfinite(ttl) or ttl <= 0:
-        raise InvalidTTLError(ttl=t)
-
+    try:
+        ttl = float(t)
+        _prepare_entry_timestamps(ttl)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise InvalidTTLError(ttl=t, extra_info={"type": type(t).__name__}) from error
     return ttl
 
 
 def prepare_entry_timestamps(ttl: SupportsFloat | None) -> tuple[datetime, float | None, datetime | None]:
-    """Prepare timestamps for a new entry.
+    """Create entry timestamps with the Rust core TTL semantics."""
+    if isinstance(ttl, bool):
+        raise InvalidTTLError(ttl=ttl, extra_info={"type": type(ttl).__name__})
+    try:
+        ttl_seconds = None if ttl is None else float(ttl)
+        created_at_millis, expires_at_millis = _prepare_entry_timestamps(ttl_seconds)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise InvalidTTLError(ttl=ttl, extra_info={"type": type(ttl).__name__}) from error
 
-    Returns:
-        A tuple of (created_at, ttl_seconds, expires_at).
-    """
-    created_at: datetime = now()
-
-    ttl_seconds: float | None = prepare_ttl(t=ttl)
-
-    expires_at: datetime | None = None
-    if ttl_seconds is not None:
-        expires_at = created_at + timedelta(seconds=ttl_seconds)
-
+    created_at = datetime.fromtimestamp(created_at_millis / 1000, tz=timezone.utc)
+    expires_at = None if expires_at_millis is None else datetime.fromtimestamp(expires_at_millis / 1000, tz=timezone.utc)
     return created_at, ttl_seconds, expires_at

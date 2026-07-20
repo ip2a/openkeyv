@@ -232,9 +232,7 @@ class ElasticsearchStore:
         current = now()
         entries = await self._get_managed_entries(keys=keys, collection=resolved)
         return [
-            (entry.value, (entry.expires_at - current).total_seconds() if entry.expires_at is not None else None)
-            if entry is not None and (entry.expires_at is None or entry.expires_at > current)
-            else (None, None)
+            (entry.value, entry.ttl) if entry is not None and (entry.expires_at is None or entry.expires_at > current) else (None, None)
             for entry in entries
         ]
 
