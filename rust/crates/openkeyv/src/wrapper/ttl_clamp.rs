@@ -1,5 +1,8 @@
 use crate::error::Result;
-use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::protocol::{
+    AsyncCompareAndSwap, AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
+    CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue,
+};
 use crate::value::Value;
 use async_trait::async_trait;
 
@@ -141,6 +144,44 @@ impl<T: AsyncKeyValue> AsyncKeyValue for TtlClampWrapper<T> {
 }
 
 #[async_trait]
+impl<T> AsyncCompareAndSwap for TtlClampWrapper<T>
+where
+    T: AsyncKeyValue + AsyncCompareAndSwap + Send + Sync,
+{
+    async fn get_with_revision(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<RevisionedValue>> {
+        self.inner.get_with_revision(key, collection).await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected: Option<&Revision>,
+        value: Value,
+        collection: Option<&str>,
+        ttl: Option<f64>,
+    ) -> Result<CompareAndSwapResult> {
+        self.inner
+            .compare_and_swap(key, expected, value, collection, self.clamp_ttl(ttl))
+            .await
+    }
+
+    async fn compare_and_delete(
+        &self,
+        key: &str,
+        expected: &Revision,
+        collection: Option<&str>,
+    ) -> Result<CompareAndDeleteResult> {
+        self.inner
+            .compare_and_delete(key, expected, collection)
+            .await
+    }
+}
+
+#[async_trait]
 impl<T> AsyncEnumerateKeys for TtlClampWrapper<T>
 where
     T: AsyncKeyValue + AsyncEnumerateKeys + Send + Sync,
@@ -164,6 +205,13 @@ where
 mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
+
+    fn assert_capabilities<T: AsyncKeyValue + AsyncCompareAndSwap>() {}
+
+    #[test]
+    fn wrapper_preserves_compare_and_swap_capability() {
+        assert_capabilities::<TtlClampWrapper<MemoryStore>>();
+    }
 
     #[tokio::test]
     async fn test_ttl_clamp_max() {
