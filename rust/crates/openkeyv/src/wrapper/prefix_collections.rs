@@ -127,10 +127,11 @@ where
     T: AsyncKeyValue + AsyncEnumerateCollections + Send + Sync,
 {
     async fn collections(&self, limit: Option<usize>) -> Result<Vec<String>> {
-        let collections = self.inner.collections(limit).await?;
+        let collections = self.inner.collections(None).await?;
         Ok(collections
             .into_iter()
             .filter_map(|collection| collection.strip_prefix(&self.prefix).map(str::to_string))
+            .take(limit.unwrap_or(usize::MAX))
             .collect())
     }
 }
@@ -156,5 +157,6 @@ mod tests {
 
         let raw = wrapper.into_inner();
         assert!(raw.get("k", Some("tenant_users")).await.unwrap().is_some());
+        assert_eq!(raw.collections(None).await.unwrap().len(), 1);
     }
 }

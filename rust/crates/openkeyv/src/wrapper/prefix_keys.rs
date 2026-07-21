@@ -99,10 +99,11 @@ where
     T: AsyncKeyValue + AsyncEnumerateKeys + Send + Sync,
 {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
-        let keys = self.inner.keys(collection, limit).await?;
+        let keys = self.inner.keys(collection, None).await?;
         Ok(keys
             .into_iter()
             .filter_map(|key| key.strip_prefix(&self.prefix).map(str::to_string))
+            .take(limit.unwrap_or(usize::MAX))
             .collect())
     }
 }
@@ -136,5 +137,6 @@ mod tests {
         // Verify it's stored with prefix
         let raw = wrapper.into_inner();
         assert!(raw.get("app:k", None).await.unwrap().is_some());
+        assert_eq!(raw.keys(None, None).await.unwrap().len(), 1);
     }
 }
