@@ -48,9 +48,12 @@ impl<T: AsyncKeyValue> LimitSizeWrapper<T> {
         self.inner
     }
 
-    fn check_size(&self, value: &Value) -> Result<()> {
-        let entry = ManagedEntry::new(value.clone());
-        let size = entry.estimate_size();
+    fn check_size(&self, value: &Value, ttl: Option<f64>) -> Result<()> {
+        let entry = match ttl {
+            Some(seconds) => ManagedEntry::with_ttl(value.clone(), seconds)?,
+            None => ManagedEntry::new(value.clone()),
+        };
+        let size = entry.encode().len();
 
         if let Some(min) = self.min_size {
             if size < min {
@@ -87,7 +90,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LimitSizeWrapper<T> {
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
-        self.check_size(&value)?;
+        self.check_size(&value, ttl)?;
         self.inner.put(key, value, collection, ttl).await
     }
 
@@ -118,8 +121,14 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LimitSizeWrapper<T> {
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
+        if keys.len() != values.len() {
+            return Err(Error::BatchSizeMismatch {
+                keys: keys.len(),
+                values: values.len(),
+            });
+        }
         for value in values {
-            self.check_size(value)?;
+            self.check_size(value, ttl)?;
         }
         self.inner.put_many(keys, values, collection, ttl).await
     }
@@ -162,6 +171,18 @@ mod tests {
         let value = Value::utf8("this is a very long string that exceeds ten bytes");
 
         let err = wrapper.put("k", value, None, None).await.unwrap_err();
+        assert_eq!(err, Error::EntryTooLarge);
+    }
+
+    #[tokio::test]
+    async fn test_limit_size_checks_encoded_entry_with_ttl() {
+        let mem = MemoryStore::new();
+        let wrapper = LimitSizeWrapper::with_max(mem, 20);
+
+        let err = wrapper
+            .put("k", Value::null(), None, Some(60.0))
+            .await
+            .unwrap_err();
         assert_eq!(err, Error::EntryTooLarge);
     }
 
