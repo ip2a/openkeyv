@@ -43,7 +43,7 @@ impl<T: AsyncKeyValue> AsyncKeyValue for LoggingWrapper<T> {
         debug!(
             key,
             collection,
-            found = result.is_ok() && result.as_ref().unwrap().is_some(),
+            found = matches!(&result, Ok(Some(_))),
             "get done"
         );
         result
