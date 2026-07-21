@@ -470,6 +470,7 @@ impl AsyncChangeFeed for MemoryStore {
 #[async_trait]
 impl AsyncCull for MemoryStore {
     async fn cull(&self) -> Result<()> {
+        let _mutation = self.client.mutation_lock().lock().await;
         for entry in self.client.collections().iter() {
             let col = entry.value();
             col.retain(|_k, v| !v.entry.is_expired());
@@ -509,6 +510,7 @@ impl AsyncEnumerateCollections for MemoryStore {
 impl AsyncDestroyCollection for MemoryStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
         self.setup().await?;
+        let _mutation = self.client.mutation_lock().lock().await;
         Ok(self.client.collections().remove(collection).is_some())
     }
 }
@@ -516,6 +518,7 @@ impl AsyncDestroyCollection for MemoryStore {
 #[async_trait]
 impl AsyncDestroyStore for MemoryStore {
     async fn destroy(&self) -> Result<bool> {
+        let _mutation = self.client.mutation_lock().lock().await;
         self.client.collections().clear();
         let mut complete = self.client.setup_complete().write().await;
         *complete = false;
