@@ -159,16 +159,6 @@ impl DiskStore {
     }
 }
 
-impl Default for DiskStore {
-    fn default() -> Self {
-        let db = sled::Config::new()
-            .temporary(true)
-            .open()
-            .expect("temporary sled database should open");
-        Self::with_config(db, DiskConfig::default())
-    }
-}
-
 #[async_trait]
 impl AsyncKeyValue for DiskStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
