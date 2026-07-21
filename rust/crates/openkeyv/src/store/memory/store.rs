@@ -66,7 +66,7 @@ impl MemoryStore {
                     let revision = Revision::fresh()?;
                     col.insert(key.clone(), RevisionedEntry { entry, revision });
                 }
-                self.enforce_capacity(&col);
+                let _ = self.enforce_capacity(&col);
             }
         }
 
@@ -97,18 +97,28 @@ impl MemoryStore {
             .ok_or_else(|| Error::InvalidOperation(format!("collection '{}' not found", name)))
     }
 
-    fn enforce_capacity(&self, col: &DashMap<String, RevisionedEntry>) {
+    fn enforce_capacity(&self, col: &DashMap<String, RevisionedEntry>) -> Vec<String> {
         let Some(max) = self.config.max_entries_per_collection else {
-            return;
+            return Vec::new();
         };
 
-        col.retain(|_key, value| !value.entry.is_expired());
+        let mut deleted = Vec::new();
+        col.retain(|key, value| {
+            let keep = !value.entry.is_expired();
+            if !keep {
+                deleted.push(key.clone());
+            }
+            keep
+        });
         while col.len() > max {
             let Some(key) = col.iter().map(|entry| entry.key().clone()).min() else {
                 break;
             };
-            col.remove(&key);
+            if col.remove(&key).is_some() {
+                deleted.push(key);
+            }
         }
+        deleted
     }
 }
 
@@ -174,13 +184,20 @@ impl AsyncKeyValue for MemoryStore {
         let revision = Revision::fresh()?;
 
         let _mutation = self.client.mutation_lock().lock().await;
-        if let Some(col) = self.client.collections().get_mut(cname) {
+        let deleted = if let Some(col) = self.client.collections().get_mut(cname) {
             col.insert(key.to_string(), RevisionedEntry { entry, revision });
-            self.enforce_capacity(&col);
-        }
+            self.enforce_capacity(&col)
+        } else {
+            Vec::new()
+        };
         self.client
             .record_change(cname, key, ChangeOperation::Put)
             .await;
+        for deleted_key in deleted {
+            self.client
+                .record_change(cname, &deleted_key, ChangeOperation::Delete)
+                .await;
+        }
         Ok(())
     }
 
@@ -272,15 +289,22 @@ impl AsyncKeyValue for MemoryStore {
             .collect::<Result<Vec<_>>>()?;
 
         let _mutation = self.client.mutation_lock().lock().await;
-        if let Some(col) = self.client.collections().get_mut(cname) {
+        let deleted = if let Some(col) = self.client.collections().get_mut(cname) {
             for ((key, entry), revision) in keys.iter().zip(entries).zip(revisions) {
                 col.insert(key.clone(), RevisionedEntry { entry, revision });
             }
-            self.enforce_capacity(&col);
-        }
+            self.enforce_capacity(&col)
+        } else {
+            Vec::new()
+        };
         for key in keys {
             self.client
                 .record_change(cname, key, ChangeOperation::Put)
+                .await;
+        }
+        for deleted_key in deleted {
+            self.client
+                .record_change(cname, &deleted_key, ChangeOperation::Delete)
                 .await;
         }
         Ok(())
@@ -580,6 +604,23 @@ mod tests {
         assert_eq!(store.get("d", None).await.unwrap(), None);
         assert!(store.get("e", None).await.unwrap().is_some());
         assert!(store.get("f", None).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_capacity_eviction_emits_delete_change() {
+        let store = MemoryStore::with_options(Some(1), None, None);
+        let mut changes = store.subscribe(ChangeFeedRequest::default()).await.unwrap();
+
+        store.put("a", Value::utf8("a"), None, None).await.unwrap();
+        changes.recv().await.unwrap().unwrap();
+        store.put("b", Value::utf8("b"), None, None).await.unwrap();
+
+        let put = changes.recv().await.unwrap().unwrap();
+        let delete = changes.recv().await.unwrap().unwrap();
+        assert_eq!(put.key, "b");
+        assert_eq!(put.operation, ChangeOperation::Put);
+        assert_eq!(delete.key, "a");
+        assert_eq!(delete.operation, ChangeOperation::Delete);
     }
 
     #[tokio::test]
