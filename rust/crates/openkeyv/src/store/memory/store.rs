@@ -17,7 +17,7 @@ use std::sync::Arc;
 const DEFAULT_PAGE_SIZE: usize = 10_000;
 const PAGE_LIMIT: usize = 10_000;
 
-/// A fixed-size in-memory key-value store using time-aware LRU cache per collection.
+/// An in-memory key-value store with an optional per-collection entry limit.
 #[derive(Clone)]
 pub struct MemoryStore {
     client: Arc<MemoryClient>,
@@ -66,6 +66,7 @@ impl MemoryStore {
                     let revision = Revision::fresh()?;
                     col.insert(key.clone(), RevisionedEntry { entry, revision });
                 }
+                self.enforce_capacity(&col);
             }
         }
 
@@ -96,18 +97,17 @@ impl MemoryStore {
             .ok_or_else(|| Error::InvalidOperation(format!("collection '{}' not found", name)))
     }
 
-    fn maybe_cull_collection(&self, col: &DashMap<String, RevisionedEntry>) {
-        if let Some(max) = self.config.max_entries_per_collection {
-            if col.len() > max {
-                col.retain(|_k, v| !v.entry.is_expired());
-                while col.len() > max {
-                    if let Some(k) = col.iter().next().map(|e| e.key().clone()) {
-                        col.remove(&k);
-                    } else {
-                        break;
-                    }
-                }
-            }
+    fn enforce_capacity(&self, col: &DashMap<String, RevisionedEntry>) {
+        let Some(max) = self.config.max_entries_per_collection else {
+            return;
+        };
+
+        col.retain(|_key, value| !value.entry.is_expired());
+        while col.len() > max {
+            let Some(key) = col.iter().map(|entry| entry.key().clone()).min() else {
+                break;
+            };
+            col.remove(&key);
         }
     }
 }
@@ -175,8 +175,8 @@ impl AsyncKeyValue for MemoryStore {
 
         let _mutation = self.client.mutation_lock().lock().await;
         if let Some(col) = self.client.collections().get_mut(cname) {
-            self.maybe_cull_collection(&col);
             col.insert(key.to_string(), RevisionedEntry { entry, revision });
+            self.enforce_capacity(&col);
         }
         self.client
             .record_change(cname, key, ChangeOperation::Put)
@@ -273,10 +273,10 @@ impl AsyncKeyValue for MemoryStore {
 
         let _mutation = self.client.mutation_lock().lock().await;
         if let Some(col) = self.client.collections().get_mut(cname) {
-            self.maybe_cull_collection(&col);
             for ((key, entry), revision) in keys.iter().zip(entries).zip(revisions) {
                 col.insert(key.clone(), RevisionedEntry { entry, revision });
             }
+            self.enforce_capacity(&col);
         }
         for key in keys {
             self.client
@@ -535,6 +535,35 @@ mod tests {
         store.put("key1", value.clone(), None, None).await.unwrap();
         let result = store.get("key1", None).await.unwrap();
         assert_eq!(result, Some(value));
+    }
+
+    #[tokio::test]
+    async fn test_memory_store_enforces_collection_capacity_after_single_and_batch_puts() {
+        let store = MemoryStore::with_options(Some(2), None, None);
+
+        store.put("a", Value::utf8("a"), None, None).await.unwrap();
+        store.put("b", Value::utf8("b"), None, None).await.unwrap();
+        store.put("c", Value::utf8("c"), None, None).await.unwrap();
+
+        assert_eq!(store.get("a", None).await.unwrap(), None);
+        assert!(store.get("b", None).await.unwrap().is_some());
+        assert!(store.get("c", None).await.unwrap().is_some());
+
+        store
+            .put_many(
+                &["d".to_string(), "e".to_string(), "f".to_string()],
+                &[Value::utf8("d"), Value::utf8("e"), Value::utf8("f")],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.get("b", None).await.unwrap(), None);
+        assert_eq!(store.get("c", None).await.unwrap(), None);
+        assert_eq!(store.get("d", None).await.unwrap(), None);
+        assert!(store.get("e", None).await.unwrap().is_some());
+        assert!(store.get("f", None).await.unwrap().is_some());
     }
 
     #[tokio::test]
