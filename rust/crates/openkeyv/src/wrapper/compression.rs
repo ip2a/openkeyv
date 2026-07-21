@@ -69,13 +69,9 @@ impl<T: AsyncKeyValue> CompressionWrapper<T> {
         Ok(Value::binary(bytes))
     }
 
-    fn decompress(&self, value: Option<Value>) -> Result<Option<Value>> {
-        let value = match value {
-            Some(v) => v,
-            None => return Ok(None),
-        };
+    fn decompress_value(&self, value: Value) -> Result<Value> {
         if !value.bytes().starts_with(COMPRESSION_MAGIC) {
-            return Ok(Some(value));
+            return Ok(value);
         }
         let bytes = value.bytes();
         if bytes.len() <= COMPRESSION_MAGIC.len() + 1 {
@@ -85,10 +81,7 @@ impl<T: AsyncKeyValue> CompressionWrapper<T> {
         let kind = if marker == ESCAPED_KIND {
             let kind = ValueKind::from_tag(bytes[COMPRESSION_MAGIC.len() + 1])
                 .ok_or(Error::CorruptedData)?;
-            return Ok(Some(Value::new(
-                kind,
-                bytes[COMPRESSION_MAGIC.len() + 2..].to_vec(),
-            )?));
+            return Value::new(kind, bytes[COMPRESSION_MAGIC.len() + 2..].to_vec());
         } else {
             ValueKind::from_tag(marker).ok_or(Error::CorruptedData)?
         };
@@ -97,7 +90,7 @@ impl<T: AsyncKeyValue> CompressionWrapper<T> {
         decoder
             .read_to_end(&mut buf)
             .map_err(|_| Error::CorruptedData)?;
-        Ok(Some(Value::new(kind, buf)?))
+        Value::new(kind, buf)
     }
 }
 
@@ -105,7 +98,7 @@ impl<T: AsyncKeyValue> CompressionWrapper<T> {
 impl<T: AsyncKeyValue> AsyncKeyValue for CompressionWrapper<T> {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let value = self.inner.get(key, collection).await?;
-        self.decompress(value)
+        value.map(|value| self.decompress_value(value)).transpose()
     }
 
     async fn ttl(
@@ -116,8 +109,8 @@ impl<T: AsyncKeyValue> AsyncKeyValue for CompressionWrapper<T> {
         let result = self.inner.ttl(key, collection).await?;
         match result {
             Some((value, ttl)) => {
-                let decompressed = self.decompress(Some(value))?;
-                Ok(decompressed.map(|v| (v, ttl)))
+                let decompressed = self.decompress_value(value)?;
+                Ok(Some((decompressed, ttl)))
             }
             None => Ok(None),
         }
@@ -144,7 +137,10 @@ impl<T: AsyncKeyValue> AsyncKeyValue for CompressionWrapper<T> {
         collection: Option<&str>,
     ) -> Result<Vec<Option<Value>>> {
         let results = self.inner.get_many(keys, collection).await?;
-        results.into_iter().map(|v| self.decompress(v)).collect()
+        results
+            .into_iter()
+            .map(|value| value.map(|value| self.decompress_value(value)).transpose())
+            .collect()
     }
 
     async fn ttl_many(
@@ -157,8 +153,8 @@ impl<T: AsyncKeyValue> AsyncKeyValue for CompressionWrapper<T> {
             .into_iter()
             .map(|opt| match opt {
                 Some((value, ttl)) => {
-                    let decompressed = self.decompress(Some(value))?;
-                    Ok(decompressed.map(|v| (v, ttl)))
+                    let decompressed = self.decompress_value(value)?;
+                    Ok(Some((decompressed, ttl)))
                 }
                 None => Ok(None),
             })
@@ -197,9 +193,7 @@ where
         current
             .map(|current| -> Result<RevisionedValue> {
                 Ok(RevisionedValue {
-                    value: self
-                        .decompress(Some(current.value))?
-                        .expect("value was present"),
+                    value: self.decompress_value(current.value)?,
                     revision: current.revision,
                     ttl: current.ttl,
                 })
@@ -228,9 +222,7 @@ where
                 current: current
                     .map(|current| -> Result<RevisionedValue> {
                         Ok(RevisionedValue {
-                            value: self
-                                .decompress(Some(current.value))?
-                                .expect("value was present"),
+                            value: self.decompress_value(current.value)?,
                             revision: current.revision,
                             ttl: current.ttl,
                         })
@@ -303,7 +295,7 @@ mod tests {
 
         assert_eq!(
             wrapper
-                .decompress(Some(Value::binary(COMPRESSION_MAGIC.to_vec())))
+                .decompress_value(Value::binary(COMPRESSION_MAGIC.to_vec()))
                 .unwrap_err(),
             Error::CorruptedData
         );
@@ -312,7 +304,7 @@ mod tests {
         unknown_kind.push(250);
         assert_eq!(
             wrapper
-                .decompress(Some(Value::binary(unknown_kind)))
+                .decompress_value(Value::binary(unknown_kind))
                 .unwrap_err(),
             Error::CorruptedData
         );
@@ -322,7 +314,7 @@ mod tests {
         invalid_gzip.extend_from_slice(b"not-gzip");
         assert_eq!(
             wrapper
-                .decompress(Some(Value::binary(invalid_gzip)))
+                .decompress_value(Value::binary(invalid_gzip))
                 .unwrap_err(),
             Error::CorruptedData
         );
@@ -335,7 +327,7 @@ mod tests {
 
         assert!(matches!(
             wrapper
-                .decompress(Some(Value::binary(invalid_payload)))
+                .decompress_value(Value::binary(invalid_payload))
                 .unwrap_err(),
             Error::InvalidValue(_)
         ));
