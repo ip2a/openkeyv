@@ -55,6 +55,9 @@ pub enum Error {
     #[error("path security error: {0}")]
     PathSecurity(String),
 
+    #[error("operation timed out")]
+    Timeout,
+
     #[error("invalid operation: {0}")]
     InvalidOperation(String),
 
