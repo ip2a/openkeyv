@@ -471,9 +471,22 @@ impl AsyncChangeFeed for MemoryStore {
 impl AsyncCull for MemoryStore {
     async fn cull(&self) -> Result<()> {
         let _mutation = self.client.mutation_lock().lock().await;
+        let mut deleted = Vec::new();
         for entry in self.client.collections().iter() {
+            let collection = entry.key().clone();
             let col = entry.value();
-            col.retain(|_k, v| !v.entry.is_expired());
+            col.retain(|key, value| {
+                let keep = !value.entry.is_expired();
+                if !keep {
+                    deleted.push((collection.clone(), key.clone()));
+                }
+                keep
+            });
+        }
+        for (collection, key) in deleted {
+            self.client
+                .record_change(&collection, &key, ChangeOperation::Delete)
+                .await;
         }
         Ok(())
     }
@@ -680,6 +693,31 @@ mod tests {
         assert_eq!(put.operation, ChangeOperation::Put);
         assert_eq!(delete.revision, 2);
         assert_eq!(delete.operation, ChangeOperation::Delete);
+    }
+
+    #[tokio::test]
+    async fn test_cull_emits_delete_change_for_expired_entries() {
+        let store = MemoryStore::new();
+        let mut changes = store.subscribe(ChangeFeedRequest::default()).await.unwrap();
+
+        store
+            .put("expired", Value::utf8("value"), Some("events"), Some(0.01))
+            .await
+            .unwrap();
+        changes.recv().await.unwrap().unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        store.cull().await.unwrap();
+
+        let delete = tokio::time::timeout(std::time::Duration::from_secs(1), changes.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(delete.collection, "events");
+        assert_eq!(delete.key, "expired");
+        assert_eq!(delete.operation, ChangeOperation::Delete);
+        assert_eq!(store.get("expired", Some("events")).await.unwrap(), None);
     }
 
     #[tokio::test]
