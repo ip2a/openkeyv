@@ -1,5 +1,9 @@
 use crate::error::Result;
-use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::protocol::{
+    AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
+    CompareAndSwapResult, Revision, RevisionedValue,
+};
 use crate::value::Value;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -170,10 +174,92 @@ where
     }
 }
 
+#[async_trait]
+impl<T> AsyncCompareAndSwap for StatisticsWrapper<T>
+where
+    T: AsyncKeyValue + AsyncCompareAndSwap + Send + Sync,
+{
+    async fn get_with_revision(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<RevisionedValue>> {
+        self.inner.get_with_revision(key, collection).await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected: Option<&Revision>,
+        value: Value,
+        collection: Option<&str>,
+        ttl: Option<f64>,
+    ) -> Result<CompareAndSwapResult> {
+        self.inner
+            .compare_and_swap(key, expected, value, collection, ttl)
+            .await
+    }
+
+    async fn compare_and_delete(
+        &self,
+        key: &str,
+        expected: &Revision,
+        collection: Option<&str>,
+    ) -> Result<CompareAndDeleteResult> {
+        self.inner
+            .compare_and_delete(key, expected, collection)
+            .await
+    }
+}
+
+#[async_trait]
+impl<T> AsyncCull for StatisticsWrapper<T>
+where
+    T: AsyncKeyValue + AsyncCull + Send + Sync,
+{
+    async fn cull(&self) -> Result<()> {
+        self.inner.cull().await
+    }
+}
+
+#[async_trait]
+impl<T> AsyncDestroyCollection for StatisticsWrapper<T>
+where
+    T: AsyncKeyValue + AsyncDestroyCollection + Send + Sync,
+{
+    async fn destroy_collection(&self, collection: &str) -> Result<bool> {
+        self.inner.destroy_collection(collection).await
+    }
+}
+
+#[async_trait]
+impl<T> AsyncDestroyStore for StatisticsWrapper<T>
+where
+    T: AsyncKeyValue + AsyncDestroyStore + Send + Sync,
+{
+    async fn destroy(&self) -> Result<bool> {
+        self.inner.destroy().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
+
+    fn assert_capabilities<
+        T: AsyncKeyValue
+            + AsyncCompareAndSwap
+            + AsyncCull
+            + AsyncDestroyCollection
+            + AsyncDestroyStore,
+    >() {
+    }
+
+    #[test]
+    fn transparent_wrapper_preserves_store_capabilities() {
+        assert_capabilities::<StatisticsWrapper<MemoryStore>>();
+    }
 
     #[tokio::test]
     async fn test_statistics() {

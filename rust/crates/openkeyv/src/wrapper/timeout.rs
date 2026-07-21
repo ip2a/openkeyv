@@ -1,5 +1,9 @@
 use crate::error::{Error, Result};
-use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::protocol::{
+    AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
+    CompareAndSwapResult, Revision, RevisionedValue,
+};
 use crate::value::Value;
 use async_trait::async_trait;
 use std::time::Duration;
@@ -135,6 +139,99 @@ where
     }
 }
 
+#[async_trait]
+impl<T> AsyncCompareAndSwap for TimeoutWrapper<T>
+where
+    T: AsyncKeyValue + AsyncCompareAndSwap + Send + Sync,
+{
+    async fn get_with_revision(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<RevisionedValue>> {
+        match timeout(self.duration, self.inner.get_with_revision(key, collection)).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected: Option<&Revision>,
+        value: Value,
+        collection: Option<&str>,
+        ttl: Option<f64>,
+    ) -> Result<CompareAndSwapResult> {
+        match timeout(
+            self.duration,
+            self.inner
+                .compare_and_swap(key, expected, value, collection, ttl),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+
+    async fn compare_and_delete(
+        &self,
+        key: &str,
+        expected: &Revision,
+        collection: Option<&str>,
+    ) -> Result<CompareAndDeleteResult> {
+        match timeout(
+            self.duration,
+            self.inner.compare_and_delete(key, expected, collection),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+}
+
+#[async_trait]
+impl<T> AsyncCull for TimeoutWrapper<T>
+where
+    T: AsyncKeyValue + AsyncCull + Send + Sync,
+{
+    async fn cull(&self) -> Result<()> {
+        match timeout(self.duration, self.inner.cull()).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+}
+
+#[async_trait]
+impl<T> AsyncDestroyCollection for TimeoutWrapper<T>
+where
+    T: AsyncKeyValue + AsyncDestroyCollection + Send + Sync,
+{
+    async fn destroy_collection(&self, collection: &str) -> Result<bool> {
+        match timeout(self.duration, self.inner.destroy_collection(collection)).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+}
+
+#[async_trait]
+impl<T> AsyncDestroyStore for TimeoutWrapper<T>
+where
+    T: AsyncKeyValue + AsyncDestroyStore + Send + Sync,
+{
+    async fn destroy(&self) -> Result<bool> {
+        match timeout(self.duration, self.inner.destroy()).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +297,20 @@ mod tests {
         async fn delete_many(&self, _keys: &[String], _collection: Option<&str>) -> Result<usize> {
             Ok(0)
         }
+    }
+
+    fn assert_capabilities<
+        T: AsyncKeyValue
+            + AsyncCompareAndSwap
+            + AsyncCull
+            + AsyncDestroyCollection
+            + AsyncDestroyStore,
+    >() {
+    }
+
+    #[test]
+    fn transparent_wrapper_preserves_store_capabilities() {
+        assert_capabilities::<TimeoutWrapper<crate::store::memory::MemoryStore>>();
     }
 
     #[tokio::test]
