@@ -89,14 +89,9 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         keys: &[String],
         collection: Option<&str>,
     ) -> Result<Vec<Option<Value>>> {
-        // Simple implementation: delegate to primary, could be optimized
-        let results = self.primary.get_many(keys, collection).await?;
-        for (key, result) in keys.iter().zip(results.iter()) {
-            if let Some(v) = result {
-                self.cache
-                    .put(key, v.clone(), collection, self.cache_ttl)
-                    .await?;
-            }
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            results.push(self.get(key, collection).await?);
         }
         Ok(results)
     }
@@ -106,7 +101,11 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         keys: &[String],
         collection: Option<&str>,
     ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
-        self.primary.ttl_many(keys, collection).await
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            results.push(self.ttl(key, collection).await?);
+        }
+        Ok(results)
     }
 
     async fn put_many(
@@ -204,6 +203,30 @@ mod tests {
         // (in this test both are in memory, but verifies structure)
         let got2 = wrapper.get("k", None).await.unwrap();
         assert_eq!(got2, Some(value));
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_cache_bulk_reads_use_cache() {
+        let cache = MemoryStore::new();
+        let primary = MemoryStore::new();
+        cache
+            .put("k", Value::utf8("cached"), None, None)
+            .await
+            .unwrap();
+        primary
+            .put("k", Value::utf8("primary"), None, None)
+            .await
+            .unwrap();
+        let wrapper = PassthroughCacheWrapper::new(cache, primary);
+
+        assert_eq!(
+            wrapper.get_many(&["k".to_string()], None).await.unwrap(),
+            vec![Some(Value::utf8("cached"))]
+        );
+        assert_eq!(
+            wrapper.ttl_many(&["k".to_string()], None).await.unwrap(),
+            vec![Some((Value::utf8("cached"), None))]
+        );
     }
 
     #[tokio::test]
