@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use std::io::{Read, Write};
 
 const COMPRESSION_MAGIC: &[u8] = b"OKVZ1";
+const ESCAPED_KIND: u8 = u8::MAX;
 
 /// A wrapper that compresses values with gzip before storing.
 pub struct CompressionWrapper<T: AsyncKeyValue> {
@@ -39,6 +40,14 @@ impl<T: AsyncKeyValue> CompressionWrapper<T> {
     }
 
     fn compress(&self, value: Value) -> Result<Value> {
+        if value.bytes().starts_with(COMPRESSION_MAGIC) {
+            let mut bytes = Vec::with_capacity(COMPRESSION_MAGIC.len() + 2 + value.len());
+            bytes.extend_from_slice(COMPRESSION_MAGIC);
+            bytes.push(ESCAPED_KIND);
+            bytes.push(value.kind().tag());
+            bytes.extend_from_slice(value.bytes());
+            return Ok(Value::binary(bytes));
+        }
         if !self.should_compress(&value) {
             return Ok(value);
         }
@@ -66,11 +75,20 @@ impl<T: AsyncKeyValue> CompressionWrapper<T> {
             return Ok(Some(value));
         }
         let bytes = value.bytes();
-        if bytes.len() <= COMPRESSION_MAGIC.len() {
+        if bytes.len() <= COMPRESSION_MAGIC.len() + 1 {
             return Err(Error::CorruptedData);
         }
-        let kind =
-            ValueKind::from_tag(bytes[COMPRESSION_MAGIC.len()]).ok_or(Error::CorruptedData)?;
+        let marker = bytes[COMPRESSION_MAGIC.len()];
+        let kind = if marker == ESCAPED_KIND {
+            let kind = ValueKind::from_tag(bytes[COMPRESSION_MAGIC.len() + 1])
+                .ok_or(Error::CorruptedData)?;
+            return Ok(Some(Value::new(
+                kind,
+                bytes[COMPRESSION_MAGIC.len() + 2..].to_vec(),
+            )?));
+        } else {
+            ValueKind::from_tag(marker).ok_or(Error::CorruptedData)?
+        };
         let mut decoder = flate2::read::GzDecoder::new(&bytes[COMPRESSION_MAGIC.len() + 1..]);
         let mut buf = Vec::new();
         decoder
@@ -241,6 +259,17 @@ mod tests {
                 .unwrap_err(),
             Error::InvalidValue(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_compression_preserves_values_starting_with_magic() {
+        let mem = MemoryStore::new();
+        let wrapper = CompressionWrapper::with_min_size(mem, usize::MAX);
+        let value = Value::binary(b"OKVZ1 payload".to_vec());
+
+        wrapper.put("k", value.clone(), None, None).await.unwrap();
+
+        assert_eq!(wrapper.get("k", None).await.unwrap(), Some(value));
     }
 
     #[tokio::test]
