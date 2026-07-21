@@ -1,5 +1,8 @@
 use crate::error::{Error, Result};
-use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::protocol::{
+    AsyncCompareAndSwap, AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
+    CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue,
+};
 use crate::value::{Value, ValueKind};
 use async_trait::async_trait;
 
@@ -151,6 +154,78 @@ where
 }
 
 #[async_trait]
+impl<T, E, D> AsyncCompareAndSwap for EncryptionWrapper<T, E, D>
+where
+    T: AsyncKeyValue + AsyncCompareAndSwap + Send + Sync,
+    E: Fn(&[u8]) -> Result<Vec<u8>> + Send + Sync,
+    D: Fn(&[u8], u32) -> Result<Vec<u8>> + Send + Sync,
+{
+    async fn get_with_revision(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<RevisionedValue>> {
+        let current = self.inner.get_with_revision(key, collection).await?;
+        current
+            .map(|current| -> Result<RevisionedValue> {
+                Ok(RevisionedValue {
+                    value: self
+                        .decrypt_value(Some(current.value))?
+                        .expect("value was present"),
+                    revision: current.revision,
+                    ttl: current.ttl,
+                })
+            })
+            .transpose()
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected: Option<&Revision>,
+        value: Value,
+        collection: Option<&str>,
+        ttl: Option<f64>,
+    ) -> Result<CompareAndSwapResult> {
+        let value = self.encrypt_value(&value)?;
+        match self
+            .inner
+            .compare_and_swap(key, expected, value, collection, ttl)
+            .await?
+        {
+            CompareAndSwapResult::Applied { revision } => {
+                Ok(CompareAndSwapResult::Applied { revision })
+            }
+            CompareAndSwapResult::Conflict { current } => Ok(CompareAndSwapResult::Conflict {
+                current: current
+                    .map(|current| -> Result<RevisionedValue> {
+                        Ok(RevisionedValue {
+                            value: self
+                                .decrypt_value(Some(current.value))?
+                                .expect("value was present"),
+                            revision: current.revision,
+                            ttl: current.ttl,
+                        })
+                    })
+                    .transpose()?,
+            }),
+        }
+    }
+
+    async fn compare_and_delete(
+        &self,
+        key: &str,
+        expected: &Revision,
+        collection: Option<&str>,
+    ) -> Result<CompareAndDeleteResult> {
+        Ok(self
+            .inner
+            .compare_and_delete(key, expected, collection)
+            .await?)
+    }
+}
+
+#[async_trait]
 impl<T, E, D> AsyncEnumerateKeys for EncryptionWrapper<T, E, D>
 where
     T: AsyncKeyValue + AsyncEnumerateKeys + Send + Sync,
@@ -189,6 +264,19 @@ mod tests {
 
     fn fail_decrypt(_data: &[u8], _version: u32) -> Result<Vec<u8>> {
         Err(Error::Decryption("failed".to_owned()))
+    }
+
+    fn assert_capabilities<T: AsyncKeyValue + AsyncCompareAndSwap>() {}
+
+    #[test]
+    fn wrapper_preserves_compare_and_swap_capability() {
+        assert_capabilities::<
+            EncryptionWrapper<
+                MemoryStore,
+                fn(&[u8]) -> Result<Vec<u8>>,
+                fn(&[u8], u32) -> Result<Vec<u8>>,
+            >,
+        >();
     }
 
     #[tokio::test]
