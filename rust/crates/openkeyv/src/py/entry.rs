@@ -61,11 +61,12 @@ fn prepare_entry_timestamps(ttl: Option<f64>) -> PyResult<(i64, Option<i64>)> {
     }
     .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
+    let created_at = entry.created_at.ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("entry has no creation timestamp")
+    })?;
+
     Ok((
-        entry
-            .created_at
-            .expect("new entries have creation timestamps")
-            .timestamp_millis(),
+        created_at.timestamp_millis(),
         entry.expires_at.map(|value| value.timestamp_millis()),
     ))
 }
