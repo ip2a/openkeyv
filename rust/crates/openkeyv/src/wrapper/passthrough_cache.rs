@@ -1,5 +1,8 @@
 use crate::error::Result;
-use crate::protocol::{AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue};
+use crate::protocol::{
+    AsyncCompareAndSwap, AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
+    CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue,
+};
 use crate::value::Value;
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -136,6 +139,53 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
 }
 
 #[async_trait]
+impl<C, P> AsyncCompareAndSwap for PassthroughCacheWrapper<C, P>
+where
+    C: AsyncKeyValue + Send + Sync,
+    P: AsyncKeyValue + AsyncCompareAndSwap + Send + Sync,
+{
+    async fn get_with_revision(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<RevisionedValue>> {
+        let current = self.primary.get_with_revision(key, collection).await?;
+        if let Some(ref current) = current {
+            self.cache
+                .put(key, current.value.clone(), collection, self.cache_ttl)
+                .await?;
+        }
+        Ok(current)
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected: Option<&Revision>,
+        value: Value,
+        collection: Option<&str>,
+        ttl: Option<f64>,
+    ) -> Result<CompareAndSwapResult> {
+        self.cache.delete(key, collection).await?;
+        self.primary
+            .compare_and_swap(key, expected, value, collection, ttl)
+            .await
+    }
+
+    async fn compare_and_delete(
+        &self,
+        key: &str,
+        expected: &Revision,
+        collection: Option<&str>,
+    ) -> Result<CompareAndDeleteResult> {
+        self.cache.delete(key, collection).await?;
+        self.primary
+            .compare_and_delete(key, expected, collection)
+            .await
+    }
+}
+
+#[async_trait]
 impl<C, P> AsyncEnumerateKeys for PassthroughCacheWrapper<C, P>
 where
     C: AsyncKeyValue + AsyncEnumerateKeys + Send + Sync,
@@ -190,6 +240,13 @@ mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
     use crate::wrapper::readonly::ReadOnlyWrapper;
+
+    fn assert_capabilities<T: AsyncKeyValue + AsyncCompareAndSwap>() {}
+
+    #[test]
+    fn cache_wrapper_preserves_primary_compare_and_swap_capability() {
+        assert_capabilities::<PassthroughCacheWrapper<MemoryStore, MemoryStore>>();
+    }
 
     #[tokio::test]
     async fn test_passthrough_cache() {
