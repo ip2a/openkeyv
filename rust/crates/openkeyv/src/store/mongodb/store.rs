@@ -407,10 +407,11 @@ impl MongoDBStore {
             }
             None => unreachable!("field presence was checked"),
         };
-        if expected_key.is_some_and(|expected| expected != key) {
+        if let Some(expected_key) = expected_key
+            && expected_key != key
+        {
             return Err(Error::Deserialization(format!(
-                "MongoDB query for key {} returned key {key}",
-                expected_key.expect("expected key is present")
+                "MongoDB query for key {expected_key} returned key {key}"
             )));
         }
         let binary = match document.remove("entry") {
