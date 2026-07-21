@@ -530,7 +530,12 @@ impl AsyncCull for S3Store {
             if res.is_truncated != Some(true) {
                 break;
             }
-            continuation = res.next_continuation_token;
+            continuation = Some(res.next_continuation_token.ok_or_else(|| {
+                Error::StoreConnection {
+                    message: "S3 returned a truncated object listing without a continuation token"
+                        .to_string(),
+                }
+            })?);
         }
         Ok(())
     }
@@ -572,7 +577,12 @@ impl AsyncEnumerateKeys for S3Store {
             if res.is_truncated != Some(true) || keys.len() >= limit {
                 break;
             }
-            continuation = res.next_continuation_token;
+            continuation = Some(res.next_continuation_token.ok_or_else(|| {
+                Error::StoreConnection {
+                    message: "S3 returned a truncated object listing without a continuation token"
+                        .to_string(),
+                }
+            })?);
         }
         keys.truncate(limit);
         Ok(keys)
@@ -604,7 +614,12 @@ impl AsyncEnumerateCollections for S3Store {
             if res.is_truncated != Some(true) || collections.len() >= limit {
                 break;
             }
-            continuation = res.next_continuation_token;
+            continuation = Some(res.next_continuation_token.ok_or_else(|| {
+                Error::StoreConnection {
+                    message: "S3 returned a truncated object listing without a continuation token"
+                        .to_string(),
+                }
+            })?);
         }
         let mut result: Vec<String> = collections.into_iter().collect();
         result.truncate(limit);
@@ -646,7 +661,12 @@ impl AsyncDestroyCollection for S3Store {
             if res.is_truncated != Some(true) {
                 break;
             }
-            continuation = res.next_continuation_token;
+            continuation = Some(res.next_continuation_token.ok_or_else(|| {
+                Error::StoreConnection {
+                    message: "S3 returned a truncated object listing without a continuation token"
+                        .to_string(),
+                }
+            })?);
         }
         if keys_to_delete.is_empty() {
             return Ok(false);
