@@ -171,7 +171,7 @@ where
                 Ok(RevisionedValue {
                     value: self
                         .decrypt_value(Some(current.value))?
-                        .expect("value was present"),
+                        .ok_or(Error::CorruptedData)?,
                     revision: current.revision,
                     ttl: current.ttl,
                 })
@@ -202,7 +202,7 @@ where
                         Ok(RevisionedValue {
                             value: self
                                 .decrypt_value(Some(current.value))?
-                                .expect("value was present"),
+                                .ok_or(Error::CorruptedData)?,
                             revision: current.revision,
                             ttl: current.ttl,
                         })
