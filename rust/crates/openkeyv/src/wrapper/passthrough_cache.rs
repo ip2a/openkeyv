@@ -115,6 +115,12 @@ impl<C: AsyncKeyValue, P: AsyncKeyValue> AsyncKeyValue for PassthroughCacheWrapp
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
+        if keys.len() != values.len() {
+            return Err(crate::error::Error::BatchSizeMismatch {
+                keys: keys.len(),
+                values: values.len(),
+            });
+        }
         for key in keys {
             self.cache.delete(key, collection).await?;
         }
@@ -203,6 +209,30 @@ mod tests {
         // (in this test both are in memory, but verifies structure)
         let got2 = wrapper.get("k", None).await.unwrap();
         assert_eq!(got2, Some(value));
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_cache_rejects_mismatched_batch_before_invalidation() {
+        let cache = MemoryStore::new();
+        cache
+            .put("k", Value::utf8("cached"), None, None)
+            .await
+            .unwrap();
+        let wrapper = PassthroughCacheWrapper::new(cache, MemoryStore::new());
+
+        let error = wrapper
+            .put_many(&["k".to_string()], &[], None, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            crate::error::Error::BatchSizeMismatch { keys: 1, values: 0 }
+        );
+        assert_eq!(
+            wrapper.get("k", None).await.unwrap(),
+            Some(Value::utf8("cached"))
+        );
     }
 
     #[tokio::test]
