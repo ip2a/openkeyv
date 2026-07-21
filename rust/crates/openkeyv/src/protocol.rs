@@ -110,6 +110,10 @@ pub trait AsyncKeyValue: Send + Sync {
     ) -> Result<Vec<Option<(Value, Option<f64>)>>>;
 
     /// Store multiple key-value pairs with the same optional TTL.
+    ///
+    /// `keys` and `values` must have the same length. Implementations may
+    /// perform partial writes when the backend reports an error, but a
+    /// successful result means every key/value pair was accepted.
     async fn put_many(
         &self,
         keys: &[String],

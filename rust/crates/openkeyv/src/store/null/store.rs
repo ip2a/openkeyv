@@ -84,11 +84,17 @@ impl AsyncKeyValue for NullStore {
 
     async fn put_many(
         &self,
-        _keys: &[String],
-        _values: &[Value],
+        keys: &[String],
+        values: &[Value],
         _collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
+        if keys.len() != values.len() {
+            return Err(crate::error::Error::BatchSizeMismatch {
+                keys: keys.len(),
+                values: values.len(),
+            });
+        }
         if let Some(seconds) = ttl {
             ManagedEntry::validate_ttl(seconds)?;
         }
@@ -148,6 +154,19 @@ mod tests {
         assert_eq!(store.get("k", None).await.unwrap(), None);
         assert!(!store.delete("k", None).await.unwrap());
         assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_null_store_rejects_mismatched_batch_lengths() {
+        let store = NullStore::new();
+        let err = store
+            .put_many(&[], &[Value::null()], None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            crate::error::Error::BatchSizeMismatch { keys: 0, values: 1 }
+        );
     }
 
     #[tokio::test]

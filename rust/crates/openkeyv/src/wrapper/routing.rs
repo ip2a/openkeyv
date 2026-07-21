@@ -121,6 +121,12 @@ impl<F: Fn(Option<&str>, &str) -> usize + Send + Sync> AsyncKeyValue for Routing
         collection: Option<&str>,
         ttl: Option<f64>,
     ) -> Result<()> {
+        if keys.len() != values.len() {
+            return Err(crate::error::Error::BatchSizeMismatch {
+                keys: keys.len(),
+                values: values.len(),
+            });
+        }
         if keys.is_empty() {
             return Ok(());
         }
@@ -375,6 +381,23 @@ mod tests {
 
         assert!(router.get("k", Some("unknown")).await.is_err());
         assert!(router.get("k", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn routing_wrapper_rejects_mismatched_batch_lengths_before_routing() {
+        let router = RoutingWrapper::new(
+            vec![Box::new(MemoryStore::new()) as Box<dyn RoutedStore>],
+            |_collection, _key| 99,
+        );
+
+        let err = router
+            .put_many(&[], &[Value::null()], None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            crate::error::Error::BatchSizeMismatch { keys: 0, values: 1 }
+        );
     }
 
     #[tokio::test]
