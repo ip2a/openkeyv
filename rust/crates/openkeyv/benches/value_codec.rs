@@ -49,7 +49,10 @@ fn bench_structured_small(c: &mut Criterion) {
             StructuredValue::String("test".to_string()),
         ),
         ("active".to_string(), StructuredValue::Bool(true)),
-        ("score".to_string(), StructuredValue::Float(3.14)),
+        (
+            "score".to_string(),
+            StructuredValue::Float(std::f64::consts::PI),
+        ),
     ]);
 
     let encoded = small.encode().unwrap();

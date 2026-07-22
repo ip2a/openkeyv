@@ -87,3 +87,4 @@ harness = false
 [[bench]]
 name = "redis_store"
 harness = false
+required-features = ["redis"]
