@@ -32,7 +32,7 @@ getrandom = "0.3"
 sled = { version = "0.34", optional = true }
 redis = { version = "0.29", features = ["tokio-comp"], optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono"], optional = true }
-mongodb = { version = "3.2", optional = true }
+mongodb = { version = "3.2", default-features = false, features = ["compat-3-0-0", "rustls-tls"], optional = true }
 futures-util = { version = "0.3", optional = true }
 rocksdb = { version = "0.23", features = ["multi-threaded-cf"], optional = true }
 aws-config = { version = "=1.8.0", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process"], optional = true }
@@ -45,8 +45,8 @@ vaultrs = { version = "0.8", optional = true }
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"], optional = true }
 firestore = { version = "0.48", optional = true }
 opensearch = { version = "2.4", optional = true }
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"], optional = true }
-pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"], optional = true }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], optional = true }
+pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional = true }
 
 [features]
 default = ["disk", "redis", "rocksdb"]

@@ -46,6 +46,36 @@ jobs:
               stream.write(f"prerelease={prerelease}\n")
           PY
 
+  supply-chain:
+    name: Supply-chain policy
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.9.24
+          enable-cache: true
+      - name: Audit Rust release dependencies and licenses
+        working-directory: rust
+        run: cargo deny --locked check advisories licenses
+      - name: Audit Python runtime dependencies and licenses
+        run: |
+          set -eu
+          requirements="$RUNNER_TEMP/openkeyv-runtime-requirements.txt"
+          environment="$RUNNER_TEMP/openkeyv-license-venv"
+          uv export --project python --no-dev --no-emit-project --format requirements-txt --output-file "$requirements"
+          uv tool run --python 3.13 --from pip-audit==2.10.1 pip-audit --no-deps --disable-pip --requirement "$requirements"
+          uv venv "$environment" --python 3.13
+          uv pip install --python "$environment/bin/python" --requirement "$requirements"
+          uv tool run --python 3.13 --from pip-licenses==5.5.1 pip-licenses \
+            --python="$environment/bin/python" \
+            --allow-only='MIT License;MPL-2.0 AND (Apache-2.0 OR MIT);PSF-2.0'
+
   crate:
     name: Package Rust crate
     needs: validate
@@ -170,7 +200,7 @@ jobs:
 
   attest:
     name: Attest release artifacts
-    needs: [crate, wheel]
+    needs: [supply-chain, crate, wheel]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
