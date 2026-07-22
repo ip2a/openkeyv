@@ -27,9 +27,9 @@ def _runtime_signature(target: object) -> list[tuple[str, bool]]:
 
 
 def test_public_store_facades_match() -> None:
-    assert stores.__all__ == openkeyv.__all__
+    assert set(stores.__all__) < set(openkeyv.__all__)
 
-    for class_name in openkeyv.__all__:
+    for class_name in stores.__all__:
         assert getattr(openkeyv, class_name) is getattr(stores, class_name) is getattr(_internal, class_name)
 
 

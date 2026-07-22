@@ -39,7 +39,9 @@ use pyo3::prelude::*;
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<memory::PyMemoryStore>()?;
     m.add_class::<simple::PySimpleStore>()?;
+    #[cfg(feature = "python-full")]
     m.add_class::<filetree::PyFileTreeStore>()?;
+    #[cfg(feature = "python-full")]
     m.add_class::<null::PyNullStore>()?;
     #[cfg(feature = "disk")]
     m.add_class::<disk::PyDiskStore>()?;

@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from openkeyv import MemoryStore, NullStore, SimpleStore, SqliteStore
+import openkeyv
+from openkeyv import MemoryStore, SimpleStore, SqliteStore, _internal
 from openkeyv.protocols import AsyncCompareAndSwapProtocol
 
 
@@ -93,26 +94,9 @@ async def test_memory_store_roundtrips_unsigned_integer_boundaries() -> None:
     assert await store.get_many(keys) == values
 
 
-async def test_null_store_has_explicit_noop_results() -> None:
-    store = NullStore()
-
-    await store.put("key", "value")
-    await store.put_many(["one"], [1])
-
-    assert await store.get("key") is None
-    assert await store.ttl("key") == (None, None)
-    assert await store.delete("key") is False
-    assert await store.delete_many(["one"]) == 0
-    assert await store.keys() == []
-    assert await store.collections() == []
-    assert await store.destroy_collection("collection") is False
-    await store.cull()
-    assert await store.destroy() is True
-
-
-@pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore, NullStore])
+@pytest.mark.parametrize("store_type", [MemoryStore, SimpleStore])
 @pytest.mark.parametrize("ttl", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0])
-async def test_stores_reject_invalid_ttl(store_type: type[MemoryStore] | type[SimpleStore] | type[NullStore], ttl: float) -> None:
+async def test_stores_reject_invalid_ttl(store_type: type[MemoryStore] | type[SimpleStore], ttl: float) -> None:
     store = store_type()
 
     with pytest.raises(RuntimeError, match="invalid ttl"):
@@ -128,4 +112,35 @@ async def test_stores_reject_invalid_ttl(store_type: type[MemoryStore] | type[Si
 def test_compare_and_swap_capability_is_only_advertised_by_atomic_store() -> None:
     assert isinstance(MemoryStore(), AsyncCompareAndSwapProtocol)
     assert not isinstance(SimpleStore(), AsyncCompareAndSwapProtocol)
-    assert not isinstance(NullStore(), AsyncCompareAndSwapProtocol)
+
+
+def test_public_api_matches_python_core_release() -> None:
+    assert set(openkeyv.__all__) == {
+        "CompareAndDeleteResult",
+        "CompareAndSwapResult",
+        "DiskStore",
+        "MemoryStore",
+        "RedisStore",
+        "Revision",
+        "RevisionedValue",
+        "SimpleStore",
+        "SqliteStore",
+        "ValkeyStore",
+    }
+    for backend in (
+        "DuckDBStore",
+        "DynamoDBStore",
+        "FileTreeStore",
+        "FirestoreStore",
+        "KeyringStore",
+        "MemcachedStore",
+        "MongoDBStore",
+        "NullStore",
+        "OpenSearchStore",
+        "PostgresStore",
+        "RocksDBStore",
+        "S3Store",
+        "VaultStore",
+    ):
+        assert not hasattr(openkeyv, backend)
+        assert not hasattr(_internal, backend)

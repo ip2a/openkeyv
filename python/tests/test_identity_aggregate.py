@@ -3,27 +3,20 @@ from typing import Any
 
 import pytest
 
-from openkeyv import DiskStore, DuckDBStore, FileTreeStore, MemoryStore, RocksDBStore, SimpleStore, SqliteStore
+from openkeyv import DiskStore, MemoryStore, SimpleStore, SqliteStore
 
 
-@pytest.fixture(
-    params=["memory", "simple", "duckdb", "disk", "filetree", "rocksdb", "sqlite"],
-)
+@pytest.fixture(params=["memory", "simple", "disk", "sqlite"])
 def local_store(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     store_type = request.param
     if store_type == "memory":
         return MemoryStore()
     if store_type == "simple":
         return SimpleStore()
-    paths = {
-        "duckdb": DuckDBStore(path=str(tmp_path / "aggregate.duckdb")),
-        "disk": DiskStore(path=str(tmp_path / "disk")),
-        "filetree": FileTreeStore(base_path=str(tmp_path / "filetree")),
-        "rocksdb": RocksDBStore(path=str(tmp_path / "rocksdb")),
-        "sqlite": SqliteStore(path=str(tmp_path / "aggregate.sqlite")),
-    }
-    if store_type in paths:
-        return paths[store_type]
+    if store_type == "disk":
+        return DiskStore(path=str(tmp_path / "disk"))
+    if store_type == "sqlite":
+        return SqliteStore(path=str(tmp_path / "aggregate.sqlite"))
     raise AssertionError
 
 
