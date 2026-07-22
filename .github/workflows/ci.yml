@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-stable:
+    name: Rust stable
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked -p openkeyv --no-default-features --all-targets -- -D warnings
+      - run: cargo test --locked -p openkeyv --no-default-features
+      - run: cargo test --locked -p openkeyv
+      - run: cargo check --locked -p openkeyv --all-features
+
+  rust-msrv:
+    name: Rust 1.85
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: msrv-1.85
+      - run: cargo check --locked -p openkeyv --no-default-features
+      - run: cargo check --locked -p openkeyv
+      - run: cargo check --locked -p openkeyv --all-features
+
+  python-quality:
+    name: Python quality
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.9.24
+          enable-cache: true
+      - run: uv sync --group dev --python 3.13
+      - run: uv run ruff check src tests
+      - run: uv run basedpyright
+      - run: uv run pytest -q
+      - name: Verify Cargo is the Python version source
+        run: |
+          uv run python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          cargo = tomllib.loads(Path("../rust/Cargo.toml").read_text())
+          assert project.get("dynamic") == ["version"]
+          assert "version" not in project
+          assert cargo["workspace"]["package"]["version"]
+          PY
+
+  python-wheel:
+    name: Python abi3 wheel
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: 0.9.24
+          enable-cache: true
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: x86_64
+          manylinux: "2_28"
+          args: --release --locked --out dist
+      - name: Verify wheel-only abi3 artifact
+        working-directory: python
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          assert "-cp310-abi3-manylinux_2_28_x86_64.whl" in wheels[0].name, wheels[0]
+          assert not list(Path("dist").glob("*.tar.gz"))
+          PY
+      - name: Install and smoke test supported Python versions
+        working-directory: python
+        run: |
+          set -eu
+          for version in 3.10 3.11 3.12 3.13; do
+            uv venv ".venv-$version" --python "$version"
+            uv pip install --python ".venv-$version/bin/python" dist/*.whl
+            ".venv-$version/bin/python" - <<'PY'
+          import asyncio
+          import openkeyv
+          from openkeyv import MemoryStore, SimpleStore, SqliteStore
+
+          assert set(openkeyv.__all__) == {
+              "CompareAndDeleteResult",
+              "CompareAndSwapResult",
+              "DiskStore",
+              "MemoryStore",
+              "RedisStore",
+              "Revision",
+              "RevisionedValue",
+              "SimpleStore",
+              "SqliteStore",
+              "ValkeyStore",
+          }
+
+          async def smoke() -> None:
+              for store in (MemoryStore(), SimpleStore(), SqliteStore()):
+                  await store.put("key", {"value": [1, True, None]})
+                  assert await store.get("key") == {"value": [1, True, None]}
+                  assert await store.delete("key") is True
+
+          asyncio.run(smoke())
+          PY
+          done

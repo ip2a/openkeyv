@@ -1119,17 +1119,18 @@ impl OpenSearchStore {
                     deleted += 1;
                 }
                 (404, Some("not_found")) => {
-                    if let Some(shards) = result.shards
-                        && (shards.failed != 0
+                    if let Some(shards) = result.shards {
+                        if shards.failed != 0
                             || shards.successful == 0
-                            || shards.successful > shards.total)
-                    {
-                        return Err(Error::StoreConnection {
-                            message: format!(
-                                "OpenSearch missing-document delete for {index}/{expected_key} reported shards total={}, successful={}, failed={}",
-                                shards.total, shards.successful, shards.failed
-                            ),
-                        });
+                            || shards.successful > shards.total
+                        {
+                            return Err(Error::StoreConnection {
+                                message: format!(
+                                    "OpenSearch missing-document delete for {index}/{expected_key} reported shards total={}, successful={}, failed={}",
+                                    shards.total, shards.successful, shards.failed
+                                ),
+                            });
+                        }
                     }
                     accepted_absence = true;
                 }

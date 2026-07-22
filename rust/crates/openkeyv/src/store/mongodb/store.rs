@@ -407,12 +407,12 @@ impl MongoDBStore {
             }
             None => unreachable!("field presence was checked"),
         };
-        if let Some(expected_key) = expected_key
-            && expected_key != key
-        {
-            return Err(Error::Deserialization(format!(
-                "MongoDB query for key {expected_key} returned key {key}"
-            )));
+        if let Some(expected_key) = expected_key {
+            if expected_key != key {
+                return Err(Error::Deserialization(format!(
+                    "MongoDB query for key {expected_key} returned key {key}"
+                )));
+            }
         }
         let binary = match document.remove("entry") {
             Some(Bson::Binary(binary)) if binary.subtype == BinarySubtype::Generic => binary,
