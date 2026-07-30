@@ -1,7 +1,7 @@
 use super::client::{MemoryClient, RevisionedEntry, RevisionedEntrySnapshot};
 use super::config::{MemoryConfig, SeedData};
 use super::error::{Error, Result};
-use crate::change::{ChangeFeedRequest, ChangeOperation};
+use crate::change::{ChangeFeedRequest, ChangeOperation, ChangeStream};
 use crate::entry::ManagedEntry;
 use crate::protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
