@@ -50,7 +50,11 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], option
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional = true }
 
 [features]
-default = ["disk", "redis"]
+default = ["light", "redis", "memcached", "valkey"]
+
+# 零成本后端，连 redis 都没有
+light = ["json", "rocksdb", "keyring"]
+
 json = ["dep:serde_json"]
 disk = ["dep:sled"]
 redis = ["dep:redis"]
@@ -69,8 +73,8 @@ firestore = ["dep:firestore", "dep:futures-util", "dep:serde", "bytes/serde"]
 firestore-tests = ["firestore", "dep:gcloud-sdk"]
 opensearch = ["dep:opensearch", "dep:serde", "dep:serde_json"]
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
-python-core = ["python", "disk", "redis", "sqlite", "valkey"]
-python-full = ["python-core", "postgres", "mongodb", "rocksdb", "dynamodb", "s3", "duckdb", "memcached", "vault", "keyring", "firestore", "opensearch"]
+python-core = ["python", "light", "redis"]
+python-full = ["python-core", "disk", "sqlite", "memcached", "postgres", "mongodb", "duckdb", "vault", "opensearch", "dynamodb", "s3", "firestore"]
 
 [dev-dependencies]
 tokio-test = "0.4"
