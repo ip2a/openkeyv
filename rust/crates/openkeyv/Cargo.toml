@@ -28,6 +28,7 @@ flate2 = "1.1"
 base64 = "0.22"
 bytes = "1.10"
 getrandom = "0.3"
+gcloud-sdk = { version = "0.29", optional = true }
 
 sled = { version = "0.34", optional = true }
 redis = { version = "0.29", features = ["tokio-comp"], optional = true }
@@ -49,7 +50,7 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], option
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional = true }
 
 [features]
-default = ["disk", "redis", "rocksdb"]
+default = ["disk", "redis"]
 json = ["dep:serde_json"]
 disk = ["dep:sled"]
 redis = ["dep:redis"]
@@ -65,13 +66,13 @@ valkey = ["dep:redis"]
 vault = ["dep:vaultrs", "dep:futures-util", "dep:serde", "dep:serde_json"]
 keyring = ["dep:keyring"]
 firestore = ["dep:firestore", "dep:futures-util", "dep:serde", "bytes/serde"]
+firestore-tests = ["firestore", "dep:gcloud-sdk"]
 opensearch = ["dep:opensearch", "dep:serde", "dep:serde_json"]
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
 python-core = ["python", "disk", "redis", "sqlite", "valkey"]
 python-full = ["python-core", "postgres", "mongodb", "rocksdb", "dynamodb", "s3", "duckdb", "memcached", "vault", "keyring", "firestore", "opensearch"]
 
 [dev-dependencies]
-gcloud-sdk = "0.29"
 tokio-test = "0.4"
 tempfile = "3.14"
 criterion.workspace = true

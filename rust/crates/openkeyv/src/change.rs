@@ -87,19 +87,6 @@ pub trait ChangeStream: Send {
     async fn recv(&mut self) -> Result<Option<StoreChange>>;
 }
 
-/// A live stream that yields retained changes first and then waits for new ones.
-pub struct ChangeSubscription {
-    inner: Box<dyn ChangeStream>,
-}
-
-impl ChangeSubscription {
-    pub fn new(inner: impl ChangeStream + 'static) -> Self {
-        Self {
-            inner: Box::new(inner),
-        }
-    }
-
-    pub async fn recv(&mut self) -> Result<Option<StoreChange>> {
-        self.inner.recv().await
-    }
-}
+/// Owned change stream. Type alias retained so call sites and migration
+/// helpers can keep a stable name; trait implementations return this directly.
+pub type ChangeSubscription = Box<dyn ChangeStream + Send>;

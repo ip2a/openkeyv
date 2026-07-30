@@ -39,6 +39,7 @@ mod cas;
 pub mod change;
 pub mod entry;
 pub mod error;
+pub mod migration;
 pub mod protocol;
 pub mod store;
 pub mod utils;
@@ -54,6 +55,10 @@ pub use change::{
 };
 pub use entry::ManagedEntry;
 pub use error::{Error, Result};
+pub use migration::{
+    MigrationOptions, MigrationReport, apply_change, copy_snapshot, copy_snapshot_with_feed,
+    merge_report,
+};
 pub use protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
     AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,

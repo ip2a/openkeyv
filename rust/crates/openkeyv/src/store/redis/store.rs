@@ -4,7 +4,7 @@ use super::error::{Error, Result, map_redis_err};
 use crate::cas;
 use crate::change::{
     ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream,
-    ChangeSubscription, StoreChange,
+    StoreChange,
 };
 use crate::entry::ManagedEntry;
 use crate::protocol::{
@@ -294,7 +294,10 @@ impl RedisStore {
 
 #[async_trait]
 impl AsyncChangeFeed for RedisStore {
-    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<ChangeSubscription> {
+    async fn subscribe(
+        &self,
+        request: ChangeFeedRequest,
+    ) -> Result<Box<dyn ChangeStream + Send>> {
         let mut connection = self.client.subscription_connection().await?;
         let start = request.start;
         let filter = request.filter;
@@ -311,7 +314,7 @@ impl AsyncChangeFeed for RedisStore {
             ChangeStart::Latest => Some(cursor_revision(&cursor)?),
             ChangeStart::After(cursor) => Some(cursor_revision(cursor.as_str())?),
         };
-        Ok(ChangeSubscription::new(RedisChangeStream {
+        Ok(Box::new(RedisChangeStream {
             connection,
             cursor,
             last_revision,

@@ -1,7 +1,7 @@
 use super::client::{MemoryClient, RevisionedEntry, RevisionedEntrySnapshot};
 use super::config::{MemoryConfig, SeedData};
 use super::error::{Error, Result};
-use crate::change::{ChangeFeedRequest, ChangeOperation, ChangeSubscription};
+use crate::change::{ChangeFeedRequest, ChangeOperation};
 use crate::entry::ManagedEntry;
 use crate::protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
@@ -485,9 +485,12 @@ impl AsyncCompareAndSwap for MemoryStore {
 
 #[async_trait]
 impl AsyncChangeFeed for MemoryStore {
-    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<ChangeSubscription> {
+    async fn subscribe(
+        &self,
+        request: ChangeFeedRequest,
+    ) -> Result<Box<dyn ChangeStream + Send>> {
         let stream = self.client.subscribe(request.start, request.filter).await?;
-        Ok(ChangeSubscription::new(stream))
+        Ok(Box::new(stream))
     }
 }
 

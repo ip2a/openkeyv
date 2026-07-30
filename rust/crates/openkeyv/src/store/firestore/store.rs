@@ -755,7 +755,7 @@ impl AsyncKeyValue for FirestoreStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "firestore-tests"))]
 mod tests {
     use super::*;
     use gcloud_sdk::google::firestore::v1::value::ValueType;

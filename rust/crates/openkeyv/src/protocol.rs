@@ -1,4 +1,4 @@
-use crate::change::{ChangeFeedRequest, ChangeSubscription};
+use crate::change::{ChangeFeedRequest, ChangeStream};
 use crate::error::Result;
 use crate::value::Value;
 use async_trait::async_trait;
@@ -193,7 +193,10 @@ pub trait AsyncDestroyCollection: Send + Sync {
 /// Protocol for stores that expose an ordered, resumable mutation feed.
 #[async_trait]
 pub trait AsyncChangeFeed: Send + Sync {
-    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<ChangeSubscription>;
+    async fn subscribe(
+        &self,
+        request: ChangeFeedRequest,
+    ) -> Result<Box<dyn ChangeStream + Send>>;
 }
 
 #[cfg(test)]
