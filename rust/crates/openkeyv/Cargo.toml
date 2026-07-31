@@ -53,7 +53,7 @@ pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional
 default = ["light", "redis", "memcached", "valkey"]
 
 # 零成本后端，连 redis 都没有
-light = ["json", "rocksdb", "keyring"]
+light = ["json", "keyring"]
 
 json = ["dep:serde_json"]
 disk = ["dep:sled"]
