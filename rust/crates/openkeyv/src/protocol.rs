@@ -126,6 +126,24 @@ pub trait AsyncKeyValue: Send + Sync {
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize>;
 }
 
+/// The minimum store contract shared by every OpenKeyv store.
+#[async_trait]
+pub trait BaseStore: AsyncKeyValue + Send + Sync {
+    fn store_name(&self) -> &'static str;
+}
+
+impl<T> BaseStore for T
+where
+    T: AsyncKeyValue + Send + Sync,
+{
+    fn store_name(&self) -> &'static str {
+        std::any::type_name::<T>()
+            .rsplit("::")
+            .next()
+            .unwrap_or("store")
+    }
+}
+
 /// Optional protocol for stores with genuinely atomic conditional writes.
 ///
 /// `expected = None` means create-if-absent. Implementations must not emulate
@@ -193,10 +211,7 @@ pub trait AsyncDestroyCollection: Send + Sync {
 /// Protocol for stores that expose an ordered, resumable mutation feed.
 #[async_trait]
 pub trait AsyncChangeFeed: Send + Sync {
-    async fn subscribe(
-        &self,
-        request: ChangeFeedRequest,
-    ) -> Result<Box<dyn ChangeStream + Send>>;
+    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<Box<dyn ChangeStream + Send>>;
 }
 
 #[cfg(test)]
