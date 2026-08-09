@@ -55,7 +55,7 @@ default = ["light", "redis", "memcached", "valkey"]
 # 零成本后端，连 redis 都没有
 light = ["json", "keyring"]
 
-json = ["dep:serde_json"]
+json = ["dep:serde_json", "dep:serde"]
 disk = ["dep:sled"]
 redis = ["dep:redis"]
 postgres = ["dep:sqlx"]

@@ -39,10 +39,12 @@ mod cas;
 pub mod change;
 pub mod entry;
 pub mod error;
+pub mod factory;
 pub mod handle;
 pub mod migration;
 pub mod protocol;
 pub mod store;
+pub mod store_config;
 pub mod utils;
 pub mod value;
 pub mod wrapper;
@@ -66,4 +68,5 @@ pub use protocol::{
     AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, BaseStore,
     CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue,
 };
+pub use store_config::StoreConfig;
 pub use value::{StructuredValue, Value, ValueKind};
