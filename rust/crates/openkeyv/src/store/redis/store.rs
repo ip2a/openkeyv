@@ -3,8 +3,7 @@ use super::config::RedisConfig;
 use super::error::{Error, Result, map_redis_err};
 use crate::cas;
 use crate::change::{
-    ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream,
-    StoreChange,
+    ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream, StoreChange,
 };
 use crate::entry::ManagedEntry;
 use crate::protocol::{
@@ -294,10 +293,7 @@ impl RedisStore {
 
 #[async_trait]
 impl AsyncChangeFeed for RedisStore {
-    async fn subscribe(
-        &self,
-        request: ChangeFeedRequest,
-    ) -> Result<Box<dyn ChangeStream + Send>> {
+    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<Box<dyn ChangeStream + Send>> {
         let mut connection = self.client.subscription_connection().await?;
         let start = request.start;
         let filter = request.filter;

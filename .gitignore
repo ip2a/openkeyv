@@ -1,6 +1,17 @@
+# Whitelist mode: ignore everything by default, allow only what is listed
+/*
+
+!/.gitignore
+!/.github/
+!/rust/
+!/python/
+
+# Docs are untracked for now
+*.md
+
+# Junk that still must be excluded inside the whitelist
 # Rust
-target/
-Cargo.lock
+rust/target/
 
 # Python
 __pycache__/
@@ -12,27 +23,19 @@ venv/
 dist/
 build/
 *.whl
+.pytest_cache/
+.ruff_cache/
 
-# Maturin
-*.egg-info/
-
-# IDE
+# IDE / OS
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Test / local env
+# Local environment
 .env
 .env.local
-
-# Lock files managed by release scripts
 uv.lock
-
-# Reference projects are not part of this repository's source
-references/

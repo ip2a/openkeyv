@@ -485,10 +485,7 @@ impl AsyncCompareAndSwap for MemoryStore {
 
 #[async_trait]
 impl AsyncChangeFeed for MemoryStore {
-    async fn subscribe(
-        &self,
-        request: ChangeFeedRequest,
-    ) -> Result<Box<dyn ChangeStream + Send>> {
+    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<Box<dyn ChangeStream + Send>> {
         let stream = self.client.subscribe(request.start, request.filter).await?;
         Ok(Box::new(stream))
     }
