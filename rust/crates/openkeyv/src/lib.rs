@@ -39,11 +39,13 @@ mod cas;
 pub mod change;
 pub mod entry;
 pub mod error;
+#[cfg(feature = "json")]
 pub mod factory;
 pub mod handle;
 pub mod migration;
 pub mod protocol;
 pub mod store;
+#[cfg(feature = "json")]
 pub mod store_config;
 pub mod utils;
 pub mod value;
@@ -68,5 +70,6 @@ pub use protocol::{
     AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, BaseStore,
     CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue,
 };
+#[cfg(feature = "json")]
 pub use store_config::StoreConfig;
 pub use value::{StructuredValue, Value, ValueKind};

@@ -8,6 +8,8 @@
 
 # Docs are untracked for now
 *.md
+!README.md
+!**/README.md
 
 # Junk that still must be excluded inside the whitelist
 # Rust
