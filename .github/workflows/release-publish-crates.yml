@@ -225,14 +225,19 @@ jobs:
     name: Publish crates.io
     needs: [validate, crate, wheel, attest]
     runs-on: ubuntu-24.04
-    environment: release
+    environment: crates
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
       - name: Publish crate without overwriting an existing version
         working-directory: rust
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --locked -p openkeyv
 
   publish-pypi:
