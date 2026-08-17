@@ -17,9 +17,6 @@ concurrency:
 jobs:
   rust-test:
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,25 +38,27 @@ jobs:
           components: rustfmt, clippy
 
       - name: Check formatting
+        working-directory: rust
         run: cargo fmt --all -- --check
 
       - name: Run clippy (no default features)
+        working-directory: rust
         run: cargo clippy --locked -p openkeyv --no-default-features --all-targets -- -D warnings
 
       - name: Run tests (no default features)
+        working-directory: rust
         run: cargo test --locked -p openkeyv --no-default-features
 
       - name: Run tests (default features)
+        working-directory: rust
         run: cargo test --locked -p openkeyv
 
       - name: Check all features
+        working-directory: rust
         run: cargo check --locked -p openkeyv --all-features
 
   rust-msrv:
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,12 +67,15 @@ jobs:
         uses: dtolnay/rust-toolchain@1.85.0
 
       - name: Check no default features
+        working-directory: rust
         run: cargo check --locked -p openkeyv --no-default-features
 
       - name: Check default features
+        working-directory: rust
         run: cargo check --locked -p openkeyv
 
       - name: Check all features
+        working-directory: rust
         run: cargo check --locked -p openkeyv --all-features
 
   supply-chain:
@@ -96,12 +98,12 @@ jobs:
 
   python-quality:
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: python
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -110,13 +112,17 @@ jobs:
           enable-cache: true
 
       - name: Sync dev environment
+        working-directory: python
         run: uv sync --group dev --python 3.13
 
       - name: Lint
+        working-directory: python
         run: uv run ruff check src tests
 
       - name: Typecheck
+        working-directory: python
         run: uv run basedpyright
 
       - name: Test
+        working-directory: python
         run: uv run pytest -q

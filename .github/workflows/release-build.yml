@@ -16,9 +16,6 @@ jobs:
   build:
     name: package-crate
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,9 +37,11 @@ jobs:
         uses: dtolnay/rust-toolchain@1.85.0
 
       - name: Package crate
+        working-directory: rust
         run: cargo package --locked -p openkeyv
 
       - name: Verify packaged crate
+        working-directory: rust
         env:
           VERSION: ${{ github.ref_name }}
         run: |
