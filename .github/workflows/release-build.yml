@@ -1,0 +1,115 @@
+name: release-build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: package-crate
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate release context
+        shell: bash
+        run: python3 scripts/validate_release_context.py
+
+      - name: Validate release metadata
+        shell: bash
+        run: python3 scripts/release_preflight.py
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Package crate
+        run: cargo package --locked -p openkeyv
+
+      - name: Verify packaged crate
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -eu
+          version="${VERSION#v}"
+          archive="target/package/openkeyv-${version}.crate"
+          test -f "${archive}"
+          mkdir package-check
+          tar -xzf "${archive}" -C package-check
+          cargo test --locked --manifest-path "package-check/openkeyv-${version}/Cargo.toml" --no-default-features
+
+      - name: Upload crate artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openkeyv-crate
+          path: rust/target/package/openkeyv-*.crate
+          if-no-files-found: error
+
+  publish-github-release:
+    name: publish-github-release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate release context
+        shell: bash
+        run: python3 scripts/validate_release_context.py
+
+      - name: Validate release metadata
+        shell: bash
+        run: python3 scripts/release_preflight.py --skip-package-list
+
+      - name: Download crate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: openkeyv-crate
+          path: release-assets
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: release-assets/*
+
+      - name: Publish GitHub Release assets
+        shell: bash
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create "${tag}" \
+              --title "${tag}" \
+              --generate-notes \
+              --verify-tag \
+              --notes "Rust crate release for openkeyv. Python wheels are not published in this release pipeline."
+          fi
+          gh release upload "${tag}" release-assets/* --clobber

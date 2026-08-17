@@ -5,6 +5,7 @@
 !/.github/
 !/rust/
 !/python/
+!/scripts/
 
 # Docs are untracked for now
 *.md

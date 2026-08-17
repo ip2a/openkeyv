@@ -1,0 +1,64 @@
+name: post-release-verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version to verify (e.g., 0.1.5)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  attestations: read
+
+jobs:
+  verify-github-release:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download GitHub Release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          gh release download "v${{ inputs.version }}" --dir release-assets --pattern 'openkeyv-*.crate'
+
+      - name: Verify GitHub Release asset exists
+        shell: bash
+        run: |
+          set -eu
+          shopt -s nullglob
+          crates=(release-assets/openkeyv-${{ inputs.version }}.crate)
+          test "${#crates[@]}" -eq 1
+          echo "[ok] GitHub Release contains openkeyv-${{ inputs.version }}.crate"
+
+      - name: Verify GitHub Release provenance
+        shell: bash
+        run: |
+          gh release verify "v${{ inputs.version }}"
+          gh release verify-asset "v${{ inputs.version }}" "release-assets/openkeyv-${{ inputs.version }}.crate"
+
+  verify-crates:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Verify crates.io library dependency
+        shell: bash
+        run: |
+          tmpdir="$(mktemp -d)"
+          cd "${tmpdir}"
+          cargo init --lib --name openkeyv_crates_verify
+          cargo add openkeyv@${{ inputs.version }}
+          cargo check
+          echo "[ok] crates.io library dependency verification passed"

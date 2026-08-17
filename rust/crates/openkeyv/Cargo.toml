@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 description = "Async Key-Value Store - A pluggable interface for KV Stores"
 readme = "../../../README.md"
-repository = "https://github.com/whillhill/openkeyv"
+repository = "https://github.com/ip2a/openkeyv"
 keywords = ["kv", "store", "async", "cache", "database"]
 categories = ["database", "caching", "asynchronous"]
 
