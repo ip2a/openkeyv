@@ -2,6 +2,17 @@
 
 use crate::error::{Error, Result};
 
+/// How collection enumeration treats scanned keys that do not decode as
+/// openkeyv compound identities (foreign keys sharing the database).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ForeignKeyPolicy {
+    /// Return an error when a scanned key fails to decode (previous behavior).
+    #[default]
+    Strict,
+    /// Skip foreign keys and keep scanning; for shared-database deployments.
+    Skip,
+}
+
 /// Return the canonical prefix for every key in `collection`.
 ///
 /// The length is the collection's UTF-8 byte length, not its character count.

@@ -52,9 +52,9 @@ jobs:
           version="${VERSION#v}"
           archive="target/package/openkeyv-${version}.crate"
           test -f "${archive}"
-          mkdir package-check
-          tar -xzf "${archive}" -C package-check
-          cargo test --locked --manifest-path "package-check/openkeyv-${version}/Cargo.toml" --no-default-features
+          checkdir="$(mktemp -d)"
+          tar -xzf "${archive}" -C "${checkdir}"
+          cargo test --locked --manifest-path "${checkdir}/openkeyv-${version}/Cargo.toml" --no-default-features
 
       - name: Upload crate artifact
         uses: actions/upload-artifact@v4

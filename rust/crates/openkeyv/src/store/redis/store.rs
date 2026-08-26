@@ -1,5 +1,5 @@
 use super::client::RedisClient;
-use super::config::RedisConfig;
+use super::config::{ForeignKeyPolicy, RedisConfig};
 use super::error::{Error, Result, map_redis_err};
 use crate::cas;
 use crate::change::{
@@ -267,11 +267,15 @@ async fn connection_manager(client: &redis::Client) -> Result<redis::aio::Connec
 
 impl RedisStore {
     pub async fn new(url: &str) -> Result<Self> {
+        Self::new_with_config(url, RedisConfig::default()).await
+    }
+
+    pub async fn new_with_config(url: &str, config: RedisConfig) -> Result<Self> {
         let client = redis::Client::open(url).map_err(map_redis_err)?;
         let conn = connection_manager(&client).await?;
         Ok(Self {
             client: RedisClient::with_client(conn, client),
-            config: RedisConfig::default(),
+            config,
         })
     }
 
@@ -704,6 +708,7 @@ impl AsyncEnumerateCollections for RedisStore {
         let mut conn = self.connection();
         let mut cursor = 0_u64;
         let mut collections = std::collections::HashSet::new();
+        let mut skipped_foreign_keys = 0_usize;
 
         loop {
             let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
@@ -720,18 +725,38 @@ impl AsyncEnumerateCollections for RedisStore {
                 if is_internal_key(&identity) {
                     continue;
                 }
-                let (collection, _) = decompound_key(&identity)?;
+                let (collection, _) = match decompound_key(&identity) {
+                    Ok(decoded) => decoded,
+                    Err(error) => match self.config.foreign_key_policy {
+                        ForeignKeyPolicy::Strict => return Err(error),
+                        ForeignKeyPolicy::Skip => {
+                            skipped_foreign_keys += 1;
+                            continue;
+                        }
+                    },
+                };
                 collections.insert(collection.to_string());
                 if collections.len() == limit {
+                    warn_foreign_keys(skipped_foreign_keys);
                     return Ok(collections.into_iter().collect());
                 }
             }
 
             cursor = next_cursor;
             if cursor == 0 {
+                warn_foreign_keys(skipped_foreign_keys);
                 return Ok(collections.into_iter().collect());
             }
         }
+    }
+}
+
+fn warn_foreign_keys(count: usize) {
+    if count > 0 {
+        tracing::warn!(
+            count,
+            "skipped foreign keys while enumerating collections (shared database?)"
+        );
     }
 }
 
@@ -1631,6 +1656,39 @@ mod tests {
         let _ = store.get("k", Some(&collection)).await;
         let value = store.get("k", Some(&collection)).await.unwrap();
         assert_eq!(value, Some(Value::utf8("v1")));
+        let _ = store.destroy_collection(&collection).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_collections_foreign_key_policy() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let collection = format!("openkeyv_policy_{}", std::process::id());
+        let foreign = format!("openkeyv_foreign_probe_{}", std::process::id());
+
+        let store = RedisStore::new(&url).await.unwrap();
+        let _ = store.destroy_collection(&collection).await.unwrap();
+        store
+            .put("k", Value::utf8("v1"), Some(&collection), None)
+            .await
+            .unwrap();
+        let mut conn = store.connection();
+        let _: redis::Value = conn.set(&foreign, "not-an-openkeyv-key").await.unwrap();
+
+        // Default (Strict): a foreign key in the database fails enumeration.
+        let result = store.collections(None).await;
+        assert!(result.is_err(), "strict policy must reject foreign keys");
+
+        // Skip: enumeration succeeds and still reports our own collection.
+        let config = RedisConfig {
+            foreign_key_policy: ForeignKeyPolicy::Skip,
+            ..RedisConfig::default()
+        };
+        let skipping = RedisStore::new_with_config(&url, config).await.unwrap();
+        let names = skipping.collections(None).await.unwrap();
+        assert!(names.contains(&collection));
+
+        let _: redis::Value = conn.del(&foreign).await.unwrap();
         let _ = store.destroy_collection(&collection).await;
     }
 }

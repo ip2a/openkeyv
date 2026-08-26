@@ -1,5 +1,5 @@
 use super::client::ValkeyClient;
-use super::config::ValkeyConfig;
+use super::config::{ForeignKeyPolicy, ValkeyConfig};
 use super::error::{Error, Result, map_valkey_err};
 use crate::cas;
 use crate::entry::ManagedEntry;
@@ -89,9 +89,13 @@ async fn connection_manager(client: &redis::Client) -> Result<redis::aio::Connec
 
 impl ValkeyStore {
     pub async fn new(url: &str) -> Result<Self> {
+        Self::new_with_config(url, ValkeyConfig::default()).await
+    }
+
+    pub async fn new_with_config(url: &str, config: ValkeyConfig) -> Result<Self> {
         let client = redis::Client::open(url).map_err(map_valkey_err)?;
         let conn = connection_manager(&client).await?;
-        Ok(Self::with_config(conn, ValkeyConfig::default()))
+        Ok(Self::with_config(conn, config))
     }
 
     pub async fn from_client(client: redis::Client) -> Result<Self> {
@@ -488,6 +492,7 @@ impl AsyncEnumerateCollections for ValkeyStore {
         let mut conn = self.connection();
         let mut cursor = 0_u64;
         let mut collections = std::collections::HashSet::new();
+        let mut skipped_foreign_keys = 0_usize;
 
         loop {
             let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
@@ -501,18 +506,38 @@ impl AsyncEnumerateCollections for ValkeyStore {
                 .map_err(map_valkey_err)?;
 
             for identity in keys {
-                let (collection, _) = decompound_key(&identity)?;
+                let (collection, _) = match decompound_key(&identity) {
+                    Ok(decoded) => decoded,
+                    Err(error) => match self.config.foreign_key_policy {
+                        ForeignKeyPolicy::Strict => return Err(error),
+                        ForeignKeyPolicy::Skip => {
+                            skipped_foreign_keys += 1;
+                            continue;
+                        }
+                    },
+                };
                 collections.insert(collection.to_string());
                 if collections.len() == limit {
+                    warn_foreign_keys(skipped_foreign_keys);
                     return Ok(collections.into_iter().collect());
                 }
             }
 
             cursor = next_cursor;
             if cursor == 0 {
+                warn_foreign_keys(skipped_foreign_keys);
                 return Ok(collections.into_iter().collect());
             }
         }
+    }
+}
+
+fn warn_foreign_keys(count: usize) {
+    if count > 0 {
+        tracing::warn!(
+            count,
+            "skipped foreign keys while enumerating collections (shared database?)"
+        );
     }
 }
 
