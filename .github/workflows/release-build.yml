@@ -36,6 +36,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.85.0
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Package crate
         working-directory: rust
         run: cargo package --locked -p openkeyv
