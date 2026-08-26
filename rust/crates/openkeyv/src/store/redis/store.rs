@@ -251,13 +251,24 @@ pub struct RedisStore {
     config: RedisConfig,
 }
 
+/// Build an auto-reconnecting connection manager with TCP keepalive so idle
+/// public-network links stay warm; when a socket is dropped anyway, the
+/// manager reconnects in the background after the first failing command.
+async fn connection_manager(client: &redis::Client) -> Result<redis::aio::ConnectionManager> {
+    let tcp_settings = redis::io::tcp::TcpSettings::default().set_keepalive(
+        socket2::TcpKeepalive::new().with_time(std::time::Duration::from_secs(60)),
+    );
+    let config = redis::aio::ConnectionManagerConfig::new().set_tcp_settings(tcp_settings);
+    client
+        .get_connection_manager_with_config(config)
+        .await
+        .map_err(map_redis_err)
+}
+
 impl RedisStore {
     pub async fn new(url: &str) -> Result<Self> {
         let client = redis::Client::open(url).map_err(map_redis_err)?;
-        let conn = client
-            .get_multiplexed_tokio_connection()
-            .await
-            .map_err(map_redis_err)?;
+        let conn = connection_manager(&client).await?;
         Ok(Self {
             client: RedisClient::with_client(conn, client),
             config: RedisConfig::default(),
@@ -265,24 +276,21 @@ impl RedisStore {
     }
 
     pub async fn from_client(client: redis::Client) -> Result<Self> {
-        let conn = client
-            .get_multiplexed_tokio_connection()
-            .await
-            .map_err(map_redis_err)?;
+        let conn = connection_manager(&client).await?;
         Ok(Self {
             client: RedisClient::with_client(conn, client),
             config: RedisConfig::default(),
         })
     }
 
-    pub fn with_config(conn: redis::aio::MultiplexedConnection, config: RedisConfig) -> Self {
+    pub fn with_config(conn: redis::aio::ConnectionManager, config: RedisConfig) -> Self {
         Self {
             client: RedisClient::new(conn),
             config,
         }
     }
 
-    fn connection(&self) -> redis::aio::MultiplexedConnection {
+    fn connection(&self) -> redis::aio::ConnectionManager {
         self.client.connection()
     }
 
@@ -1563,6 +1571,66 @@ mod tests {
         assert_eq!(observed.value, Value::integer(42));
         assert_eq!(observed.revision, revision);
         assert!(observed.ttl.is_none());
+        let _ = store.destroy_collection(&collection).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_recovers_after_server_closes_connection() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let store = RedisStore::new(&url).await.unwrap();
+        let collection = format!("openkeyv_reconnect_{}", std::process::id());
+        let _ = store.destroy_collection(&collection).await.unwrap();
+        store
+            .put("k", Value::utf8("v1"), Some(&collection), None)
+            .await
+            .unwrap();
+
+        // Tag the store's managed connection so it can be killed server-side precisely.
+        let mut conn = store.connection();
+        let _: redis::Value = redis::cmd("CLIENT")
+            .arg("SETNAME")
+            .arg("openkeyv_reconnect_test")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        // Kill only the tagged connection from a separate admin connection.
+        let admin = redis::Client::open(url.as_str()).unwrap();
+        let mut admin_conn = admin.get_multiplexed_tokio_connection().await.unwrap();
+        let list: String = redis::cmd("CLIENT")
+            .arg("LIST")
+            .query_async(&mut admin_conn)
+            .await
+            .unwrap();
+        let addr = list
+            .lines()
+            .find(|line| {
+                line.split(' ')
+                    .any(|field| field == "name=openkeyv_reconnect_test")
+            })
+            .and_then(|line| {
+                line.split(' ')
+                    .find(|field| field.starts_with("addr="))
+                    .map(|field| field.trim_start_matches("addr=").to_string())
+            })
+            .expect("tagged connection not found in CLIENT LIST");
+        let killed: i64 = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("ADDR")
+            .arg(&addr)
+            .query_async(&mut admin_conn)
+            .await
+            .unwrap();
+        assert!(killed >= 1, "expected to kill the tagged connection");
+
+        // RESP2 has no proactive disconnect notification, so the first command
+        // that discovers the dead socket may fail once ("canary" failure); the
+        // connection manager then reconnects in the background and every
+        // subsequent command must succeed on the same store handle.
+        let _ = store.get("k", Some(&collection)).await;
+        let value = store.get("k", Some(&collection)).await.unwrap();
+        assert_eq!(value, Some(Value::utf8("v1")));
         let _ = store.destroy_collection(&collection).await;
     }
 }

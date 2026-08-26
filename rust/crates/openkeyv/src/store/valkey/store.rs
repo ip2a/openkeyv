@@ -74,32 +74,39 @@ pub struct ValkeyStore {
     config: ValkeyConfig,
 }
 
+/// Build an auto-reconnecting connection manager with TCP keepalive so idle
+/// public-network links stay warm and dropped sockets recover transparently.
+async fn connection_manager(client: &redis::Client) -> Result<redis::aio::ConnectionManager> {
+    let tcp_settings = redis::io::tcp::TcpSettings::default().set_keepalive(
+        socket2::TcpKeepalive::new().with_time(std::time::Duration::from_secs(60)),
+    );
+    let config = redis::aio::ConnectionManagerConfig::new().set_tcp_settings(tcp_settings);
+    client
+        .get_connection_manager_with_config(config)
+        .await
+        .map_err(map_valkey_err)
+}
+
 impl ValkeyStore {
     pub async fn new(url: &str) -> Result<Self> {
         let client = redis::Client::open(url).map_err(map_valkey_err)?;
-        let conn = client
-            .get_multiplexed_tokio_connection()
-            .await
-            .map_err(map_valkey_err)?;
+        let conn = connection_manager(&client).await?;
         Ok(Self::with_config(conn, ValkeyConfig::default()))
     }
 
     pub async fn from_client(client: redis::Client) -> Result<Self> {
-        let conn = client
-            .get_multiplexed_tokio_connection()
-            .await
-            .map_err(map_valkey_err)?;
+        let conn = connection_manager(&client).await?;
         Ok(Self::with_config(conn, ValkeyConfig::default()))
     }
 
-    pub fn with_config(conn: redis::aio::MultiplexedConnection, config: ValkeyConfig) -> Self {
+    pub fn with_config(conn: redis::aio::ConnectionManager, config: ValkeyConfig) -> Self {
         Self {
             client: ValkeyClient::new(conn),
             config,
         }
     }
 
-    fn connection(&self) -> redis::aio::MultiplexedConnection {
+    fn connection(&self) -> redis::aio::ConnectionManager {
         self.client.connection()
     }
 

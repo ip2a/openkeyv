@@ -31,7 +31,8 @@ getrandom = "0.3"
 gcloud-sdk = { version = "0.29", optional = true }
 
 sled = { version = "0.34", optional = true }
-redis = { version = "0.29", features = ["tokio-comp"], optional = true }
+redis = { version = "0.29", features = ["tokio-comp", "connection-manager"], optional = true }
+socket2 = { version = "0.5", features = ["all"], optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono"], optional = true }
 mongodb = { version = "3.2", default-features = false, features = ["compat-3-0-0", "rustls-tls"], optional = true }
 futures-util = { version = "0.3", optional = true }
@@ -57,7 +58,7 @@ light = ["json", "keyring"]
 
 json = ["dep:serde_json", "dep:serde"]
 disk = ["dep:sled"]
-redis = ["dep:redis"]
+redis = ["dep:redis", "dep:socket2"]
 postgres = ["dep:sqlx"]
 mongodb = ["dep:mongodb", "dep:futures-util"]
 rocksdb = ["dep:rocksdb"]
@@ -66,7 +67,7 @@ s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
 duckdb = ["dep:duckdb"]
 sqlite = ["dep:rusqlite"]
 memcached = ["dep:memcache"]
-valkey = ["dep:redis"]
+valkey = ["dep:redis", "dep:socket2"]
 vault = ["dep:vaultrs", "dep:futures-util", "dep:serde", "dep:serde_json"]
 keyring = ["dep:keyring"]
 firestore = ["dep:firestore", "dep:futures-util", "dep:serde", "bytes/serde"]

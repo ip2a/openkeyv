@@ -1,25 +1,25 @@
 use crate::error::{Error, Result};
-use redis::aio::MultiplexedConnection;
+use redis::aio::{ConnectionManager, MultiplexedConnection};
 
 #[derive(Clone)]
 pub struct RedisClient {
-    conn: MultiplexedConnection,
+    conn: ConnectionManager,
     client: Option<redis::Client>,
 }
 
 impl RedisClient {
-    pub fn new(conn: MultiplexedConnection) -> Self {
+    pub fn new(conn: ConnectionManager) -> Self {
         Self { conn, client: None }
     }
 
-    pub(crate) fn with_client(conn: MultiplexedConnection, client: redis::Client) -> Self {
+    pub(crate) fn with_client(conn: ConnectionManager, client: redis::Client) -> Self {
         Self {
             conn,
             client: Some(client),
         }
     }
 
-    pub(crate) fn connection(&self) -> MultiplexedConnection {
+    pub(crate) fn connection(&self) -> ConnectionManager {
         self.conn.clone()
     }
 

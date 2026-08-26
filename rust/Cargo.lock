@@ -886,6 +886,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3612,7 +3621,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openkeyv"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -3642,6 +3651,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sled",
+ "socket2 0.5.10",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -4341,8 +4351,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bc42f3a12fd4408ce64d8efef67048a924e543bd35c6591c0447fda9054695f"
 dependencies = [
  "arc-swap",
+ "backon",
  "bytes",
  "combine",
+ "futures-channel",
  "futures-util",
  "itoa",
  "num-bigint",

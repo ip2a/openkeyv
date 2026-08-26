@@ -1,14 +1,14 @@
 #[derive(Clone)]
 pub struct ValkeyClient {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl ValkeyClient {
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 
-    pub(crate) fn connection(&self) -> redis::aio::MultiplexedConnection {
+    pub(crate) fn connection(&self) -> redis::aio::ConnectionManager {
         self.conn.clone()
     }
 }
