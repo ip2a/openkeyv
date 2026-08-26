@@ -77,9 +77,8 @@ pub struct ValkeyStore {
 /// Build an auto-reconnecting connection manager with TCP keepalive so idle
 /// public-network links stay warm and dropped sockets recover transparently.
 async fn connection_manager(client: &redis::Client) -> Result<redis::aio::ConnectionManager> {
-    let tcp_settings = redis::io::tcp::TcpSettings::default().set_keepalive(
-        socket2::TcpKeepalive::new().with_time(std::time::Duration::from_secs(60)),
-    );
+    let tcp_settings = redis::io::tcp::TcpSettings::default()
+        .set_keepalive(socket2::TcpKeepalive::new().with_time(std::time::Duration::from_secs(60)));
     let config = redis::aio::ConnectionManagerConfig::new().set_tcp_settings(tcp_settings);
     client
         .get_connection_manager_with_config(config)

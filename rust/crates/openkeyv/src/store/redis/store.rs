@@ -255,9 +255,8 @@ pub struct RedisStore {
 /// public-network links stay warm; when a socket is dropped anyway, the
 /// manager reconnects in the background after the first failing command.
 async fn connection_manager(client: &redis::Client) -> Result<redis::aio::ConnectionManager> {
-    let tcp_settings = redis::io::tcp::TcpSettings::default().set_keepalive(
-        socket2::TcpKeepalive::new().with_time(std::time::Duration::from_secs(60)),
-    );
+    let tcp_settings = redis::io::tcp::TcpSettings::default()
+        .set_keepalive(socket2::TcpKeepalive::new().with_time(std::time::Duration::from_secs(60)));
     let config = redis::aio::ConnectionManagerConfig::new().set_tcp_settings(tcp_settings);
     client
         .get_connection_manager_with_config(config)
