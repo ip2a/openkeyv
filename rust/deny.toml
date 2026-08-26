@@ -11,6 +11,7 @@ ignore = [
     { id = "RUSTSEC-2026-0098", reason = "The Rust 1.85-compatible AWS SDK dependency line retains rustls-webpki 0.101; no patched MSRV-compatible upgrade is available." },
     { id = "RUSTSEC-2026-0099", reason = "The Rust 1.85-compatible AWS SDK dependency line retains rustls-webpki 0.101; no patched MSRV-compatible upgrade is available." },
     { id = "RUSTSEC-2026-0104", reason = "The Rust 1.85-compatible AWS SDK dependency line retains rustls-webpki 0.101; no patched MSRV-compatible upgrade is available." },
+    { id = "RUSTSEC-2026-0258", reason = "The Rust 1.85-compatible AWS SDK dependency line retains h2 0.3 via hyper 0.14; the 0.3 branch has no patched release. The in-tree h2 0.4 line is upgraded to 0.4.19." },
 ]
 
 [licenses]
