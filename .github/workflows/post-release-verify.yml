@@ -44,8 +44,12 @@ jobs:
       - name: Verify GitHub Release provenance
         shell: bash
         run: |
-          gh release verify "v${{ inputs.version }}"
-          gh release verify-asset "v${{ inputs.version }}" "release-assets/openkeyv-${{ inputs.version }}.crate"
+          set -eu
+          asset="release-assets/openkeyv-${{ inputs.version }}.crate"
+          gh attestation verify "$asset" \
+            --repo ip2a/openkeyv \
+            --signer-workflow ip2a/openkeyv/.github/workflows/release-build.yml \
+            --source-ref "refs/tags/v${{ inputs.version }}"
 
   verify-crates:
     runs-on: ubuntu-24.04
