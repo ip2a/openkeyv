@@ -760,9 +760,13 @@ impl AsyncKeyspaceMigration for ValkeyStore {
                             .map_err(map_valkey_err)?;
                     }
                 } else {
+                    let entry = cas::decode(Some(value))?
+                        .expect("migration value was read immediately before decoding");
+                    let envelope =
+                        cas::encode(&ManagedEntry::new(entry.entry.value), Revision::fresh()?);
                     let _: () = redis::cmd("SET")
                         .arg(&new_key)
-                        .arg(&value)
+                        .arg(envelope)
                         .query_async(&mut conn)
                         .await
                         .map_err(map_valkey_err)?;
