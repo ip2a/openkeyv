@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn float_roundtrips() {
-        for f in [0.0_f64, -1.5, 3.14159, f64::INFINITY] {
+        for f in [0.0_f64, -1.5, std::f64::consts::PI, f64::INFINITY] {
             // Infinity cannot be represented in JSON and must error.
             if f.is_infinite() {
                 assert!(StructuredValue::Float(f).to_json().is_err());
