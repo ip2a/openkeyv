@@ -52,8 +52,13 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
 
         #[cfg(feature = "redis")]
         "redis" => {
+            let keyspace = string(&config.config, "keyspace").unwrap_or_default();
             let store = std::sync::Arc::new(
-                crate::store::redis::RedisStore::new(&required(&config.config, "url")?).await?,
+                crate::store::redis::RedisStore::new_with_config(
+                    &required(&config.config, "url")?,
+                    crate::store::redis::RedisConfig::default().with_keyspace(keyspace),
+                )
+                .await?,
             );
             let base = store.clone();
             Ok(StoreHandle::with_capabilities(
@@ -62,12 +67,29 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
                 Some(base.clone()),
                 Some(base.clone()),
                 Some(base),
-            ))
+            )
+            .with_keyspace_migration(store))
         }
         #[cfg(feature = "valkey")]
-        "valkey" => Ok(StoreHandle::basic(std::sync::Arc::new(
-            crate::store::valkey::ValkeyStore::new(&required(&config.config, "url")?).await?,
-        ))),
+        "valkey" => {
+            let keyspace = string(&config.config, "keyspace").unwrap_or_default();
+            let store = std::sync::Arc::new(
+                crate::store::valkey::ValkeyStore::new_with_config(
+                    &required(&config.config, "url")?,
+                    crate::store::valkey::ValkeyConfig::default().with_keyspace(keyspace),
+                )
+                .await?,
+            );
+            let base = store.clone();
+            Ok(StoreHandle::with_capabilities(
+                store.clone(),
+                Some(base.clone()),
+                Some(base.clone()),
+                Some(base.clone()),
+                None,
+            )
+            .with_keyspace_migration(store))
+        }
 
         #[cfg(feature = "postgres")]
         "postgres" => Ok(StoreHandle::basic(std::sync::Arc::new(

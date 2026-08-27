@@ -1,17 +1,20 @@
 use super::client::RedisClient;
-use super::config::{ForeignKeyPolicy, RedisConfig};
+use super::config::RedisConfig;
 use super::error::{Error, Result, map_redis_err};
 use crate::cas;
 use crate::change::{
     ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream, StoreChange,
 };
 use crate::entry::ManagedEntry;
+use crate::migration::{AsyncKeyspaceMigration, MigrationOptions, MigrationReport};
 use crate::protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
     AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
 };
 use crate::protocol::{CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue};
-use crate::utils::compound::{collection_prefix, compound_key, decompound_key};
+use crate::utils::compound::{
+    Subspace, collection_prefix, decompound_key, subspace_compound_key, subspace_decompound_key,
+};
 use crate::value::Value;
 use async_trait::async_trait;
 use redis::streams::{StreamId, StreamRangeReply, StreamReadOptions, StreamReadReply};
@@ -21,15 +24,17 @@ const SCAN_COUNT: usize = 1_000;
 const CHANGE_RETENTION: usize = 10_000;
 const CHANGE_STREAM_KEY: &str = "__openkeyv_changefeed_stream";
 const CHANGE_REVISION_KEY: &str = "__openkeyv_changefeed_revision";
+const COLLECTION_REGISTRY_KEY: &str = "__openkeyv_collections";
 
 const PUT_CHANGE_SCRIPT: &str = r#"
 local revision = redis.call('INCR', KEYS[2])
 local id = tostring(revision) .. '-0'
 if ARGV[2] == '0' then
-    redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SET', KEYS[1], ARGV[1])
 else
     redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[1])
 end
+redis.call('SADD', KEYS[4], ARGV[7])
 redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[6], id,
     'revision', tostring(revision),
     'collection', ARGV[3],
@@ -65,6 +70,7 @@ if not value then
         else
             redis.call('PSETEX', KEYS[1], ARGV[3], ARGV[2])
         end
+        redis.call('SADD', KEYS[2], ARGV[5])
         return {1, ''}
     end
     return {0, false}
@@ -77,6 +83,7 @@ if ARGV[3] == '0' then
 else
     redis.call('PSETEX', KEYS[1], ARGV[3], ARGV[2])
 end
+redis.call('SADD', KEYS[2], ARGV[5])
 return {1, ''}
 "#;
 
@@ -91,8 +98,10 @@ redis.call('DEL', KEYS[1])
 return {1, ''}
 "#;
 
-fn is_internal_key(key: &str) -> bool {
-    key == CHANGE_STREAM_KEY || key == CHANGE_REVISION_KEY
+fn is_internal_key(keyspace: &Subspace, key: &str) -> bool {
+    key == keyspace.scope(CHANGE_STREAM_KEY)
+        || key == keyspace.scope(CHANGE_REVISION_KEY)
+        || key == keyspace.scope(COLLECTION_REGISTRY_KEY)
 }
 
 fn cursor_revision(cursor: &str) -> Result<u64> {
@@ -140,6 +149,7 @@ fn stream_change(entry: &StreamId) -> Result<StoreChange> {
 
 struct RedisChangeStream {
     connection: redis::aio::MultiplexedConnection,
+    stream_key: String,
     cursor: String,
     last_revision: Option<u64>,
     filter: ChangeFilter,
@@ -152,7 +162,7 @@ impl ChangeStream for RedisChangeStream {
             let options = StreamReadOptions::default().count(128).block(1_000);
             let reply: StreamReadReply = self
                 .connection
-                .xread_options(&[CHANGE_STREAM_KEY], &[self.cursor.as_str()], &options)
+                .xread_options(&[&self.stream_key], &[self.cursor.as_str()], &options)
                 .await
                 .map_err(map_redis_err)?;
 
@@ -179,9 +189,12 @@ impl ChangeStream for RedisChangeStream {
     }
 }
 
-async fn latest_cursor(connection: &mut redis::aio::MultiplexedConnection) -> Result<String> {
+async fn latest_cursor(
+    connection: &mut redis::aio::MultiplexedConnection,
+    stream_key: &str,
+) -> Result<String> {
     let reply: StreamRangeReply = connection
-        .xrevrange_count(CHANGE_STREAM_KEY, "+", "-", 1)
+        .xrevrange_count(stream_key, "+", "-", 1)
         .await
         .map_err(map_redis_err)?;
     Ok(reply
@@ -194,10 +207,11 @@ async fn latest_cursor(connection: &mut redis::aio::MultiplexedConnection) -> Re
 async fn validate_after_cursor(
     connection: &mut redis::aio::MultiplexedConnection,
     cursor: &str,
+    stream_key: &str,
 ) -> Result<()> {
     let requested = cursor_revision(cursor)?;
     let last: StreamRangeReply = connection
-        .xrevrange_count(CHANGE_STREAM_KEY, "+", "-", 1)
+        .xrevrange_count(stream_key, "+", "-", 1)
         .await
         .map_err(map_redis_err)?;
     let Some(last_entry) = last.ids.first() else {
@@ -213,7 +227,7 @@ async fn validate_after_cursor(
     }
 
     let first: StreamRangeReply = connection
-        .xrange_count(CHANGE_STREAM_KEY, "-", "+", 1)
+        .xrange_count(stream_key, "-", "+", 1)
         .await
         .map_err(map_redis_err)?;
     if let Some(first_entry) = first.ids.first() {
@@ -228,8 +242,7 @@ async fn validate_after_cursor(
     Ok(())
 }
 
-fn collection_scan_pattern(collection: &str) -> String {
-    let prefix = collection_prefix(collection);
+fn scan_pattern(prefix: &str) -> String {
     let mut pattern = String::with_capacity(prefix.len() + 1);
     for character in prefix.chars() {
         if matches!(character, '*' | '?' | '[' | ']' | '\\') {
@@ -239,6 +252,11 @@ fn collection_scan_pattern(collection: &str) -> String {
     }
     pattern.push('*');
     pattern
+}
+
+fn collection_scan_pattern(keyspace: &Subspace, collection: &str) -> String {
+    let prefix = format!("{}{}", keyspace.prefix(), collection_prefix(collection));
+    scan_pattern(&prefix)
 }
 
 /// Redis-backed key-value store.
@@ -308,11 +326,12 @@ impl AsyncChangeFeed for RedisStore {
         let mut connection = self.client.subscription_connection().await?;
         let start = request.start;
         let filter = request.filter;
+        let stream_key = self.config.keyspace.scope(CHANGE_STREAM_KEY);
         let cursor = match &start {
             ChangeStart::Beginning => "0-0".to_string(),
-            ChangeStart::Latest => latest_cursor(&mut connection).await?,
+            ChangeStart::Latest => latest_cursor(&mut connection, &stream_key).await?,
             ChangeStart::After(cursor) => {
-                validate_after_cursor(&mut connection, cursor.as_str()).await?;
+                validate_after_cursor(&mut connection, cursor.as_str(), &stream_key).await?;
                 cursor.to_string()
             }
         };
@@ -323,6 +342,7 @@ impl AsyncChangeFeed for RedisStore {
         };
         Ok(Box::new(RedisChangeStream {
             connection,
+            stream_key,
             cursor,
             last_revision,
             filter,
@@ -334,7 +354,7 @@ impl AsyncChangeFeed for RedisStore {
 impl AsyncKeyValue for RedisStore {
     async fn get(&self, key: &str, collection: Option<&str>) -> Result<Option<Value>> {
         let cname = self.collection_name(collection);
-        let ck = compound_key(cname, key);
+        let ck = subspace_compound_key(&self.config.keyspace, cname, key);
         let mut conn = self.connection();
         let res: Option<Vec<u8>> = conn.get(&ck).await.map_err(map_redis_err)?;
         match cas::decode(res)? {
@@ -349,7 +369,7 @@ impl AsyncKeyValue for RedisStore {
         collection: Option<&str>,
     ) -> Result<Option<(Value, Option<f64>)>> {
         let cname = self.collection_name(collection);
-        let ck = compound_key(cname, key);
+        let ck = subspace_compound_key(&self.config.keyspace, cname, key);
         let mut conn = self.connection();
         let res: Option<Vec<u8>> = conn.get(&ck).await.map_err(map_redis_err)?;
         match cas::decode(res)? {
@@ -369,7 +389,7 @@ impl AsyncKeyValue for RedisStore {
         ttl: Option<f64>,
     ) -> Result<()> {
         let cname = self.collection_name(collection);
-        let ck = compound_key(cname, key);
+        let ck = subspace_compound_key(&self.config.keyspace, cname, key);
         let entry = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
@@ -385,14 +405,16 @@ impl AsyncKeyValue for RedisStore {
         let mut conn = self.connection();
         let _: String = Script::new(PUT_CHANGE_SCRIPT)
             .key(ck)
-            .key(CHANGE_REVISION_KEY)
-            .key(CHANGE_STREAM_KEY)
+            .key(self.config.keyspace.scope(CHANGE_REVISION_KEY))
+            .key(self.config.keyspace.scope(CHANGE_STREAM_KEY))
+            .key(self.config.keyspace.scope(COLLECTION_REGISTRY_KEY))
             .arg(envelope)
             .arg(milliseconds)
             .arg(cname)
             .arg(key)
             .arg(occurred_at)
             .arg(CHANGE_RETENTION)
+            .arg(cname)
             .invoke_async(&mut conn)
             .await
             .map_err(map_redis_err)?;
@@ -401,13 +423,13 @@ impl AsyncKeyValue for RedisStore {
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
-        let ck = compound_key(cname, key);
+        let ck = subspace_compound_key(&self.config.keyspace, cname, key);
         let occurred_at = chrono::Utc::now().timestamp_millis().to_string();
         let mut conn = self.connection();
         let result: Option<String> = Script::new(DELETE_CHANGE_SCRIPT)
             .key(ck)
-            .key(CHANGE_REVISION_KEY)
-            .key(CHANGE_STREAM_KEY)
+            .key(self.config.keyspace.scope(CHANGE_REVISION_KEY))
+            .key(self.config.keyspace.scope(CHANGE_STREAM_KEY))
             .arg(cname)
             .arg(key)
             .arg(CHANGE_RETENTION)
@@ -424,7 +446,10 @@ impl AsyncKeyValue for RedisStore {
         collection: Option<&str>,
     ) -> Result<Vec<Option<Value>>> {
         let cname = self.collection_name(collection);
-        let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
+        let cks: Vec<String> = keys
+            .iter()
+            .map(|k| subspace_compound_key(&self.config.keyspace, cname, k))
+            .collect();
         let mut conn = self.connection();
         let res: Vec<Option<Vec<u8>>> = conn.mget(&cks).await.map_err(map_redis_err)?;
         res.into_iter()
@@ -441,7 +466,10 @@ impl AsyncKeyValue for RedisStore {
         collection: Option<&str>,
     ) -> Result<Vec<Option<(Value, Option<f64>)>>> {
         let cname = self.collection_name(collection);
-        let cks: Vec<String> = keys.iter().map(|k| compound_key(cname, k)).collect();
+        let cks: Vec<String> = keys
+            .iter()
+            .map(|k| subspace_compound_key(&self.config.keyspace, cname, k))
+            .collect();
         let mut conn = self.connection();
         let res: Vec<Option<Vec<u8>>> = conn.mget(&cks).await.map_err(map_redis_err)?;
         res.into_iter()
@@ -571,7 +599,7 @@ impl AsyncCompareAndSwap for RedisStore {
         collection: Option<&str>,
     ) -> Result<Option<RevisionedValue>> {
         let cname = self.collection_name(collection);
-        let ck = compound_key(cname, key);
+        let ck = subspace_compound_key(&self.config.keyspace, cname, key);
         let mut conn = self.connection();
         let res: Option<Vec<u8>> = conn.get(&ck).await.map_err(map_redis_err)?;
         Ok(match cas::decode(res)? {
@@ -595,7 +623,7 @@ impl AsyncCompareAndSwap for RedisStore {
         ttl: Option<f64>,
     ) -> Result<CompareAndSwapResult> {
         let cname = self.collection_name(collection);
-        let ck = compound_key(cname, key);
+        let ck = subspace_compound_key(&self.config.keyspace, cname, key);
         // Validate TTL and generate the revision before any backend side effect.
         let entry = match ttl {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
@@ -612,10 +640,12 @@ impl AsyncCompareAndSwap for RedisStore {
         let mut conn = self.connection();
         let reply: Vec<redis::Value> = Script::new(COMPARE_AND_SWAP_SCRIPT)
             .key(ck)
+            .key(self.config.keyspace.scope(COLLECTION_REGISTRY_KEY))
             .arg(expected_bytes)
             .arg(envelope)
             .arg(milliseconds)
             .arg((cas::MAGIC_LEN + Revision::BYTE_LEN).to_string())
+            .arg(cname)
             .invoke_async(&mut conn)
             .await
             .map_err(map_redis_err)?;
@@ -629,7 +659,7 @@ impl AsyncCompareAndSwap for RedisStore {
         collection: Option<&str>,
     ) -> Result<CompareAndDeleteResult> {
         let cname = self.collection_name(collection);
-        let ck = compound_key(cname, key);
+        let ck = subspace_compound_key(&self.config.keyspace, cname, key);
         let mut conn = self.connection();
         let reply: Vec<redis::Value> = Script::new(COMPARE_AND_DELETE_SCRIPT)
             .key(ck)
@@ -659,7 +689,8 @@ impl AsyncEnumerateKeys for RedisStore {
         }
 
         let cname = self.collection_name(collection);
-        let pattern = collection_scan_pattern(cname);
+        let pattern = collection_scan_pattern(&self.config.keyspace, cname);
+        let keyspace_prefix = self.config.keyspace.prefix();
         let mut conn = self.connection();
         let mut cursor = 0_u64;
         let mut keys = std::collections::HashSet::new();
@@ -676,7 +707,11 @@ impl AsyncEnumerateKeys for RedisStore {
                 .map_err(map_redis_err)?;
 
             for identity in batch {
-                let (key_collection, key) = decompound_key(&identity)?;
+                let logical_identity =
+                    identity.strip_prefix(&keyspace_prefix).ok_or_else(|| {
+                        Error::InvalidKey("Redis SCAN returned an identity outside keyspace".into())
+                    })?;
+                let (key_collection, key) = decompound_key(logical_identity)?;
                 if key_collection != cname {
                     return Err(Error::InvalidKey(format!(
                         "Redis SCAN returned an identity outside collection {cname:?}"
@@ -705,9 +740,20 @@ impl AsyncEnumerateCollections for RedisStore {
         }
 
         let mut conn = self.connection();
+        let registry_key = self.config.keyspace.scope(COLLECTION_REGISTRY_KEY);
+        let registry_exists: bool = conn.exists(&registry_key).await.map_err(map_redis_err)?;
+        if registry_exists {
+            let mut collections: Vec<String> =
+                conn.smembers(&registry_key).await.map_err(map_redis_err)?;
+            collections.truncate(limit);
+            return Ok(collections);
+        }
+        if !self.config.keyspace.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut cursor = 0_u64;
         let mut collections = std::collections::HashSet::new();
-        let mut skipped_foreign_keys = 0_usize;
 
         loop {
             let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
@@ -721,48 +767,34 @@ impl AsyncEnumerateCollections for RedisStore {
                 .map_err(map_redis_err)?;
 
             for identity in keys {
-                if is_internal_key(&identity) {
+                if is_internal_key(&self.config.keyspace, &identity) {
                     continue;
                 }
-                let (collection, _) = match decompound_key(&identity) {
-                    Ok(decoded) => decoded,
-                    Err(error) => match self.config.foreign_key_policy {
-                        ForeignKeyPolicy::Strict => return Err(error),
-                        ForeignKeyPolicy::Skip => {
-                            skipped_foreign_keys += 1;
-                            continue;
-                        }
-                    },
-                };
+                let (collection, _) = decompound_key(&identity)?;
                 collections.insert(collection.to_string());
-                if collections.len() == limit {
-                    warn_foreign_keys(skipped_foreign_keys);
-                    return Ok(collections.into_iter().collect());
-                }
             }
 
             cursor = next_cursor;
             if cursor == 0 {
-                warn_foreign_keys(skipped_foreign_keys);
-                return Ok(collections.into_iter().collect());
+                break;
             }
         }
-    }
-}
 
-fn warn_foreign_keys(count: usize) {
-    if count > 0 {
-        tracing::warn!(
-            count,
-            "skipped foreign keys while enumerating collections (shared database?)"
-        );
+        for collection in &collections {
+            let _: usize = conn
+                .sadd(&registry_key, collection)
+                .await
+                .map_err(map_redis_err)?;
+        }
+        Ok(collections.into_iter().take(limit).collect())
     }
 }
 
 #[async_trait]
 impl AsyncDestroyCollection for RedisStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
-        let pattern = collection_scan_pattern(collection);
+        let pattern = collection_scan_pattern(&self.config.keyspace, collection);
+        let keyspace_prefix = self.config.keyspace.prefix();
         let mut conn = self.connection();
         let mut cursor = 0_u64;
         let mut destroyed = false;
@@ -780,7 +812,11 @@ impl AsyncDestroyCollection for RedisStore {
 
             let mut matching = Vec::with_capacity(keys.len());
             for identity in keys {
-                let (key_collection, _) = decompound_key(&identity)?;
+                let logical_identity =
+                    identity.strip_prefix(&keyspace_prefix).ok_or_else(|| {
+                        Error::InvalidKey("Redis SCAN returned an identity outside keyspace".into())
+                    })?;
+                let (key_collection, _) = decompound_key(logical_identity)?;
                 if key_collection != collection {
                     return Err(Error::InvalidKey(format!(
                         "Redis SCAN returned an identity outside collection {collection:?}"
@@ -805,11 +841,149 @@ impl AsyncDestroyCollection for RedisStore {
 impl AsyncDestroyStore for RedisStore {
     async fn destroy(&self) -> Result<bool> {
         let mut conn = self.connection();
-        let _: () = redis::cmd("FLUSHDB")
-            .query_async(&mut conn)
-            .await
-            .map_err(map_redis_err)?;
+        if self.config.keyspace.is_empty() {
+            let _: () = redis::cmd("FLUSHDB")
+                .query_async(&mut conn)
+                .await
+                .map_err(map_redis_err)?;
+        } else {
+            let pattern = scan_pattern(&self.config.keyspace.prefix());
+            let mut cursor = 0_u64;
+            loop {
+                let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(&pattern)
+                    .arg("COUNT")
+                    .arg(SCAN_COUNT)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(map_redis_err)?;
+                if !keys.is_empty() {
+                    let _: usize = conn.del(&keys).await.map_err(map_redis_err)?;
+                }
+                cursor = next_cursor;
+                if cursor == 0 {
+                    break;
+                }
+            }
+        }
         Ok(true)
+    }
+}
+
+#[async_trait]
+impl AsyncKeyspaceMigration for RedisStore {
+    async fn migrate_into_keyspace(
+        &self,
+        keyspace: &Subspace,
+        options: &MigrationOptions,
+    ) -> Result<MigrationReport> {
+        if keyspace.is_empty() {
+            return Err(Error::InvalidOperation(
+                "keyspace migration requires a non-empty target keyspace".into(),
+            ));
+        }
+
+        let target_prefix = keyspace.prefix();
+        let mut conn = self.connection();
+        let mut cursor = 0_u64;
+        let mut report = MigrationReport::default();
+        let mut candidates = Vec::new();
+
+        loop {
+            let (next_cursor, identities): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("*")
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(&mut conn)
+                .await
+                .map_err(map_redis_err)?;
+            report.scanned += identities.len() as u64;
+
+            for identity in identities {
+                if subspace_decompound_key(keyspace, &identity).is_some() {
+                    continue;
+                }
+                let Ok((collection, key)) = decompound_key(&identity) else {
+                    continue;
+                };
+                if !crate::migration::selected(options, collection) {
+                    continue;
+                }
+                let Some(target_collection) =
+                    crate::migration::target_collection(options, collection)
+                else {
+                    continue;
+                };
+                if identity.starts_with(&target_prefix) && target_collection == collection {
+                    continue;
+                }
+                let key = key.to_string();
+                candidates.push((identity, key, target_collection));
+            }
+
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        let registry_key = keyspace.scope(COLLECTION_REGISTRY_KEY);
+        for (legacy_key, key, target_collection) in candidates {
+            let value: Option<Vec<u8>> = conn.get(&legacy_key).await.map_err(map_redis_err)?;
+            let Some(value) = value else {
+                continue;
+            };
+            let new_key = subspace_compound_key(keyspace, &target_collection, &key);
+            let new_exists: bool = conn.exists(&new_key).await.map_err(map_redis_err)?;
+            if !new_exists {
+                if options.preserve_ttl {
+                    let ttl: i64 = redis::cmd("PTTL")
+                        .arg(&legacy_key)
+                        .query_async(&mut conn)
+                        .await
+                        .map_err(map_redis_err)?;
+                    if ttl == -2 || ttl == 0 {
+                        report.skipped_expired += 1;
+                        continue;
+                    }
+                    if ttl > 0 {
+                        let _: () = redis::cmd("PSETEX")
+                            .arg(&new_key)
+                            .arg(ttl)
+                            .arg(&value)
+                            .query_async(&mut conn)
+                            .await
+                            .map_err(map_redis_err)?;
+                    } else {
+                        let _: () = redis::cmd("SET")
+                            .arg(&new_key)
+                            .arg(&value)
+                            .query_async(&mut conn)
+                            .await
+                            .map_err(map_redis_err)?;
+                    }
+                } else {
+                    let _: () = redis::cmd("SET")
+                        .arg(&new_key)
+                        .arg(&value)
+                        .query_async(&mut conn)
+                        .await
+                        .map_err(map_redis_err)?;
+                }
+                report.copied += 1;
+            }
+            let _: usize = conn
+                .sadd(&registry_key, &target_collection)
+                .await
+                .map_err(map_redis_err)?;
+            let _: usize = conn.del(&legacy_key).await.map_err(map_redis_err)?;
+        }
+
+        Ok(report)
     }
 }
 
@@ -820,7 +994,10 @@ mod tests {
 
     #[test]
     fn scan_pattern_escapes_collection_glob_characters() {
-        assert_eq!(collection_scan_pattern("*?[\\]"), r"5:\*\?\[\\\]*");
+        assert_eq!(
+            collection_scan_pattern(&Subspace::default(), "*?[\\]"),
+            r"5:\*\?\[\\\]*"
+        );
     }
 
     #[test]
@@ -842,9 +1019,10 @@ mod tests {
 
     #[test]
     fn redis_changefeed_keys_are_not_collections() {
-        assert!(is_internal_key(CHANGE_STREAM_KEY));
-        assert!(is_internal_key(CHANGE_REVISION_KEY));
-        assert!(!is_internal_key("5:events:key"));
+        let keyspace = Subspace::default();
+        assert!(is_internal_key(&keyspace, CHANGE_STREAM_KEY));
+        assert!(is_internal_key(&keyspace, CHANGE_REVISION_KEY));
+        assert!(!is_internal_key(&keyspace, "5:events:key"));
     }
 
     #[tokio::test]
@@ -940,7 +1118,7 @@ mod tests {
             Some(value)
         );
 
-        let key = compound_key(&collection, "single");
+        let key = subspace_compound_key(&Subspace::default(), &collection, "single");
         let mut conn = store.connection();
         let bytes: Vec<u8> = conn.get(&key).await.unwrap();
         assert!(bytes.starts_with(b"OKVC1"));
@@ -962,7 +1140,7 @@ mod tests {
             vec![Some(values[0].clone()), Some(values[1].clone())]
         );
         for key in keys {
-            let key = compound_key(&collection, &key);
+            let key = subspace_compound_key(&Subspace::default(), &collection, &key);
             let bytes: Vec<u8> = conn.get(&key).await.unwrap();
             assert!(bytes.starts_with(b"OKVC1"));
             let ttl: i64 = redis::cmd("PTTL")
@@ -1089,7 +1267,7 @@ mod tests {
 
         // A raw JSON payload is shorter than the CAS envelope prefix and must be
         // rejected as a deserialization error, never treated as absence.
-        let json_key = compound_key(&collection, "json-entry");
+        let json_key = subspace_compound_key(&Subspace::default(), &collection, "json-entry");
         let _: () = conn
             .set(&json_key, br#"{"value":null}"#.as_slice())
             .await
@@ -1107,7 +1285,7 @@ mod tests {
         while legacy.len() < crate::cas::PREFIX_LEN {
             legacy.push(0);
         }
-        let okve1_key = compound_key(&collection, "legacy-okve1");
+        let okve1_key = subspace_compound_key(&Subspace::default(), &collection, "legacy-okve1");
         let _: () = conn.set(&okve1_key, legacy).await.unwrap();
         let okve1_error = store
             .get("legacy-okve1", Some(&collection))
@@ -1501,7 +1679,6 @@ mod tests {
         for index in 0..contenders {
             let conn = store.connection();
             let collection = collection.clone();
-            let observed = observed;
             handles.push(tokio::spawn(async move {
                 let contender = RedisStore::with_config(conn, RedisConfig::default());
                 contender
@@ -1581,7 +1758,7 @@ mod tests {
             _ => panic!("expected applied"),
         };
 
-        let ck = compound_key(&collection, "k");
+        let ck = subspace_compound_key(&Subspace::default(), &collection, "k");
         let mut conn = store.connection();
         let bytes: Vec<u8> = conn.get(&ck).await.unwrap();
         assert!(bytes.starts_with(b"OKVC1"));
@@ -1657,37 +1834,226 @@ mod tests {
         assert_eq!(value, Some(Value::utf8("v1")));
         let _ = store.destroy_collection(&collection).await;
     }
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_keyspace_isolates_collections_feed_and_destroy() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let namespace_a = format!("openkeyv_a_{suffix}");
+        let namespace_b = format!("openkeyv_b_{suffix}");
+        let collection_a = format!("{namespace_a}:state:items");
+        let collection_b = format!("{namespace_b}:state:items");
+        let external_key = format!("external_key_{suffix}");
+
+        let store_a = RedisStore::new_with_config(
+            &url,
+            RedisConfig::default().with_keyspace(namespace_a.clone()),
+        )
+        .await
+        .unwrap();
+        let store_b = RedisStore::new_with_config(
+            &url,
+            RedisConfig::default().with_keyspace(namespace_b.clone()),
+        )
+        .await
+        .unwrap();
+        let _ = store_a.destroy().await;
+        let _ = store_b.destroy().await;
+
+        let mut raw = store_a.connection();
+        let _: () = redis::cmd("SET")
+            .arg(&external_key)
+            .arg(b"external")
+            .query_async(&mut raw)
+            .await
+            .unwrap();
+
+        let mut feed = store_b
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Beginning,
+                filter: ChangeFilter::default(),
+            })
+            .await
+            .unwrap();
+        store_a
+            .put("a", Value::integer(1), Some(&collection_a), None)
+            .await
+            .unwrap();
+        store_b
+            .put("b", Value::integer(2), Some(&collection_b), None)
+            .await
+            .unwrap();
+
+        let change = tokio::time::timeout(std::time::Duration::from_secs(2), feed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.collection, collection_b);
+        assert_eq!(change.key, "b");
+        assert_eq!(
+            store_a.collections(None).await.unwrap(),
+            vec![collection_a.clone()]
+        );
+        assert_eq!(
+            store_b.collections(None).await.unwrap(),
+            vec![collection_b.clone()]
+        );
+        assert_eq!(store_a.get("b", Some(&collection_b)).await.unwrap(), None);
+
+        assert!(store_a.destroy().await.unwrap());
+        let external: Option<Vec<u8>> = raw.get(&external_key).await.unwrap();
+        assert_eq!(external, Some(b"external".to_vec()));
+        assert_eq!(
+            store_b.get("b", Some(&collection_b)).await.unwrap(),
+            Some(Value::integer(2))
+        );
+
+        let _: usize = raw.del(&external_key).await.unwrap();
+        let _ = store_b.destroy().await;
+    }
 
     #[tokio::test]
     #[ignore = "requires OPENKEYV_REDIS_URL"]
-    async fn test_redis_collections_foreign_key_policy() {
+    async fn test_redis_migrates_legacy_keys_into_keyspace_idempotently() {
         let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
-        let collection = format!("openkeyv_policy_{}", std::process::id());
-        let foreign = format!("openkeyv_foreign_probe_{}", std::process::id());
+        let suffix = format!(
+            "{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let namespace = format!("openkeyv_migrate_{suffix}");
+        let collection = format!("{namespace}:state:items");
+        let foreign_collection = format!("foreign_{suffix}");
+        let legacy = RedisStore::new(&url).await.unwrap();
+        let scoped = RedisStore::new_with_config(
+            &url,
+            RedisConfig::default().with_keyspace(namespace.clone()),
+        )
+        .await
+        .unwrap();
+        let _ = legacy.destroy_collection(&collection).await;
+        let _ = legacy.destroy_collection(&foreign_collection).await;
+        let _ = scoped.destroy().await;
 
-        let store = RedisStore::new(&url).await.unwrap();
-        let _ = store.destroy_collection(&collection).await.unwrap();
-        store
-            .put("k", Value::utf8("v1"), Some(&collection), None)
+        legacy
+            .put("permanent", Value::utf8("value"), Some(&collection), None)
             .await
             .unwrap();
-        let mut conn = store.connection();
-        let _: redis::Value = conn.set(&foreign, "not-an-openkeyv-key").await.unwrap();
+        legacy
+            .put(
+                "temporary",
+                Value::utf8("ttl"),
+                Some(&collection),
+                Some(30.0),
+            )
+            .await
+            .unwrap();
+        legacy
+            .put(
+                "foreign",
+                Value::utf8("keep"),
+                Some(&foreign_collection),
+                None,
+            )
+            .await
+            .unwrap();
+        legacy
+            .put("existing", Value::utf8("legacy"), Some(&collection), None)
+            .await
+            .unwrap();
+        scoped
+            .put("existing", Value::utf8("target"), Some(&collection), None)
+            .await
+            .unwrap();
 
-        // Default (Strict): a foreign key in the database fails enumeration.
-        let result = store.collections(None).await;
-        assert!(result.is_err(), "strict policy must reject foreign keys");
-
-        // Skip: enumeration succeeds and still reports our own collection.
-        let config = RedisConfig {
-            foreign_key_policy: ForeignKeyPolicy::Skip,
-            ..RedisConfig::default()
+        let options = MigrationOptions {
+            collection_prefix: Some((format!("{namespace}:"), format!("{namespace}:"))),
+            ..MigrationOptions::default()
         };
-        let skipping = RedisStore::new_with_config(&url, config).await.unwrap();
-        let names = skipping.collections(None).await.unwrap();
-        assert!(names.contains(&collection));
+        let report =
+            crate::migrate_into_keyspace(&legacy, &Subspace::new(namespace.clone()), &options)
+                .await
+                .unwrap();
+        assert_eq!(report.copied, 2);
+        assert!(report.scanned >= 4);
+        assert_eq!(
+            scoped.get("permanent", Some(&collection)).await.unwrap(),
+            Some(Value::utf8("value"))
+        );
+        assert!(
+            scoped
+                .ttl("temporary", Some(&collection))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            legacy.get("permanent", Some(&collection)).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            scoped.get("existing", Some(&collection)).await.unwrap(),
+            Some(Value::utf8("target"))
+        );
+        assert_eq!(
+            legacy.get("existing", Some(&collection)).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            legacy
+                .get("foreign", Some(&foreign_collection))
+                .await
+                .unwrap(),
+            Some(Value::utf8("keep"))
+        );
+        assert_eq!(
+            scoped.collections(None).await.unwrap(),
+            vec![collection.clone()]
+        );
 
-        let _: redis::Value = conn.del(&foreign).await.unwrap();
-        let _ = store.destroy_collection(&collection).await;
+        legacy
+            .put(
+                "without_ttl",
+                Value::utf8("plain"),
+                Some(&collection),
+                Some(30.0),
+            )
+            .await
+            .unwrap();
+        let without_ttl_options = MigrationOptions {
+            collection_prefix: Some((format!("{namespace}:"), format!("{namespace}:"))),
+            preserve_ttl: false,
+            ..MigrationOptions::default()
+        };
+        let without_ttl = crate::migrate_into_keyspace(
+            &legacy,
+            &Subspace::new(namespace.clone()),
+            &without_ttl_options,
+        )
+        .await
+        .unwrap();
+        assert_eq!(without_ttl.copied, 1);
+        let (value, ttl) = scoped
+            .ttl("without_ttl", Some(&collection))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, Value::utf8("plain"));
+        assert_eq!(ttl, None);
+
+        let second =
+            crate::migrate_into_keyspace(&legacy, &Subspace::new(namespace.clone()), &options)
+                .await
+                .unwrap();
+        assert!(second.scanned > 0);
+        assert_eq!(second.copied, 0);
+
+        let _ = scoped.destroy().await;
+        let _ = legacy.destroy_collection(&foreign_collection).await;
     }
 }

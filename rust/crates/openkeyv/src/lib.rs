@@ -61,6 +61,9 @@ pub use change::{
 pub use entry::ManagedEntry;
 pub use error::{Error, Result};
 pub use handle::{StoreCapabilities, StoreHandle};
+pub use migration::AsyncKeyspaceMigration;
+#[cfg(any(feature = "redis", feature = "valkey"))]
+pub use migration::migrate_into_keyspace;
 pub use migration::{
     MigrationOptions, MigrationReport, apply_change, copy_snapshot, copy_snapshot_with_feed,
     merge_report,
@@ -72,4 +75,7 @@ pub use protocol::{
 };
 #[cfg(feature = "json")]
 pub use store_config::StoreConfig;
+pub use utils::compound::{
+    Subspace, compound_key, decompound_key, subspace_compound_key, subspace_decompound_key,
+};
 pub use value::{StructuredValue, Value, ValueKind};

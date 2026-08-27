@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use crate::migration::{AsyncKeyspaceMigration, MigrationOptions, MigrationReport};
 use crate::protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncEnumerateCollections, AsyncEnumerateKeys, BaseStore,
 };
+use crate::utils::compound::Subspace;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StoreCapabilities {
@@ -20,6 +22,7 @@ pub struct StoreHandle {
     pub enumerate_collections: Option<Arc<dyn AsyncEnumerateCollections>>,
     pub compare_and_swap: Option<Arc<dyn AsyncCompareAndSwap>>,
     pub change_feed: Option<Arc<dyn AsyncChangeFeed>>,
+    pub keyspace_migration: Option<Arc<dyn AsyncKeyspaceMigration>>,
 }
 
 impl StoreHandle {
@@ -177,6 +180,7 @@ impl StoreHandle {
             enumerate_collections: None,
             compare_and_swap: None,
             change_feed: None,
+            keyspace_migration: None,
         }
     }
 
@@ -202,6 +206,30 @@ impl StoreHandle {
             enumerate_collections,
             compare_and_swap,
             change_feed,
+            keyspace_migration: None,
         }
+    }
+
+    pub fn with_keyspace_migration<T>(mut self, migration: Arc<T>) -> Self
+    where
+        T: AsyncKeyspaceMigration + 'static,
+    {
+        self.keyspace_migration = Some(migration);
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncKeyspaceMigration for StoreHandle {
+    async fn migrate_into_keyspace(
+        &self,
+        keyspace: &Subspace,
+        options: &MigrationOptions,
+    ) -> crate::Result<MigrationReport> {
+        self.keyspace_migration
+            .as_ref()
+            .ok_or_else(|| Self::missing("keyspace migration"))?
+            .migrate_into_keyspace(keyspace, options)
+            .await
     }
 }

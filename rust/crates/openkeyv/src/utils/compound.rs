@@ -2,15 +2,32 @@
 
 use crate::error::{Error, Result};
 
-/// How collection enumeration treats scanned keys that do not decode as
-/// openkeyv compound identities (foreign keys sharing the database).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ForeignKeyPolicy {
-    /// Return an error when a scanned key fails to decode (previous behavior).
-    #[default]
-    Strict,
-    /// Skip foreign keys and keep scanning; for shared-database deployments.
-    Skip,
+/// Physical key namespace used by stores sharing one database.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Subspace(String);
+
+impl Subspace {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn prefix(&self) -> String {
+        if self.is_empty() {
+            String::new()
+        } else {
+            format!("{}:{}", self.0.len(), self.0)
+        }
+    }
+
+    pub fn scope(&self, key: &str) -> String {
+        let mut scoped = self.prefix();
+        scoped.push_str(key);
+        scoped
+    }
 }
 
 /// Return the canonical prefix for every key in `collection`.
@@ -25,6 +42,11 @@ pub fn compound_key(collection: &str, key: &str) -> String {
     let mut identity = collection_prefix(collection);
     identity.push_str(key);
     identity
+}
+
+/// Encode an exact `(collection, key)` pair inside `subspace`.
+pub fn subspace_compound_key(subspace: &Subspace, collection: &str, key: &str) -> String {
+    subspace.scope(&compound_key(collection, key))
 }
 
 /// Decode a canonical compound identity into its borrowed collection and key.
@@ -54,6 +76,16 @@ pub fn decompound_key(compound: &str) -> Result<(&str, &str)> {
     })?;
 
     Ok((collection, &payload[collection_len..]))
+}
+
+/// Decode a compound identity only when it belongs to `subspace`.
+pub fn subspace_decompound_key<'a>(
+    subspace: &Subspace,
+    compound: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    compound
+        .strip_prefix(&subspace.prefix())
+        .and_then(|identity| decompound_key(identity).ok())
 }
 
 #[cfg(test)]
@@ -123,5 +155,28 @@ mod tests {
                 Err(Error::InvalidKey(_))
             ));
         }
+    }
+
+    #[test]
+    fn subspace_roundtrips_and_keeps_empty_layout_compatible() {
+        let empty = Subspace::default();
+        assert_eq!(subspace_compound_key(&empty, "users", "key"), "5:userskey");
+        assert_eq!(
+            subspace_decompound_key(&empty, "5:userskey"),
+            Some(("users", "key"))
+        );
+
+        let scoped = Subspace::new("租户A");
+        let identity = subspace_compound_key(&scoped, "users", "key");
+        assert_eq!(identity, "7:租户A5:userskey");
+        assert_eq!(
+            subspace_decompound_key(&scoped, &identity),
+            Some(("users", "key"))
+        );
+        assert_eq!(
+            subspace_decompound_key(&Subspace::new("other"), &identity),
+            None
+        );
+        assert_eq!(subspace_decompound_key(&scoped, "7:租户Abad"), None);
     }
 }

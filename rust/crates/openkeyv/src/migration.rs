@@ -3,6 +3,30 @@ use crate::error::Result;
 use crate::protocol::{
     AsyncChangeFeed, AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
 };
+use crate::utils::compound::Subspace;
+
+/// Backend capability for rewriting legacy flat identities into a keyspace.
+#[async_trait::async_trait]
+pub trait AsyncKeyspaceMigration: Send + Sync {
+    async fn migrate_into_keyspace(
+        &self,
+        keyspace: &Subspace,
+        options: &MigrationOptions,
+    ) -> Result<MigrationReport>;
+}
+
+/// Rewrite legacy flat identities into `keyspace` in place.
+#[cfg(any(feature = "redis", feature = "valkey"))]
+pub async fn migrate_into_keyspace<S>(
+    store: &S,
+    keyspace: &Subspace,
+    options: &MigrationOptions,
+) -> Result<MigrationReport>
+where
+    S: AsyncKeyspaceMigration + ?Sized,
+{
+    store.migrate_into_keyspace(keyspace, options).await
+}
 
 /// Options for copying the current contents of one store into another.
 #[derive(Clone, Debug)]
@@ -44,7 +68,7 @@ impl MigrationReport {
     }
 }
 
-fn selected(options: &MigrationOptions, collection: &str) -> bool {
+pub(crate) fn selected(options: &MigrationOptions, collection: &str) -> bool {
     options.collections.is_empty()
         || options
             .collections
@@ -52,7 +76,7 @@ fn selected(options: &MigrationOptions, collection: &str) -> bool {
             .any(|candidate| candidate == collection)
 }
 
-fn target_collection(options: &MigrationOptions, collection: &str) -> Option<String> {
+pub(crate) fn target_collection(options: &MigrationOptions, collection: &str) -> Option<String> {
     match &options.collection_prefix {
         Some((source, target)) => collection
             .strip_prefix(source)
