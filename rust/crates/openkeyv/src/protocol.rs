@@ -209,6 +209,10 @@ pub trait AsyncDestroyCollection: Send + Sync {
 }
 
 /// Protocol for stores that expose an ordered, resumable mutation feed.
+///
+/// Store destruction (`destroy`) is not reported: the change history dies with
+/// the store. TTL expiry is not reported as a change; consumers reconcile with
+/// a full read.
 #[async_trait]
 pub trait AsyncChangeFeed: Send + Sync {
     async fn subscribe(&self, request: ChangeFeedRequest) -> Result<Box<dyn ChangeStream + Send>>;

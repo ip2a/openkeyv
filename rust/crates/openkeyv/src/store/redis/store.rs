@@ -63,6 +63,30 @@ end
 return id
 "#;
 
+// The batch delete script pairs each physical key with its logical name
+// because compound identities cannot be decomposed inside Lua.
+const BULK_DELETE_CHANGE_SCRIPT: &str = r#"
+local removed = 0
+local n = #KEYS - 2
+for i = 1, n do
+    if redis.call('EXISTS', KEYS[i]) == 1 then
+        redis.call('DEL', KEYS[i])
+        removed = removed + 1
+        if tonumber(ARGV[1]) > 0 then
+            local revision = redis.call('INCR', KEYS[n + 1])
+            redis.call('XADD', KEYS[n + 2], 'MAXLEN', '=', ARGV[1],
+                tostring(revision) .. '-0',
+                'revision', tostring(revision),
+                'collection', ARGV[2],
+                'key', ARGV[3 + i],
+                'operation', 'delete',
+                'occurred_at', ARGV[3])
+        end
+    end
+end
+return removed
+"#;
+
 const COMPARE_AND_SWAP_SCRIPT: &str = r#"
 local value = redis.call('GET', KEYS[1])
 local prefix_len = tonumber(ARGV[4])
@@ -819,22 +843,35 @@ impl AsyncDestroyCollection for RedisStore {
                 .map_err(map_redis_err)?;
 
             let mut matching = Vec::with_capacity(keys.len());
+            let mut logical_keys = Vec::with_capacity(keys.len());
             for identity in keys {
                 let logical_identity =
                     identity.strip_prefix(&keyspace_prefix).ok_or_else(|| {
                         Error::InvalidKey("Redis SCAN returned an identity outside keyspace".into())
                     })?;
-                let (key_collection, _) = decompound_key(logical_identity)?;
+                let (key_collection, key) = decompound_key(logical_identity)?;
                 if key_collection != collection {
                     return Err(Error::InvalidKey(format!(
                         "Redis SCAN returned an identity outside collection {collection:?}"
                     )));
                 }
+                logical_keys.push(key.to_string());
                 matching.push(identity);
             }
             if !matching.is_empty() {
-                let _: () = conn.del(&matching).await.map_err(map_redis_err)?;
-                destroyed = true;
+                let occurred_at = chrono::Utc::now().timestamp_millis().to_string();
+                let removed: usize = Script::new(BULK_DELETE_CHANGE_SCRIPT)
+                    .key(&matching)
+                    .key(self.config.keyspace.scope(CHANGE_REVISION_KEY))
+                    .key(self.config.keyspace.scope(CHANGE_STREAM_KEY))
+                    .arg(self.config.change_retention)
+                    .arg(collection)
+                    .arg(occurred_at)
+                    .arg(&logical_keys)
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(map_redis_err)?;
+                destroyed |= removed > 0;
             }
 
             cursor = next_cursor;
@@ -1114,6 +1151,69 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_destroy_collection_emits_delete_changes() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let keyspace = format!(
+            "openkeyv_destroy_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let config = RedisConfig::default().with_keyspace(&keyspace);
+        let writer = RedisStore::new_with_config(&url, config.clone())
+            .await
+            .unwrap();
+        let reader = RedisStore::new_with_config(&url, config).await.unwrap();
+        for key in ["a", "b", "c"] {
+            writer.put(key, Value::null(), None, None).await.unwrap();
+        }
+        let mut changes = reader
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Beginning,
+                filter: ChangeFilter::collection("default_collection"),
+            })
+            .await
+            .unwrap();
+
+        for key in ["a", "b", "c"] {
+            let change = tokio::time::timeout(std::time::Duration::from_secs(2), changes.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(change.key, key);
+            assert_eq!(change.operation, ChangeOperation::Put);
+        }
+
+        assert!(
+            writer
+                .destroy_collection("default_collection")
+                .await
+                .unwrap()
+        );
+        let mut deleted = Vec::new();
+        for _ in 0..3 {
+            let change = tokio::time::timeout(std::time::Duration::from_secs(2), changes.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(change.operation, ChangeOperation::Delete);
+            deleted.push(change.key);
+        }
+        deleted.sort();
+        assert_eq!(deleted, vec!["a", "b", "c"]);
+        assert!(
+            !writer
+                .destroy_collection("default_collection")
+                .await
+                .unwrap()
+        );
+
+        let _ = writer.destroy().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
     async fn test_redis_change_retention_zero_disables_recording() {
         let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
         let keyspace = format!(
@@ -1130,10 +1230,7 @@ mod tests {
         .await
         .unwrap();
 
-        store
-            .put("k", Value::null(), None, None)
-            .await
-            .unwrap();
+        store.put("k", Value::null(), None, None).await.unwrap();
         store.delete("k", None).await.unwrap();
 
         let mut conn = store.connection();

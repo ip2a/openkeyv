@@ -548,7 +548,17 @@ impl AsyncDestroyCollection for MemoryStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
         self.setup().await?;
         let _mutation = self.client.mutation_lock().lock().await;
-        Ok(self.client.collections().remove(collection).is_some())
+        if let Some((_, col)) = self.client.collections().remove(collection) {
+            let keys: Vec<String> = col.iter().map(|entry| entry.key().clone()).collect();
+            for key in keys {
+                self.client
+                    .record_change(collection, &key, ChangeOperation::Delete)
+                    .await;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -874,6 +884,45 @@ mod tests {
             result,
             Err(crate::error::Error::ChangeCursorExpired { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn test_destroy_collection_emits_delete_changes() {
+        let store = MemoryStore::new();
+        for key in ["a", "b", "c"] {
+            store
+                .put(key, Value::null(), Some("events"), None)
+                .await
+                .unwrap();
+        }
+        let mut changes = store
+            .subscribe(ChangeFeedRequest {
+                start: crate::change::ChangeStart::Beginning,
+                filter: crate::change::ChangeFilter::collection("events"),
+            })
+            .await
+            .unwrap();
+
+        for key in ["a", "b", "c"] {
+            let change = changes.recv().await.unwrap().unwrap();
+            assert_eq!(change.key, key);
+            assert_eq!(change.operation, ChangeOperation::Put);
+        }
+
+        assert!(store.destroy_collection("events").await.unwrap());
+        let mut deleted = Vec::new();
+        for _ in 0..3 {
+            let change = tokio::time::timeout(std::time::Duration::from_secs(1), changes.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(change.operation, ChangeOperation::Delete);
+            deleted.push(change.key);
+        }
+        deleted.sort();
+        assert_eq!(deleted, vec!["a", "b", "c"]);
+        assert!(!store.destroy_collection("events").await.unwrap());
     }
 
     #[tokio::test]
