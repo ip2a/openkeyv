@@ -1,4 +1,5 @@
 const DEFAULT_COLLECTION: &str = "default_collection";
+const DEFAULT_CHANGE_RETENTION: usize = 10_000;
 
 use crate::utils::compound::Subspace;
 
@@ -6,6 +7,9 @@ use crate::utils::compound::Subspace;
 pub struct RedisConfig {
     pub default_collection: String,
     pub keyspace: Subspace,
+    /// Change records kept in the backing stream.
+    /// 0 disables change recording entirely; subscribe() then returns an error.
+    pub change_retention: usize,
 }
 
 impl RedisConfig {
@@ -14,11 +18,17 @@ impl RedisConfig {
             default_collection: default_collection
                 .unwrap_or_else(|| DEFAULT_COLLECTION.to_string()),
             keyspace: Subspace::default(),
+            change_retention: DEFAULT_CHANGE_RETENTION,
         }
     }
 
     pub fn with_keyspace(mut self, keyspace: impl Into<String>) -> Self {
         self.keyspace = Subspace::new(keyspace);
+        self
+    }
+
+    pub fn with_change_retention(mut self, retention: usize) -> Self {
+        self.change_retention = retention;
         self
     }
 }

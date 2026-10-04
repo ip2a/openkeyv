@@ -15,6 +15,13 @@ fn required(config: &Value, key: &str) -> Result<String> {
     })
 }
 
+fn optional_usize(config: &Value, key: &str) -> Option<usize> {
+    config
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+}
+
 pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
     match config.store.as_str() {
         "memory" => {
@@ -52,11 +59,15 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
 
         #[cfg(feature = "redis")]
         "redis" => {
-            let keyspace = string(&config.config, "keyspace").unwrap_or_default();
+            let mut store_config = crate::store::redis::RedisConfig::default()
+                .with_keyspace(string(&config.config, "keyspace").unwrap_or_default());
+            if let Some(retention) = optional_usize(&config.config, "change_retention") {
+                store_config = store_config.with_change_retention(retention);
+            }
             let store = std::sync::Arc::new(
                 crate::store::redis::RedisStore::new_with_config(
                     &required(&config.config, "url")?,
-                    crate::store::redis::RedisConfig::default().with_keyspace(keyspace),
+                    store_config,
                 )
                 .await?,
             );
@@ -175,6 +186,17 @@ mod tests {
 
         assert_eq!(handle.base.store_name(), "MemoryStore");
         assert!(handle.capabilities.change_feed);
+    }
+
+    #[test]
+    fn optional_usize_reads_positive_integers_only() {
+        let config: Value = serde_json::json!({"a": 5, "b": -1, "c": "7", "d": 1.5});
+
+        assert_eq!(optional_usize(&config, "a"), Some(5));
+        assert_eq!(optional_usize(&config, "b"), None);
+        assert_eq!(optional_usize(&config, "c"), None);
+        assert_eq!(optional_usize(&config, "d"), None);
+        assert_eq!(optional_usize(&config, "missing"), None);
     }
 
     #[tokio::test]
