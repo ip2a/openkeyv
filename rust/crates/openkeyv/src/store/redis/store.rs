@@ -21,7 +21,6 @@ use redis::streams::{StreamId, StreamRangeReply, StreamReadOptions, StreamReadRe
 use redis::{AsyncCommands, Script};
 
 const SCAN_COUNT: usize = 1_000;
-const CHANGE_RETENTION: usize = 10_000;
 const CHANGE_STREAM_KEY: &str = "__openkeyv_changefeed_stream";
 const CHANGE_REVISION_KEY: &str = "__openkeyv_changefeed_revision";
 const COLLECTION_REGISTRY_KEY: &str = "__openkeyv_collections";
@@ -35,12 +34,14 @@ else
     redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[1])
 end
 redis.call('SADD', KEYS[4], ARGV[7])
-redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[6], id,
-    'revision', tostring(revision),
-    'collection', ARGV[3],
-    'key', ARGV[4],
-    'operation', 'put',
-    'occurred_at', ARGV[5])
+if tonumber(ARGV[6]) > 0 then
+    redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[6], id,
+        'revision', tostring(revision),
+        'collection', ARGV[3],
+        'key', ARGV[4],
+        'operation', 'put',
+        'occurred_at', ARGV[5])
+end
 return id
 "#;
 
@@ -51,12 +52,14 @@ end
 redis.call('DEL', KEYS[1])
 local revision = redis.call('INCR', KEYS[2])
 local id = tostring(revision) .. '-0'
-redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[3], id,
-    'revision', tostring(revision),
-    'collection', ARGV[1],
-    'key', ARGV[2],
-    'operation', 'delete',
-    'occurred_at', ARGV[4])
+if tonumber(ARGV[3]) > 0 then
+    redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[3], id,
+        'revision', tostring(revision),
+        'collection', ARGV[1],
+        'key', ARGV[2],
+        'operation', 'delete',
+        'occurred_at', ARGV[4])
+end
 return id
 "#;
 
@@ -323,6 +326,11 @@ impl RedisStore {
 #[async_trait]
 impl AsyncChangeFeed for RedisStore {
     async fn subscribe(&self, request: ChangeFeedRequest) -> Result<Box<dyn ChangeStream + Send>> {
+        if self.config.change_retention == 0 {
+            return Err(Error::InvalidOperation(
+                "change feed is disabled (change_retention = 0)".to_string(),
+            ));
+        }
         let mut connection = self.client.subscription_connection().await?;
         let start = request.start;
         let filter = request.filter;
@@ -413,7 +421,7 @@ impl AsyncKeyValue for RedisStore {
             .arg(cname)
             .arg(key)
             .arg(occurred_at)
-            .arg(CHANGE_RETENTION)
+            .arg(self.config.change_retention)
             .arg(cname)
             .invoke_async(&mut conn)
             .await
@@ -432,7 +440,7 @@ impl AsyncKeyValue for RedisStore {
             .key(self.config.keyspace.scope(CHANGE_STREAM_KEY))
             .arg(cname)
             .arg(key)
-            .arg(CHANGE_RETENTION)
+            .arg(self.config.change_retention)
             .arg(occurred_at)
             .invoke_async(&mut conn)
             .await
@@ -1106,6 +1114,84 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_change_retention_zero_disables_recording() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let keyspace = format!(
+            "openkeyv_retention_zero_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let store = RedisStore::new_with_config(
+            &url,
+            RedisConfig::default()
+                .with_keyspace(&keyspace)
+                .with_change_retention(0),
+        )
+        .await
+        .unwrap();
+
+        store
+            .put("k", Value::null(), None, None)
+            .await
+            .unwrap();
+        store.delete("k", None).await.unwrap();
+
+        let mut conn = store.connection();
+        let stream_key = Subspace::new(keyspace).scope(CHANGE_STREAM_KEY);
+        let stream_exists: bool = conn.exists(&stream_key).await.unwrap();
+        assert!(!stream_exists);
+
+        let error = store
+            .subscribe(ChangeFeedRequest::default())
+            .await
+            .err()
+            .expect("subscribe must fail when change_retention is 0");
+        assert!(error.to_string().contains("disabled"));
+
+        let _ = store.destroy().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
+    async fn test_redis_change_retention_caps_recorded_history() {
+        let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
+        let keyspace = format!(
+            "openkeyv_retention_cap_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let store = RedisStore::new_with_config(
+            &url,
+            RedisConfig::default()
+                .with_keyspace(&keyspace)
+                .with_change_retention(2),
+        )
+        .await
+        .unwrap();
+
+        for index in 0..3 {
+            store
+                .put(&format!("k{index}"), Value::integer(index), None, None)
+                .await
+                .unwrap();
+        }
+
+        let mut conn = store.connection();
+        let stream_key = Subspace::new(keyspace).scope(CHANGE_STREAM_KEY);
+        let reply: StreamRangeReply = conn.xrange(&stream_key, "-", "+").await.unwrap();
+        assert_eq!(reply.ids.len(), 2);
+        let keys: Vec<String> = reply
+            .ids
+            .iter()
+            .filter_map(|entry| entry.get("key"))
+            .collect();
+        assert_eq!(keys, vec!["k1", "k2"]);
+
+        let _ = store.destroy().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_REDIS_URL"]
     async fn test_redis_store_uses_binary_entries_and_native_ttl() {
         let url = std::env::var("OPENKEYV_REDIS_URL").unwrap();
         let store = RedisStore::new(&url).await.unwrap();
@@ -1251,6 +1337,9 @@ mod tests {
 
         let malformed = format!("01:openkeyv-{}", std::process::id());
         let mut conn = store.connection();
+        // Drop the shared registry so the malformed-key assertion exercises
+        // the SCAN path instead of the registry shortcut.
+        let _: usize = conn.del(COLLECTION_REGISTRY_KEY).await.unwrap();
         let _: () = conn.set(&malformed, b"invalid").await.unwrap();
         assert!(matches!(
             store.collections(None).await,
