@@ -2,10 +2,13 @@ use super::client::ValkeyClient;
 use super::config::ValkeyConfig;
 use super::error::{Error, Result, map_valkey_err};
 use crate::cas;
+use crate::change::{
+    ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream, StoreChange,
+};
 use crate::entry::ManagedEntry;
 use crate::migration::{AsyncKeyspaceMigration, MigrationOptions, MigrationReport};
 use crate::protocol::{
-    AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
     AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
     CompareAndSwapResult, Revision, RevisionedValue,
 };
@@ -14,20 +17,74 @@ use crate::utils::compound::{
 };
 use crate::value::Value;
 use async_trait::async_trait;
-use redis::AsyncCommands;
-use redis::Script;
+use redis::streams::{StreamId, StreamRangeReply, StreamReadOptions, StreamReadReply};
+use redis::{AsyncCommands, Script};
 
 const SCAN_COUNT: usize = 1_000;
+const CHANGE_STREAM_KEY: &str = "__openkeyv_changefeed_stream";
+const CHANGE_REVISION_KEY: &str = "__openkeyv_changefeed_revision";
 const COLLECTION_REGISTRY_KEY: &str = "__openkeyv_collections";
 
-const PUT_SCRIPT: &str = r#"
+const PUT_CHANGE_SCRIPT: &str = r#"
+local revision = redis.call('INCR', KEYS[2])
+local id = tostring(revision) .. '-0'
 if ARGV[2] == '0' then
     redis.call('SET', KEYS[1], ARGV[1])
 else
     redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[1])
 end
-redis.call('SADD', KEYS[2], ARGV[3])
-return 1
+redis.call('SADD', KEYS[4], ARGV[7])
+if tonumber(ARGV[6]) > 0 then
+    redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[6], id,
+        'revision', tostring(revision),
+        'collection', ARGV[3],
+        'key', ARGV[4],
+        'operation', 'put',
+        'occurred_at', ARGV[5])
+end
+return id
+"#;
+
+const DELETE_CHANGE_SCRIPT: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return false
+end
+redis.call('DEL', KEYS[1])
+local revision = redis.call('INCR', KEYS[2])
+local id = tostring(revision) .. '-0'
+if tonumber(ARGV[3]) > 0 then
+    redis.call('XADD', KEYS[3], 'MAXLEN', '=', ARGV[3], id,
+        'revision', tostring(revision),
+        'collection', ARGV[1],
+        'key', ARGV[2],
+        'operation', 'delete',
+        'occurred_at', ARGV[4])
+end
+return id
+"#;
+
+// The batch delete script pairs each physical key with its logical name
+// because compound identities cannot be decomposed inside Lua.
+const BULK_DELETE_CHANGE_SCRIPT: &str = r#"
+local removed = 0
+local n = #KEYS - 2
+for i = 1, n do
+    if redis.call('EXISTS', KEYS[i]) == 1 then
+        redis.call('DEL', KEYS[i])
+        removed = removed + 1
+        if tonumber(ARGV[1]) > 0 then
+            local revision = redis.call('INCR', KEYS[n + 1])
+            redis.call('XADD', KEYS[n + 2], 'MAXLEN', '=', ARGV[1],
+                tostring(revision) .. '-0',
+                'revision', tostring(revision),
+                'collection', ARGV[2],
+                'key', ARGV[3 + i],
+                'operation', 'delete',
+                'occurred_at', ARGV[3])
+        end
+    end
+end
+return removed
 "#;
 
 const COMPARE_AND_SWAP_SCRIPT: &str = r#"
@@ -84,6 +141,150 @@ fn collection_scan_pattern(keyspace: &Subspace, collection: &str) -> String {
     scan_pattern(&prefix)
 }
 
+fn is_internal_key(keyspace: &Subspace, key: &str) -> bool {
+    key == keyspace.scope(CHANGE_STREAM_KEY)
+        || key == keyspace.scope(CHANGE_REVISION_KEY)
+        || key == keyspace.scope(COLLECTION_REGISTRY_KEY)
+}
+
+fn cursor_revision(cursor: &str) -> Result<u64> {
+    let (revision, sequence) = cursor
+        .split_once('-')
+        .ok_or_else(|| crate::error::Error::InvalidChangeCursor(cursor.to_string()))?;
+    if sequence != "0" {
+        return Err(crate::error::Error::InvalidChangeCursor(cursor.to_string()));
+    }
+    revision
+        .parse::<u64>()
+        .map_err(|_| crate::error::Error::InvalidChangeCursor(cursor.to_string()))
+}
+
+fn stream_change(entry: &StreamId) -> Result<StoreChange> {
+    let revision = entry
+        .get::<u64>("revision")
+        .ok_or(crate::error::Error::CorruptedData)?;
+    let collection = entry
+        .get::<String>("collection")
+        .ok_or(crate::error::Error::CorruptedData)?;
+    let key = entry
+        .get::<String>("key")
+        .ok_or(crate::error::Error::CorruptedData)?;
+    let operation = match entry.get::<String>("operation").as_deref() {
+        Some("put") => ChangeOperation::Put,
+        Some("delete") => ChangeOperation::Delete,
+        _ => return Err(crate::error::Error::CorruptedData),
+    };
+    let occurred_at = entry
+        .get::<String>("occurred_at")
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .ok_or(crate::error::Error::CorruptedData)?;
+
+    Ok(StoreChange {
+        cursor: crate::change::ChangeCursor::new(entry.id.clone()),
+        revision,
+        collection,
+        key,
+        operation,
+        occurred_at,
+    })
+}
+
+struct ValkeyChangeStream {
+    connection: redis::aio::MultiplexedConnection,
+    stream_key: String,
+    cursor: String,
+    last_revision: Option<u64>,
+    filter: ChangeFilter,
+}
+
+#[async_trait]
+impl ChangeStream for ValkeyChangeStream {
+    async fn recv(&mut self) -> Result<Option<StoreChange>> {
+        loop {
+            let options = StreamReadOptions::default().count(128).block(1_000);
+            let reply: StreamReadReply = self
+                .connection
+                .xread_options(&[&self.stream_key], &[self.cursor.as_str()], &options)
+                .await
+                .map_err(map_valkey_err)?;
+
+            for stream in reply.keys {
+                for entry in stream.ids {
+                    let previous_cursor = self.cursor.clone();
+                    let change = stream_change(&entry)?;
+                    if let Some(last_revision) = self.last_revision {
+                        if change.revision > last_revision.saturating_add(1) {
+                            return Err(crate::error::Error::ChangeCursorExpired {
+                                requested: previous_cursor,
+                                oldest: entry.id.clone(),
+                            });
+                        }
+                    }
+                    self.cursor = entry.id.clone();
+                    self.last_revision = Some(change.revision);
+                    if self.filter.matches(&change) {
+                        return Ok(Some(change));
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn latest_cursor(
+    connection: &mut redis::aio::MultiplexedConnection,
+    stream_key: &str,
+) -> Result<String> {
+    let reply: StreamRangeReply = connection
+        .xrevrange_count(stream_key, "+", "-", 1)
+        .await
+        .map_err(map_valkey_err)?;
+    Ok(reply
+        .ids
+        .first()
+        .map(|entry| entry.id.clone())
+        .unwrap_or_else(|| "0-0".to_string()))
+}
+
+async fn validate_after_cursor(
+    connection: &mut redis::aio::MultiplexedConnection,
+    cursor: &str,
+    stream_key: &str,
+) -> Result<()> {
+    let requested = cursor_revision(cursor)?;
+    let last: StreamRangeReply = connection
+        .xrevrange_count(stream_key, "+", "-", 1)
+        .await
+        .map_err(map_valkey_err)?;
+    let Some(last_entry) = last.ids.first() else {
+        return if requested == 0 {
+            Ok(())
+        } else {
+            Err(crate::error::Error::InvalidChangeCursor(cursor.to_string()))
+        };
+    };
+    let last_revision = cursor_revision(&last_entry.id)?;
+    if requested > last_revision {
+        return Err(crate::error::Error::InvalidChangeCursor(cursor.to_string()));
+    }
+
+    let first: StreamRangeReply = connection
+        .xrange_count(stream_key, "-", "+", 1)
+        .await
+        .map_err(map_valkey_err)?;
+    if let Some(first_entry) = first.ids.first() {
+        let first_revision = cursor_revision(&first_entry.id)?;
+        if first_revision > requested.saturating_add(1) {
+            return Err(crate::error::Error::ChangeCursorExpired {
+                requested: cursor.to_string(),
+                oldest: first_entry.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Valkey-backed key-value store.
 ///
 /// Each collection is represented by a key prefix in Valkey.
@@ -114,12 +315,18 @@ impl ValkeyStore {
     pub async fn new_with_config(url: &str, config: ValkeyConfig) -> Result<Self> {
         let client = redis::Client::open(url).map_err(map_valkey_err)?;
         let conn = connection_manager(&client).await?;
-        Ok(Self::with_config(conn, config))
+        Ok(Self {
+            client: ValkeyClient::with_client(conn, client),
+            config,
+        })
     }
 
     pub async fn from_client(client: redis::Client) -> Result<Self> {
         let conn = connection_manager(&client).await?;
-        Ok(Self::with_config(conn, ValkeyConfig::default()))
+        Ok(Self {
+            client: ValkeyClient::with_client(conn, client),
+            config: ValkeyConfig::default(),
+        })
     }
 
     pub fn with_config(conn: redis::aio::ConnectionManager, config: ValkeyConfig) -> Self {
@@ -135,6 +342,41 @@ impl ValkeyStore {
 
     fn collection_name<'a>(&'a self, collection: Option<&'a str>) -> &'a str {
         collection.unwrap_or(&self.config.default_collection)
+    }
+}
+
+#[async_trait]
+impl AsyncChangeFeed for ValkeyStore {
+    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<Box<dyn ChangeStream + Send>> {
+        if self.config.change_retention == 0 {
+            return Err(Error::InvalidOperation(
+                "change feed is disabled (change_retention = 0)".to_string(),
+            ));
+        }
+        let mut connection = self.client.subscription_connection().await?;
+        let start = request.start;
+        let filter = request.filter;
+        let stream_key = self.config.keyspace.scope(CHANGE_STREAM_KEY);
+        let cursor = match &start {
+            ChangeStart::Beginning => "0-0".to_string(),
+            ChangeStart::Latest => latest_cursor(&mut connection, &stream_key).await?,
+            ChangeStart::After(cursor) => {
+                validate_after_cursor(&mut connection, cursor.as_str(), &stream_key).await?;
+                cursor.to_string()
+            }
+        };
+        let last_revision = match &start {
+            ChangeStart::Beginning => None,
+            ChangeStart::Latest => Some(cursor_revision(&cursor)?),
+            ChangeStart::After(cursor) => Some(cursor_revision(cursor.as_str())?),
+        };
+        Ok(Box::new(ValkeyChangeStream {
+            connection,
+            stream_key,
+            cursor,
+            last_revision,
+            filter,
+        }))
     }
 }
 
@@ -187,12 +429,19 @@ impl AsyncKeyValue for ValkeyStore {
         let milliseconds = ttl
             .map(|seconds| ((seconds * 1000.0).ceil() as u64).to_string())
             .unwrap_or_else(|| "0".to_string());
+        let occurred_at = chrono::Utc::now().timestamp_millis().to_string();
         let mut conn = self.connection();
-        let _: i64 = Script::new(PUT_SCRIPT)
+        let _: String = Script::new(PUT_CHANGE_SCRIPT)
             .key(ck)
+            .key(self.config.keyspace.scope(CHANGE_REVISION_KEY))
+            .key(self.config.keyspace.scope(CHANGE_STREAM_KEY))
             .key(self.config.keyspace.scope(COLLECTION_REGISTRY_KEY))
             .arg(envelope)
             .arg(milliseconds)
+            .arg(cname)
+            .arg(key)
+            .arg(occurred_at)
+            .arg(self.config.change_retention)
             .arg(cname)
             .invoke_async(&mut conn)
             .await
@@ -203,9 +452,20 @@ impl AsyncKeyValue for ValkeyStore {
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let cname = self.collection_name(collection);
         let ck = subspace_compound_key(&self.config.keyspace, cname, key);
+        let occurred_at = chrono::Utc::now().timestamp_millis().to_string();
         let mut conn = self.connection();
-        let res: i64 = conn.del(&ck).await.map_err(map_valkey_err)?;
-        Ok(res > 0)
+        let result: Option<String> = Script::new(DELETE_CHANGE_SCRIPT)
+            .key(ck)
+            .key(self.config.keyspace.scope(CHANGE_REVISION_KEY))
+            .key(self.config.keyspace.scope(CHANGE_STREAM_KEY))
+            .arg(cname)
+            .arg(key)
+            .arg(self.config.change_retention)
+            .arg(occurred_at)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(map_valkey_err)?;
+        Ok(result.is_some())
     }
 
     async fn get_many(
@@ -268,44 +528,21 @@ impl AsyncKeyValue for ValkeyStore {
             ManagedEntry::validate_ttl(seconds)?;
         }
         let cname = self.collection_name(collection);
-        let mut conn = self.connection();
-        let mut pipe = redis::pipe();
-
-        if let Some(seconds) = ttl {
-            let milliseconds = (seconds * 1000.0) as u64;
-            for (key, value) in keys.iter().zip(values.iter()) {
-                let ck = subspace_compound_key(&self.config.keyspace, cname, key);
-                let entry = ManagedEntry::with_ttl(value.clone(), seconds)?;
-                let revision = Revision::fresh()?;
-                let envelope = cas::encode(&entry, revision);
-                pipe.pset_ex(ck, envelope, milliseconds).ignore();
-            }
-        } else {
-            for (key, value) in keys.iter().zip(values.iter()) {
-                let ck = subspace_compound_key(&self.config.keyspace, cname, key);
-                let entry = ManagedEntry::new(value.clone());
-                let revision = Revision::fresh()?;
-                let envelope = cas::encode(&entry, revision);
-                pipe.set(ck, envelope).ignore();
-            }
+        for (key, value) in keys.iter().zip(values.iter()) {
+            self.put(key, value.clone(), Some(cname), ttl).await?;
         }
-        if !keys.is_empty() {
-            pipe.sadd(self.config.keyspace.scope(COLLECTION_REGISTRY_KEY), cname)
-                .ignore();
-        }
-        let _: () = pipe.query_async(&mut conn).await.map_err(map_valkey_err)?;
         Ok(())
     }
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
         let cname = self.collection_name(collection);
-        let cks: Vec<String> = keys
-            .iter()
-            .map(|k| subspace_compound_key(&self.config.keyspace, cname, k))
-            .collect();
-        let mut conn = self.connection();
-        let res: i64 = conn.del(&cks).await.map_err(map_valkey_err)?;
-        Ok(res as usize)
+        let mut count = 0;
+        for key in keys {
+            if self.delete(key, Some(cname)).await? {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -558,7 +795,7 @@ impl AsyncEnumerateCollections for ValkeyStore {
                 .map_err(map_valkey_err)?;
 
             for identity in keys {
-                if identity == registry_key {
+                if is_internal_key(&self.config.keyspace, &identity) {
                     continue;
                 }
                 let (collection, _) = decompound_key(&identity)?;
@@ -602,6 +839,7 @@ impl AsyncDestroyCollection for ValkeyStore {
                 .map_err(map_valkey_err)?;
 
             let mut matching = Vec::with_capacity(keys.len());
+            let mut logical_keys = Vec::with_capacity(keys.len());
             for identity in keys {
                 let logical_identity =
                     identity.strip_prefix(&keyspace_prefix).ok_or_else(|| {
@@ -609,17 +847,29 @@ impl AsyncDestroyCollection for ValkeyStore {
                             "Valkey SCAN returned an identity outside keyspace".into(),
                         )
                     })?;
-                let (key_collection, _) = decompound_key(logical_identity)?;
+                let (key_collection, key) = decompound_key(logical_identity)?;
                 if key_collection != collection {
                     return Err(Error::InvalidKey(format!(
                         "Valkey SCAN returned an identity outside collection {collection:?}"
                     )));
                 }
+                logical_keys.push(key.to_string());
                 matching.push(identity);
             }
             if !matching.is_empty() {
-                let _: () = conn.del(&matching).await.map_err(map_valkey_err)?;
-                destroyed = true;
+                let occurred_at = chrono::Utc::now().timestamp_millis().to_string();
+                let removed: usize = Script::new(BULK_DELETE_CHANGE_SCRIPT)
+                    .key(&matching)
+                    .key(self.config.keyspace.scope(CHANGE_REVISION_KEY))
+                    .key(self.config.keyspace.scope(CHANGE_STREAM_KEY))
+                    .arg(self.config.change_retention)
+                    .arg(collection)
+                    .arg(occurred_at)
+                    .arg(&logical_keys)
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(map_valkey_err)?;
+                destroyed |= removed > 0;
             }
 
             cursor = next_cursor;
@@ -799,6 +1049,180 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires OPENKEYV_VALKEY_URL"]
+    async fn test_valkey_change_feed_delivers_and_resumes_across_instances() {
+        let url = std::env::var("OPENKEYV_VALKEY_URL").unwrap();
+        let writer = ValkeyStore::new(&url).await.unwrap();
+        let reader = ValkeyStore::new(&url).await.unwrap();
+        let collection = format!(
+            "openkeyv_changefeed_test_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+
+        let mut live = reader
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Latest,
+                filter: ChangeFilter::collection(&collection),
+            })
+            .await
+            .unwrap();
+
+        writer
+            .put("event-1", Value::integer(1), Some(&collection), None)
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), live.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.collection, collection);
+        assert_eq!(first.key, "event-1");
+        assert_eq!(first.operation, ChangeOperation::Put);
+        assert_eq!(
+            reader.get("event-1", Some(&collection)).await.unwrap(),
+            Some(Value::integer(1))
+        );
+
+        writer
+            .put("event-2", Value::integer(2), Some(&collection), None)
+            .await
+            .unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), live.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.key, "event-2");
+        assert!(second.revision > first.revision);
+
+        let mut resumed = reader
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::After(first.cursor),
+                filter: ChangeFilter::collection(&collection),
+            })
+            .await
+            .unwrap();
+        let replayed = tokio::time::timeout(std::time::Duration::from_secs(2), resumed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(replayed.cursor, second.cursor);
+
+        assert!(writer.delete("event-2", Some(&collection)).await.unwrap());
+        let deleted = tokio::time::timeout(std::time::Duration::from_secs(2), resumed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted.key, "event-2");
+        assert_eq!(deleted.operation, ChangeOperation::Delete);
+
+        assert!(writer.destroy_collection(&collection).await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_VALKEY_URL"]
+    async fn test_valkey_destroy_collection_emits_delete_changes() {
+        let url = std::env::var("OPENKEYV_VALKEY_URL").unwrap();
+        let keyspace = format!(
+            "openkeyv_destroy_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let config = ValkeyConfig::default().with_keyspace(&keyspace);
+        let writer = ValkeyStore::new_with_config(&url, config.clone())
+            .await
+            .unwrap();
+        let reader = ValkeyStore::new_with_config(&url, config).await.unwrap();
+        for key in ["a", "b", "c"] {
+            writer.put(key, Value::null(), None, None).await.unwrap();
+        }
+        let mut changes = reader
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Beginning,
+                filter: ChangeFilter::collection("default_collection"),
+            })
+            .await
+            .unwrap();
+
+        for key in ["a", "b", "c"] {
+            let change = tokio::time::timeout(std::time::Duration::from_secs(2), changes.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(change.key, key);
+            assert_eq!(change.operation, ChangeOperation::Put);
+        }
+
+        assert!(
+            writer
+                .destroy_collection("default_collection")
+                .await
+                .unwrap()
+        );
+        let mut deleted = Vec::new();
+        for _ in 0..3 {
+            let change = tokio::time::timeout(std::time::Duration::from_secs(2), changes.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(change.operation, ChangeOperation::Delete);
+            deleted.push(change.key);
+        }
+        deleted.sort();
+        assert_eq!(deleted, vec!["a", "b", "c"]);
+        assert!(
+            !writer
+                .destroy_collection("default_collection")
+                .await
+                .unwrap()
+        );
+
+        let _ = writer.destroy().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_VALKEY_URL"]
+    async fn test_valkey_change_retention_zero_disables_recording() {
+        let url = std::env::var("OPENKEYV_VALKEY_URL").unwrap();
+        let keyspace = format!(
+            "openkeyv_retention_zero_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        );
+        let store = ValkeyStore::new_with_config(
+            &url,
+            ValkeyConfig::default()
+                .with_keyspace(&keyspace)
+                .with_change_retention(0),
+        )
+        .await
+        .unwrap();
+
+        store.put("k", Value::null(), None, None).await.unwrap();
+        store.delete("k", None).await.unwrap();
+
+        let mut conn = store.connection();
+        let stream_key = Subspace::new(keyspace).scope(CHANGE_STREAM_KEY);
+        let stream_exists: bool = conn.exists(&stream_key).await.unwrap();
+        assert!(!stream_exists);
+
+        let error = store
+            .subscribe(ChangeFeedRequest::default())
+            .await
+            .err()
+            .expect("subscribe must fail when change_retention is 0");
+        assert!(error.to_string().contains("disabled"));
+
+        let _ = store.destroy().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_VALKEY_URL"]
     async fn test_valkey_store_uses_binary_entries_and_native_ttl() {
         let url = std::env::var("OPENKEYV_VALKEY_URL").unwrap();
         let store = ValkeyStore::new(&url).await.unwrap();
@@ -944,6 +1368,9 @@ mod tests {
 
         let malformed = format!("01:openkeyv-{}", std::process::id());
         let mut conn = store.connection();
+        // Drop the shared registry so the malformed-key assertion exercises
+        // the SCAN path instead of the registry shortcut.
+        let _: usize = conn.del(COLLECTION_REGISTRY_KEY).await.unwrap();
         let _: () = conn.set(&malformed, b"invalid").await.unwrap();
         assert!(matches!(
             store.collections(None).await,

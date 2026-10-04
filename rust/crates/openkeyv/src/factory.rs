@@ -83,11 +83,15 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
         }
         #[cfg(feature = "valkey")]
         "valkey" => {
-            let keyspace = string(&config.config, "keyspace").unwrap_or_default();
+            let mut store_config = crate::store::valkey::ValkeyConfig::default()
+                .with_keyspace(string(&config.config, "keyspace").unwrap_or_default());
+            if let Some(retention) = optional_usize(&config.config, "change_retention") {
+                store_config = store_config.with_change_retention(retention);
+            }
             let store = std::sync::Arc::new(
                 crate::store::valkey::ValkeyStore::new_with_config(
                     &required(&config.config, "url")?,
-                    crate::store::valkey::ValkeyConfig::default().with_keyspace(keyspace),
+                    store_config,
                 )
                 .await?,
             );
@@ -97,7 +101,7 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
                 Some(base.clone()),
                 Some(base.clone()),
                 Some(base.clone()),
-                None,
+                Some(base),
             )
             .with_keyspace_migration(store))
         }
