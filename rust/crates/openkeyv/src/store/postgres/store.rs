@@ -1,10 +1,13 @@
 use super::client::PostgresClient;
 use super::config::PostgresConfig;
 use super::error::{Error, Result};
+use crate::change::{
+    ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream, StoreChange,
+};
 use crate::entry::ManagedEntry;
 use crate::protocol::{
-    AsyncCull, AsyncDestroyCollection, AsyncDestroyStore, AsyncEnumerateCollections,
-    AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncChangeFeed, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
 };
 use crate::value::Value;
 use async_trait::async_trait;
@@ -15,6 +18,8 @@ use std::collections::{HashMap, HashSet};
 
 const DEFAULT_PAGE_SIZE: usize = 10_000;
 const PAGE_LIMIT: usize = 10_000;
+const CHANGE_CHANNEL: &str = "openkeyv_changefeed";
+const CHANGE_DRAIN_LIMIT: i64 = 128;
 
 struct StoredRow {
     collection: String,
@@ -34,16 +39,24 @@ pub struct PostgresStore {
 
 impl PostgresStore {
     pub async fn new(url: &str, table_name: Option<&str>) -> Result<Self> {
+        Self::new_with_config(url, PostgresConfig::new(table_name)?).await
+    }
+
+    pub async fn new_with_config(url: &str, config: PostgresConfig) -> Result<Self> {
         let pool = sqlx::PgPool::connect(url)
             .await
             .map_err(|error| Error::StoreConnection {
                 message: format!("failed to connect to Postgres: {error}"),
             })?;
-        Self::from_pool(pool, table_name).await
+        Self::from_pool_with_config(pool, config).await
     }
 
     pub async fn from_pool(pool: sqlx::PgPool, table_name: Option<&str>) -> Result<Self> {
-        let store = Self::with_config(pool, PostgresConfig::new(table_name)?);
+        Self::from_pool_with_config(pool, PostgresConfig::new(table_name)?).await
+    }
+
+    pub async fn from_pool_with_config(pool: sqlx::PgPool, config: PostgresConfig) -> Result<Self> {
+        let store = Self::with_config(pool, config);
         store.ensure_table().await?;
         Ok(store)
     }
@@ -82,6 +95,63 @@ impl PostgresStore {
             let hash = blake3::hash(self.config.table_name.as_bytes()).to_hex();
             format!("idx_{}_expires_at", &hash[..16])
         }
+    }
+
+    fn changes_table_name(&self) -> String {
+        let plain = format!("{}_changes", self.config.table_name);
+        if plain.len() <= 63 {
+            plain
+        } else {
+            let hash = blake3::hash(self.config.table_name.as_bytes()).to_hex();
+            format!("changes_{}", &hash[..47])
+        }
+    }
+
+    /// Append change rows for `keys` inside the caller's transaction, trim the
+    /// log to the configured retention, and wake subscribers once.
+    async fn record_changes(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        collection: &str,
+        keys: &[&str],
+        operation: &str,
+    ) -> Result<()> {
+        if self.config.change_retention == 0 || keys.is_empty() {
+            return Ok(());
+        }
+        let changes_table = self.changes_table_name();
+        sqlx::query(&format!(
+            "INSERT INTO {changes_table} (collection, key, operation, occurred_at) \
+             SELECT $1, k, $3, now() FROM UNNEST($2::text[]) AS k",
+        ))
+        .bind(collection)
+        .bind(keys)
+        .bind(operation)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| Error::StoreConnection {
+            message: format!("failed to record Postgres change rows: {error}"),
+        })?;
+        // ponytail: per-write trim adds one subquery per write; move to a
+        // periodic trim if high write volume makes it measurable.
+        sqlx::query(&format!(
+            "DELETE FROM {changes_table} WHERE revision <= \
+             (SELECT COALESCE(MAX(revision), 0) - $1 FROM {changes_table})",
+        ))
+        .bind(self.config.change_retention as i64)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| Error::StoreConnection {
+            message: format!("failed to trim Postgres change log: {error}"),
+        })?;
+        sqlx::query("SELECT pg_notify($1, '')")
+            .bind(CHANGE_CHANNEL)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to notify Postgres change feed: {error}"),
+            })?;
+        Ok(())
     }
 
     async fn ensure_table(&self) -> Result<()> {
@@ -356,6 +426,25 @@ impl PostgresStore {
             });
         }
 
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS {} (\
+                revision BIGSERIAL PRIMARY KEY,\
+                collection TEXT NOT NULL,\
+                key TEXT NOT NULL,\
+                operation TEXT NOT NULL,\
+                occurred_at TIMESTAMPTZ NOT NULL\
+            )",
+            self.changes_table_name()
+        ))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| Error::StoreSetup {
+            message: format!(
+                "failed to create Postgres change table for {}: {error}",
+                self.config.table_name
+            ),
+        })?;
+
         transaction
             .commit()
             .await
@@ -501,6 +590,13 @@ impl AsyncKeyValue for PostgresStore {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
+        let mut transaction =
+            self.pool()
+                .begin()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!("failed to start Postgres put transaction: {error}"),
+                })?;
         sqlx::query(&format!(
             "INSERT INTO {} (collection, key, entry, expires_at) \
              VALUES ($1, $2, $3, $4) \
@@ -512,29 +608,55 @@ impl AsyncKeyValue for PostgresStore {
         .bind(key)
         .bind(entry.encode())
         .bind(entry.expires_at)
-        .execute(self.pool())
+        .execute(&mut *transaction)
         .await
         .map_err(|error| Error::StoreConnection {
             message: format!("failed to put Postgres key {key}: {error}"),
         })?;
+        self.record_changes(&mut transaction, collection, &[key], "put")
+            .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to commit Postgres put for key {key}: {error}"),
+            })?;
         Ok(())
     }
 
     async fn delete(&self, key: &str, collection: Option<&str>) -> Result<bool> {
         let collection = self.collection_name(collection)?;
         Self::validate_text_identity("key", key)?;
-        let result = sqlx::query(&format!(
-            "DELETE FROM {} WHERE collection = $1 AND key = $2",
+        let mut transaction =
+            self.pool()
+                .begin()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!("failed to start Postgres delete transaction: {error}"),
+                })?;
+        let rows = sqlx::query(&format!(
+            "DELETE FROM {} WHERE collection = $1 AND key = $2 RETURNING key",
             self.config.table_name
         ))
         .bind(collection)
         .bind(key)
-        .execute(self.pool())
+        .fetch_all(&mut *transaction)
         .await
         .map_err(|error| Error::StoreConnection {
             message: format!("failed to delete Postgres key {key}: {error}"),
         })?;
-        Ok(result.rows_affected() == 1)
+        let deleted = !rows.is_empty();
+        if deleted {
+            self.record_changes(&mut transaction, collection, &[key], "delete")
+                .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to commit Postgres delete for key {key}: {error}"),
+            })?;
+        Ok(deleted)
     }
 
     async fn get_many(
@@ -780,6 +902,13 @@ impl AsyncKeyValue for PostgresStore {
             expires_at.push(entry.expires_at);
         }
 
+        let mut transaction =
+            self.pool()
+                .begin()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!("failed to start Postgres batch put transaction: {error}"),
+                })?;
         sqlx::query(&format!(
             "INSERT INTO {0} (collection, key, entry, expires_at) \
              SELECT $1, rows.key, rows.entry, rows.expires_at \
@@ -793,11 +922,19 @@ impl AsyncKeyValue for PostgresStore {
         .bind(&final_keys)
         .bind(&entries)
         .bind(&expires_at)
-        .execute(self.pool())
+        .execute(&mut *transaction)
         .await
         .map_err(|error| Error::StoreConnection {
             message: format!("failed to put Postgres batch: {error}"),
         })?;
+        self.record_changes(&mut transaction, collection, &final_keys, "put")
+            .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to commit Postgres batch put: {error}"),
+            })?;
         Ok(())
     }
 
@@ -809,18 +946,43 @@ impl AsyncKeyValue for PostgresStore {
         if keys.is_empty() {
             return Ok(0);
         }
-        let result = sqlx::query(&format!(
-            "DELETE FROM {} WHERE collection = $1 AND key = ANY($2)",
+        let mut transaction =
+            self.pool()
+                .begin()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!("failed to start Postgres batch delete transaction: {error}"),
+                })?;
+        let rows = sqlx::query(&format!(
+            "DELETE FROM {} WHERE collection = $1 AND key = ANY($2) RETURNING key",
             self.config.table_name
         ))
         .bind(collection)
         .bind(keys)
-        .execute(self.pool())
+        .fetch_all(&mut *transaction)
         .await
         .map_err(|error| Error::StoreConnection {
             message: format!("failed to delete Postgres batch: {error}"),
         })?;
-        Ok(result.rows_affected() as usize)
+        let deleted_keys: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.try_get::<String, _>("key")
+                    .map_err(|error| Error::Deserialization(error.to_string()))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if !deleted_keys.is_empty() {
+            let key_refs: Vec<&str> = deleted_keys.iter().map(String::as_str).collect();
+            self.record_changes(&mut transaction, collection, &key_refs, "delete")
+                .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to commit Postgres batch delete: {error}"),
+            })?;
+        Ok(deleted_keys.len())
     }
 }
 
@@ -1011,17 +1173,47 @@ impl AsyncEnumerateCollections for PostgresStore {
 impl AsyncDestroyCollection for PostgresStore {
     async fn destroy_collection(&self, collection: &str) -> Result<bool> {
         Self::validate_text_identity("collection", collection)?;
-        let result = sqlx::query(&format!(
-            "DELETE FROM {} WHERE collection = $1",
+        let mut transaction =
+            self.pool()
+                .begin()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!(
+                        "failed to start Postgres collection destroy transaction: {error}"
+                    ),
+                })?;
+        let rows = sqlx::query(&format!(
+            "DELETE FROM {} WHERE collection = $1 RETURNING key",
             self.config.table_name
         ))
         .bind(collection)
-        .execute(self.pool())
+        .fetch_all(&mut *transaction)
         .await
         .map_err(|error| Error::StoreConnection {
             message: format!("failed to destroy Postgres collection {collection}: {error}"),
         })?;
-        Ok(result.rows_affected() > 0)
+        let destroyed = !rows.is_empty();
+        if destroyed {
+            let keys: Vec<String> = rows
+                .iter()
+                .map(|row| {
+                    row.try_get::<String, _>("key")
+                        .map_err(|error| Error::Deserialization(error.to_string()))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+            self.record_changes(&mut transaction, collection, &key_refs, "delete")
+                .await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!(
+                    "failed to commit Postgres collection destroy for {collection}: {error}"
+                ),
+            })?;
+        Ok(destroyed)
     }
 }
 
@@ -1073,6 +1265,16 @@ impl AsyncDestroyStore for PostgresStore {
                     self.config.table_name
                 ),
             })?;
+        // The change log dies with the store; it is never notified.
+        sqlx::query(&format!("DROP TABLE {}", self.changes_table_name()))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!(
+                    "failed to destroy Postgres change table for {}: {error}",
+                    self.config.table_name
+                ),
+            })?;
         transaction
             .commit()
             .await
@@ -1080,6 +1282,170 @@ impl AsyncDestroyStore for PostgresStore {
                 message: format!("failed to commit Postgres store destruction: {error}"),
             })?;
         Ok(true)
+    }
+}
+
+async fn max_revision(pool: &sqlx::PgPool, changes_table: &str) -> Result<i64> {
+    sqlx::query_scalar(&format!(
+        "SELECT COALESCE(MAX(revision), 0) FROM {changes_table}"
+    ))
+    .fetch_one(pool)
+    .await
+    .map_err(|error| Error::StoreConnection {
+        message: format!("failed to read Postgres change log head: {error}"),
+    })
+}
+
+async fn min_retained_revision(pool: &sqlx::PgPool, changes_table: &str) -> Result<Option<i64>> {
+    sqlx::query_scalar(&format!("SELECT MIN(revision) FROM {changes_table}"))
+        .fetch_one(pool)
+        .await
+        .map_err(|error| Error::StoreConnection {
+            message: format!("failed to read Postgres change log tail: {error}"),
+        })
+}
+
+struct PostgresChangeStream {
+    listener: sqlx::postgres::PgListener,
+    pool: sqlx::PgPool,
+    changes_table: String,
+    /// Last delivered revision; 0 means nothing has been delivered yet.
+    cursor: u64,
+    filter: ChangeFilter,
+}
+
+#[async_trait]
+impl ChangeStream for PostgresChangeStream {
+    async fn recv(&mut self) -> Result<Option<StoreChange>> {
+        loop {
+            let rows = sqlx::query(&format!(
+                "SELECT revision, collection, key, operation, occurred_at FROM {0} \
+                 WHERE revision > $1 ORDER BY revision LIMIT $2",
+                self.changes_table
+            ))
+            .bind(self.cursor as i64)
+            .bind(CHANGE_DRAIN_LIMIT)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to read Postgres change rows: {error}"),
+            })?;
+            for row in rows {
+                let revision = row
+                    .try_get::<i64, _>("revision")
+                    .map_err(|error| Error::Deserialization(error.to_string()))?;
+                let collection = row
+                    .try_get::<String, _>("collection")
+                    .map_err(|error| Error::Deserialization(error.to_string()))?;
+                let key = row
+                    .try_get::<String, _>("key")
+                    .map_err(|error| Error::Deserialization(error.to_string()))?;
+                let operation = match row
+                    .try_get::<String, _>("operation")
+                    .map_err(|error| Error::Deserialization(error.to_string()))?
+                    .as_str()
+                {
+                    "put" => ChangeOperation::Put,
+                    "delete" => ChangeOperation::Delete,
+                    _ => return Err(Error::CorruptedData),
+                };
+                let occurred_at = row
+                    .try_get::<DateTime<Utc>, _>("occurred_at")
+                    .map_err(|error| Error::Deserialization(error.to_string()))?;
+                self.cursor = revision as u64;
+                let change = StoreChange {
+                    cursor: crate::change::ChangeCursor::new(revision.to_string()),
+                    revision: revision as u64,
+                    collection,
+                    key,
+                    operation,
+                    occurred_at,
+                };
+                if self.filter.matches(&change) {
+                    return Ok(Some(change));
+                }
+            }
+
+            // BIGSERIAL burns ids on rolled-back transactions, so a bare
+            // revision gap is not expiry — only missing retained rows are.
+            if self.cursor > 0 {
+                if let Some(min) = min_retained_revision(&self.pool, &self.changes_table).await? {
+                    if min as u64 > self.cursor + 1 {
+                        return Err(Error::ChangeCursorExpired {
+                            requested: self.cursor.to_string(),
+                            oldest: min.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // The listener may silently reconnect and miss notifications, so
+            // wake up periodically even without a signal.
+            tokio::select! {
+                notification = self.listener.recv() => {
+                    notification.map_err(|error| Error::StoreConnection {
+                        message: format!("Postgres change listener failed: {error}"),
+                    })?;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncChangeFeed for PostgresStore {
+    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<Box<dyn ChangeStream + Send>> {
+        if self.config.change_retention == 0 {
+            return Err(Error::InvalidOperation(
+                "change feed is disabled (change_retention = 0)".to_string(),
+            ));
+        }
+        let changes_table = self.changes_table_name();
+        let mut listener = sqlx::postgres::PgListener::connect_with(self.pool())
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to open Postgres change listener: {error}"),
+            })?;
+        listener
+            .listen(CHANGE_CHANNEL)
+            .await
+            .map_err(|error| Error::StoreConnection {
+                message: format!("failed to listen on Postgres change channel: {error}"),
+            })?;
+
+        let cursor = match &request.start {
+            ChangeStart::Beginning => 0,
+            ChangeStart::Latest => max_revision(self.pool(), &changes_table).await? as u64,
+            ChangeStart::After(cursor) => {
+                let requested = cursor
+                    .as_str()
+                    .parse::<u64>()
+                    .map_err(|_| Error::InvalidChangeCursor(cursor.to_string()))?;
+                let max = max_revision(self.pool(), &changes_table).await?;
+                if requested > max as u64 {
+                    return Err(Error::InvalidChangeCursor(cursor.to_string()));
+                }
+                if requested > 0 {
+                    if let Some(min) = min_retained_revision(self.pool(), &changes_table).await? {
+                        if min as u64 > requested + 1 {
+                            return Err(Error::ChangeCursorExpired {
+                                requested: cursor.to_string(),
+                                oldest: min.to_string(),
+                            });
+                        }
+                    }
+                }
+                requested
+            }
+        };
+        Ok(Box::new(PostgresChangeStream {
+            listener,
+            pool: self.pool().clone(),
+            changes_table,
+            cursor,
+            filter: request.filter,
+        }))
     }
 }
 
@@ -1216,6 +1582,235 @@ mod tests {
             store.get("existing", Some("entries")).await.unwrap(),
             Some(Value::utf8("before"))
         );
+
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_change_feed_delivers_and_resumes_across_instances() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("changefeed");
+        let config = PostgresConfig::new(Some(&table)).unwrap();
+        let writer = PostgresStore::from_pool_with_config(pool.clone(), config.clone())
+            .await
+            .unwrap();
+        let reader = PostgresStore::from_pool_with_config(pool.clone(), config)
+            .await
+            .unwrap();
+        let collection = "entries";
+
+        let mut live = reader
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Latest,
+                filter: ChangeFilter::collection(collection),
+            })
+            .await
+            .unwrap();
+
+        writer
+            .put("event-1", Value::integer(1), Some(collection), None)
+            .await
+            .unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), live.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.collection, collection);
+        assert_eq!(first.key, "event-1");
+        assert_eq!(first.operation, ChangeOperation::Put);
+        assert_eq!(
+            reader.get("event-1", Some(collection)).await.unwrap(),
+            Some(Value::integer(1))
+        );
+
+        writer
+            .put("event-2", Value::integer(2), Some(collection), None)
+            .await
+            .unwrap();
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), live.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.key, "event-2");
+        assert!(second.revision > first.revision);
+
+        let mut resumed = reader
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::After(first.cursor),
+                filter: ChangeFilter::collection(collection),
+            })
+            .await
+            .unwrap();
+        let replayed = tokio::time::timeout(std::time::Duration::from_secs(5), resumed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(replayed.cursor, second.cursor);
+
+        assert!(writer.delete("event-2", Some(collection)).await.unwrap());
+        let deleted = tokio::time::timeout(std::time::Duration::from_secs(5), resumed.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted.key, "event-2");
+        assert_eq!(deleted.operation, ChangeOperation::Delete);
+
+        assert!(writer.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_destroy_collection_emits_delete_changes() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("destroyfeed");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+        for key in ["a", "b", "c"] {
+            store
+                .put(key, Value::null(), Some("entries"), None)
+                .await
+                .unwrap();
+        }
+        let mut changes = store
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Beginning,
+                filter: ChangeFilter::collection("entries"),
+            })
+            .await
+            .unwrap();
+
+        for key in ["a", "b", "c"] {
+            let change = tokio::time::timeout(std::time::Duration::from_secs(5), changes.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(change.key, key);
+            assert_eq!(change.operation, ChangeOperation::Put);
+        }
+
+        assert!(store.destroy_collection("entries").await.unwrap());
+        let mut deleted = Vec::new();
+        for _ in 0..3 {
+            let change = tokio::time::timeout(std::time::Duration::from_secs(5), changes.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(change.operation, ChangeOperation::Delete);
+            deleted.push(change.key);
+        }
+        deleted.sort();
+        assert_eq!(deleted, vec!["a", "b", "c"]);
+        assert!(!store.destroy_collection("entries").await.unwrap());
+
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_change_feed_reports_trimmed_cursor() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("trimfeed");
+        let store = PostgresStore::from_pool_with_config(
+            pool.clone(),
+            PostgresConfig::new(Some(&table))
+                .unwrap()
+                .with_change_retention(3),
+        )
+        .await
+        .unwrap();
+
+        for index in 0..5 {
+            store
+                .put(
+                    &format!("k{index}"),
+                    Value::integer(index),
+                    Some("entries"),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let mut replay = store
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Beginning,
+                filter: ChangeFilter::collection("entries"),
+            })
+            .await
+            .unwrap();
+        let first = replay.recv().await.unwrap().unwrap();
+        assert_eq!(first.key, "k0");
+
+        // Retention 3 keeps k2..k4, so resuming after k0 must report expiry.
+        let result = store
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::After(first.cursor),
+                filter: ChangeFilter::default(),
+            })
+            .await;
+        assert!(matches!(result, Err(Error::ChangeCursorExpired { .. })));
+
+        // Resuming from a retained cursor still works.
+        let mut live = store
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Latest,
+                filter: ChangeFilter::collection("entries"),
+            })
+            .await
+            .unwrap();
+        store
+            .put("k5", Value::integer(5), Some("entries"), None)
+            .await
+            .unwrap();
+        let change = tokio::time::timeout(std::time::Duration::from_secs(5), live.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.key, "k5");
+
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_change_retention_zero_disables_recording() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("zerofeed");
+        let store = PostgresStore::from_pool_with_config(
+            pool.clone(),
+            PostgresConfig::new(Some(&table))
+                .unwrap()
+                .with_change_retention(0),
+        )
+        .await
+        .unwrap();
+
+        store
+            .put("k", Value::null(), Some("entries"), None)
+            .await
+            .unwrap();
+        store.delete("k", Some("entries")).await.unwrap();
+
+        let recorded: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}_changes"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(recorded, 0);
+
+        let error = store
+            .subscribe(ChangeFeedRequest::default())
+            .await
+            .err()
+            .expect("subscribe must fail when change_retention is 0");
+        assert!(error.to_string().contains("disabled"));
 
         assert!(store.destroy().await.unwrap());
     }

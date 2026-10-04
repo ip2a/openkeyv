@@ -107,13 +107,29 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
         }
 
         #[cfg(feature = "postgres")]
-        "postgres" => Ok(StoreHandle::basic(std::sync::Arc::new(
-            crate::store::postgres::PostgresStore::new(
-                &required(&config.config, "url")?,
+        "postgres" => {
+            let mut store_config = crate::store::postgres::PostgresConfig::new(
                 string(&config.config, "table").as_deref(),
-            )
-            .await?,
-        ))),
+            )?;
+            if let Some(retention) = optional_usize(&config.config, "change_retention") {
+                store_config = store_config.with_change_retention(retention);
+            }
+            let store = std::sync::Arc::new(
+                crate::store::postgres::PostgresStore::new_with_config(
+                    &required(&config.config, "url")?,
+                    store_config,
+                )
+                .await?,
+            );
+            let base = store.clone();
+            Ok(StoreHandle::with_capabilities(
+                store,
+                Some(base.clone()),
+                Some(base.clone()),
+                None,
+                Some(base),
+            ))
+        }
         #[cfg(feature = "sqlite")]
         "sqlite" => Ok(StoreHandle::basic(std::sync::Arc::new(
             crate::store::sqlite::SqliteStore::new(

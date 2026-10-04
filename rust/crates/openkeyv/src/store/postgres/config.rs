@@ -2,11 +2,14 @@ use super::error::{Error, Result};
 
 const DEFAULT_COLLECTION: &str = "default_collection";
 const DEFAULT_TABLE: &str = "kv_store";
+const DEFAULT_CHANGE_RETENTION: usize = 10_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PostgresConfig {
     pub table_name: String,
     pub default_collection: String,
+    /// Change rows kept in the log table. 0 disables recording and subscribe().
+    pub change_retention: usize,
 }
 
 impl PostgresConfig {
@@ -16,7 +19,13 @@ impl PostgresConfig {
         Ok(Self {
             table_name,
             default_collection: DEFAULT_COLLECTION.to_string(),
+            change_retention: DEFAULT_CHANGE_RETENTION,
         })
+    }
+
+    pub fn with_change_retention(mut self, retention: usize) -> Self {
+        self.change_retention = retention;
+        self
     }
 }
 
