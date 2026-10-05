@@ -126,7 +126,7 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
                 store,
                 Some(base.clone()),
                 Some(base.clone()),
-                None,
+                Some(base.clone()),
                 Some(base),
             ))
         }

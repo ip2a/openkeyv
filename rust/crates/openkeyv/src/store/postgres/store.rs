@@ -6,8 +6,9 @@ use crate::change::{
 };
 use crate::entry::ManagedEntry;
 use crate::protocol::{
-    AsyncChangeFeed, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
-    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
+    CompareAndSwapResult, Revision, RevisionedValue,
 };
 use crate::value::Value;
 use async_trait::async_trait;
@@ -26,6 +27,55 @@ struct StoredRow {
     key: String,
     raw_entry: Bytes,
     expires_at: Option<DateTime<Utc>>,
+}
+
+/// One information_schema.columns row: position, name, type, nullability,
+/// default, and identity flags, in strict comparison order.
+type ColumnRow = (
+    i32,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+);
+
+async fn inspect_columns(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    table: &str,
+) -> Result<Vec<ColumnRow>> {
+    sqlx::query(
+        "SELECT ordinal_position, column_name, data_type, udt_name, is_nullable, \
+                column_default, is_identity, is_generated \
+         FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = $1 \
+         ORDER BY ordinal_position",
+    )
+    .bind(table)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| Error::StoreSetup {
+        message: format!("failed to inspect Postgres table {table}: {error}"),
+    })?
+    .into_iter()
+    .map(|row| {
+        Ok((
+            row.try_get::<i32, _>("ordinal_position")?,
+            row.try_get::<String, _>("column_name")?,
+            row.try_get::<String, _>("data_type")?,
+            row.try_get::<String, _>("udt_name")?,
+            row.try_get::<String, _>("is_nullable")?,
+            row.try_get::<Option<String>, _>("column_default")?,
+            row.try_get::<String, _>("is_identity")?,
+            row.try_get::<String, _>("is_generated")?,
+        ))
+    })
+    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
+    .map_err(|error| Error::StoreSetup {
+        message: format!("invalid Postgres column metadata for {table}: {error}"),
+    })
 }
 
 /// PostgreSQL-backed key-value store.
@@ -107,6 +157,61 @@ impl PostgresStore {
         }
     }
 
+    fn decode_revision(bytes: Vec<u8>) -> Result<Revision> {
+        let revision: [u8; Revision::BYTE_LEN] = bytes.try_into().map_err(|_| {
+            Error::Deserialization(format!(
+                "Postgres revision must be exactly {} bytes",
+                Revision::BYTE_LEN
+            ))
+        })?;
+        Ok(Revision::from_bytes(revision))
+    }
+
+    /// Read the live value and revision for a conflict report inside the
+    /// caller's transaction. Absent and expired rows both report `None`.
+    async fn current_revisioned_value(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        table: &str,
+        collection: &str,
+        key: &str,
+    ) -> Result<Option<RevisionedValue>> {
+        let row = sqlx::query(&format!(
+            "SELECT entry, expires_at, revision FROM {table} \
+             WHERE collection = $1 AND key = $2",
+        ))
+        .bind(collection)
+        .bind(key)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|error| Error::StoreConnection {
+            message: format!("failed to read current Postgres entry for key {key}: {error}"),
+        })?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let raw_entry = Bytes::from(
+            row.try_get::<Vec<u8>, _>("entry")
+                .map_err(|error| Error::Deserialization(error.to_string()))?,
+        );
+        let expires_at = row
+            .try_get::<Option<DateTime<Utc>>, _>("expires_at")
+            .map_err(|error| Error::Deserialization(error.to_string()))?;
+        let revision = Self::decode_revision(
+            row.try_get::<Vec<u8>, _>("revision")
+                .map_err(|error| Error::Deserialization(error.to_string()))?,
+        )?;
+        let entry = Self::decode_entry(key, raw_entry, expires_at)?;
+        if entry.is_expired() {
+            return Ok(None);
+        }
+        let ttl = entry.ttl();
+        Ok(Some(RevisionedValue {
+            value: entry.value,
+            revision,
+            ttl,
+        }))
+    }
+
     /// Append change rows for `keys` inside the caller's transaction, trim the
     /// log to the configured retention, and wake subscribers once.
     async fn record_changes(
@@ -169,6 +274,7 @@ impl PostgresStore {
                 key TEXT NOT NULL,\
                 entry BYTEA NOT NULL,\
                 expires_at TIMESTAMPTZ,\
+                revision BYTEA NOT NULL DEFAULT gen_random_uuid(),\
                 PRIMARY KEY (collection, key)\
             )",
             self.config.table_name
@@ -195,42 +301,7 @@ impl PostgresStore {
             ),
         })?;
 
-        let columns = sqlx::query(
-            "SELECT ordinal_position, column_name, data_type, udt_name, is_nullable, \
-                    column_default, is_identity, is_generated \
-             FROM information_schema.columns \
-             WHERE table_schema = current_schema() AND table_name = $1 \
-             ORDER BY ordinal_position",
-        )
-        .bind(&self.config.table_name)
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(|error| Error::StoreSetup {
-            message: format!(
-                "failed to inspect Postgres table {}: {error}",
-                self.config.table_name
-            ),
-        })?
-        .into_iter()
-        .map(|row| {
-            Ok((
-                row.try_get::<i32, _>("ordinal_position")?,
-                row.try_get::<String, _>("column_name")?,
-                row.try_get::<String, _>("data_type")?,
-                row.try_get::<String, _>("udt_name")?,
-                row.try_get::<String, _>("is_nullable")?,
-                row.try_get::<Option<String>, _>("column_default")?,
-                row.try_get::<String, _>("is_identity")?,
-                row.try_get::<String, _>("is_generated")?,
-            ))
-        })
-        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
-        .map_err(|error| Error::StoreSetup {
-            message: format!(
-                "invalid Postgres column metadata for {}: {error}",
-                self.config.table_name
-            ),
-        })?;
+        let mut columns = inspect_columns(&mut transaction, &self.config.table_name).await?;
 
         let expected_columns = vec![
             (
@@ -273,7 +344,34 @@ impl PostgresStore {
                 "NO".to_string(),
                 "NEVER".to_string(),
             ),
+            (
+                5,
+                "revision".to_string(),
+                "bytea".to_string(),
+                "bytea".to_string(),
+                "NO".to_string(),
+                Some("gen_random_uuid()".to_string()),
+                "NO".to_string(),
+                "NEVER".to_string(),
+            ),
         ];
+        // Pre-revision tables are migrated in place: the default backfills a
+        // fresh opaque revision for every existing row.
+        if columns.len() == 4 && columns[..] == expected_columns[..4] {
+            sqlx::query(&format!(
+                "ALTER TABLE {} ADD COLUMN revision BYTEA NOT NULL DEFAULT gen_random_uuid()",
+                self.config.table_name
+            ))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| Error::StoreSetup {
+                message: format!(
+                    "failed to add the revision column to Postgres table {}: {error}",
+                    self.config.table_name
+                ),
+            })?;
+            columns = inspect_columns(&mut transaction, &self.config.table_name).await?;
+        }
         if columns != expected_columns {
             return Err(Error::StoreSetup {
                 message: format!(
@@ -590,6 +688,9 @@ impl AsyncKeyValue for PostgresStore {
             Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
             None => ManagedEntry::new(value),
         };
+        // Generate the revision before any backend side effect so a randomness
+        // failure cannot leave a partial write behind.
+        let revision = Revision::fresh()?;
         let mut transaction =
             self.pool()
                 .begin()
@@ -598,16 +699,18 @@ impl AsyncKeyValue for PostgresStore {
                     message: format!("failed to start Postgres put transaction: {error}"),
                 })?;
         sqlx::query(&format!(
-            "INSERT INTO {} (collection, key, entry, expires_at) \
-             VALUES ($1, $2, $3, $4) \
+            "INSERT INTO {} (collection, key, entry, expires_at, revision) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (collection, key) DO UPDATE SET \
-             entry = EXCLUDED.entry, expires_at = EXCLUDED.expires_at",
+             entry = EXCLUDED.entry, expires_at = EXCLUDED.expires_at, \
+             revision = EXCLUDED.revision",
             self.config.table_name
         ))
         .bind(collection)
         .bind(key)
         .bind(entry.encode())
         .bind(entry.expires_at)
+        .bind(revision.as_bytes().to_vec())
         .execute(&mut *transaction)
         .await
         .map_err(|error| Error::StoreConnection {
@@ -892,14 +995,18 @@ impl AsyncKeyValue for PostgresStore {
         let mut final_keys = Vec::with_capacity(final_indices.len());
         let mut entries = Vec::with_capacity(final_indices.len());
         let mut expires_at = Vec::with_capacity(final_indices.len());
+        let mut revisions = Vec::with_capacity(final_indices.len());
         for index in final_indices {
             let entry = match ttl {
                 Some(seconds) => ManagedEntry::with_ttl(values[index].clone(), seconds)?,
                 None => ManagedEntry::new(values[index].clone()),
             };
+            // Revisions are generated before any backend side effect.
+            let revision = Revision::fresh()?;
             final_keys.push(keys[index].as_str());
             entries.push(entry.encode());
             expires_at.push(entry.expires_at);
+            revisions.push(revision.as_bytes().to_vec());
         }
 
         let mut transaction =
@@ -910,18 +1017,20 @@ impl AsyncKeyValue for PostgresStore {
                     message: format!("failed to start Postgres batch put transaction: {error}"),
                 })?;
         sqlx::query(&format!(
-            "INSERT INTO {0} (collection, key, entry, expires_at) \
-             SELECT $1, rows.key, rows.entry, rows.expires_at \
-             FROM UNNEST($2::text[], $3::bytea[], $4::timestamptz[]) \
-                  AS rows(key, entry, expires_at) \
+            "INSERT INTO {0} (collection, key, entry, expires_at, revision) \
+             SELECT $1, rows.key, rows.entry, rows.expires_at, rows.revision \
+             FROM UNNEST($2::text[], $3::bytea[], $4::timestamptz[], $5::bytea[]) \
+                  AS rows(key, entry, expires_at, revision) \
              ON CONFLICT (collection, key) DO UPDATE SET \
-             entry = EXCLUDED.entry, expires_at = EXCLUDED.expires_at",
+             entry = EXCLUDED.entry, expires_at = EXCLUDED.expires_at, \
+             revision = EXCLUDED.revision",
             self.config.table_name
         ))
         .bind(collection)
         .bind(&final_keys)
         .bind(&entries)
         .bind(&expires_at)
+        .bind(&revisions)
         .execute(&mut *transaction)
         .await
         .map_err(|error| Error::StoreConnection {
@@ -983,6 +1092,223 @@ impl AsyncKeyValue for PostgresStore {
                 message: format!("failed to commit Postgres batch delete: {error}"),
             })?;
         Ok(deleted_keys.len())
+    }
+}
+
+#[async_trait]
+impl AsyncCompareAndSwap for PostgresStore {
+    async fn get_with_revision(
+        &self,
+        key: &str,
+        collection: Option<&str>,
+    ) -> Result<Option<RevisionedValue>> {
+        let collection = self.collection_name(collection)?;
+        Self::validate_text_identity("key", key)?;
+        let row = sqlx::query(&format!(
+            "SELECT entry, expires_at, revision FROM {} \
+             WHERE collection = $1 AND key = $2",
+            self.config.table_name
+        ))
+        .bind(collection)
+        .bind(key)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| Error::StoreConnection {
+            message: format!("failed to read Postgres revision for key {key}: {error}"),
+        })?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let raw_entry = Bytes::from(
+            row.try_get::<Vec<u8>, _>("entry")
+                .map_err(|error| Error::Deserialization(error.to_string()))?,
+        );
+        let expires_at = row
+            .try_get::<Option<DateTime<Utc>>, _>("expires_at")
+            .map_err(|error| Error::Deserialization(error.to_string()))?;
+        let revision = Self::decode_revision(
+            row.try_get::<Vec<u8>, _>("revision")
+                .map_err(|error| Error::Deserialization(error.to_string()))?,
+        )?;
+        let entry = Self::decode_entry(key, raw_entry, expires_at)?;
+        if entry.is_expired() {
+            return Ok(None);
+        }
+        let ttl = entry.ttl();
+        Ok(Some(RevisionedValue {
+            value: entry.value,
+            revision,
+            ttl,
+        }))
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected: Option<&Revision>,
+        value: Value,
+        collection: Option<&str>,
+        ttl: Option<f64>,
+    ) -> Result<CompareAndSwapResult> {
+        if let Some(seconds) = ttl {
+            ManagedEntry::validate_ttl(seconds)?;
+        }
+        let collection = self.collection_name(collection)?;
+        Self::validate_text_identity("key", key)?;
+        let entry = match ttl {
+            Some(seconds) => ManagedEntry::with_ttl(value, seconds)?,
+            None => ManagedEntry::new(value),
+        };
+        // Generate the new revision before taking any backend side effect so
+        // a randomness failure cannot leave a partial write behind.
+        let new_revision = Revision::fresh()?;
+        let mut transaction =
+            self.pool()
+                .begin()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!(
+                        "failed to start Postgres compare-and-swap transaction: {error}"
+                    ),
+                })?;
+        let applied = match expected {
+            // Create-if-absent: a live row conflicts, an expired row is
+            // replaced exactly like an absent one.
+            None => {
+                sqlx::query(&format!(
+                    "INSERT INTO {0} (collection, key, entry, expires_at, revision) \
+                     VALUES ($1, $2, $3, $4, $5) \
+                     ON CONFLICT (collection, key) DO UPDATE SET \
+                     entry = EXCLUDED.entry, expires_at = EXCLUDED.expires_at, \
+                     revision = EXCLUDED.revision \
+                     WHERE {0}.expires_at IS NOT NULL AND {0}.expires_at <= now() \
+                     RETURNING key",
+                    self.config.table_name
+                ))
+                .bind(collection)
+                .bind(key)
+                .bind(entry.encode())
+                .bind(entry.expires_at)
+                .bind(new_revision.as_bytes().to_vec())
+                .fetch_all(&mut *transaction)
+                .await
+            }
+            Some(expected) => {
+                sqlx::query(&format!(
+                    "UPDATE {0} SET entry = $3, expires_at = $4, revision = $5 \
+                     WHERE collection = $1 AND key = $2 AND revision = $6 \
+                       AND (expires_at IS NULL OR expires_at > now()) \
+                     RETURNING key",
+                    self.config.table_name
+                ))
+                .bind(collection)
+                .bind(key)
+                .bind(entry.encode())
+                .bind(entry.expires_at)
+                .bind(new_revision.as_bytes().to_vec())
+                .bind(expected.as_bytes().to_vec())
+                .fetch_all(&mut *transaction)
+                .await
+            }
+        }
+        .map_err(|error| Error::StoreConnection {
+            message: format!("failed to compare-and-swap Postgres key {key}: {error}"),
+        })?;
+        if !applied.is_empty() {
+            self.record_changes(&mut transaction, collection, &[key], "put")
+                .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!(
+                        "failed to commit Postgres compare-and-swap for key {key}: {error}"
+                    ),
+                })?;
+            Ok(CompareAndSwapResult::Applied {
+                revision: new_revision,
+            })
+        } else {
+            let current = Self::current_revisioned_value(
+                &mut transaction,
+                &self.config.table_name,
+                collection,
+                key,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!(
+                        "failed to finish Postgres compare-and-swap conflict for key {key}: {error}"
+                    ),
+                })?;
+            Ok(CompareAndSwapResult::Conflict { current })
+        }
+    }
+
+    async fn compare_and_delete(
+        &self,
+        key: &str,
+        expected: &Revision,
+        collection: Option<&str>,
+    ) -> Result<CompareAndDeleteResult> {
+        let collection = self.collection_name(collection)?;
+        Self::validate_text_identity("key", key)?;
+        let mut transaction =
+            self.pool()
+                .begin()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!(
+                        "failed to start Postgres compare-and-delete transaction: {error}"
+                    ),
+                })?;
+        let deleted = sqlx::query(&format!(
+            "DELETE FROM {0} WHERE collection = $1 AND key = $2 AND revision = $3 \
+               AND (expires_at IS NULL OR expires_at > now()) \
+             RETURNING key",
+            self.config.table_name
+        ))
+        .bind(collection)
+        .bind(key)
+        .bind(expected.as_bytes().to_vec())
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| Error::StoreConnection {
+            message: format!("failed to compare-and-delete Postgres key {key}: {error}"),
+        })?;
+        if !deleted.is_empty() {
+            self.record_changes(&mut transaction, collection, &[key], "delete")
+                .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!(
+                        "failed to commit Postgres compare-and-delete for key {key}: {error}"
+                    ),
+                })?;
+            Ok(CompareAndDeleteResult::Deleted)
+        } else {
+            let current = Self::current_revisioned_value(
+                &mut transaction,
+                &self.config.table_name,
+                collection,
+                key,
+            )
+            .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| Error::StoreConnection {
+                    message: format!(
+                        "failed to finish Postgres compare-and-delete conflict for key {key}: {error}"
+                    ),
+                })?;
+            Ok(CompareAndDeleteResult::Conflict { current })
+        }
     }
 }
 
@@ -1539,6 +1865,27 @@ mod tests {
         );
         assert_invalid_key(store.keys(Some("entries\0"), Some(0)).await);
         assert_invalid_key(store.destroy_collection("entries\0").await);
+        assert_invalid_key(store.get_with_revision("bad\0key", Some("entries")).await);
+        assert_invalid_key(
+            store
+                .compare_and_swap(
+                    "bad\0key",
+                    None,
+                    Value::utf8("value"),
+                    Some("entries"),
+                    None,
+                )
+                .await,
+        );
+        assert_invalid_key(
+            store
+                .compare_and_delete(
+                    "bad\0key",
+                    &Revision::from_bytes([1u8; 16]),
+                    Some("entries"),
+                )
+                .await,
+        );
     }
 
     #[tokio::test]
@@ -1811,6 +2158,458 @@ mod tests {
             .err()
             .expect("subscribe must fail when change_retention is 0");
         assert!(error.to_string().contains("disabled"));
+
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_cas_versioned_read_missing_is_none() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("casvread");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_with_revision("missing", Some("entries"))
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_cas_create_if_absent_and_conflict_on_existing() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("cascreate");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+
+        let created = store
+            .compare_and_swap("k", None, Value::utf8("v1"), Some("entries"), None)
+            .await
+            .unwrap();
+        let new_revision = match created {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+
+        let conflict = store
+            .compare_and_swap("k", None, Value::utf8("v2"), Some("entries"), None)
+            .await
+            .unwrap();
+        match conflict {
+            CompareAndSwapResult::Conflict {
+                current: Some(current),
+            } => {
+                assert_eq!(current.value, Value::utf8("v1"));
+                assert_eq!(current.revision, new_revision);
+                assert_eq!(current.ttl, None);
+            }
+            other => panic!("expected conflict with current, got {other:?}"),
+        }
+
+        // An expired row is replaced exactly like an absent one.
+        store
+            .put("exp", Value::utf8("gone"), Some("entries"), Some(0.01))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let rebuilt = store
+            .compare_and_swap("exp", None, Value::utf8("rebuilt"), Some("entries"), None)
+            .await
+            .unwrap();
+        assert!(matches!(rebuilt, CompareAndSwapResult::Applied { .. }));
+
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_cas_exact_revision_update_and_stale_conflict() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("casupdate");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+
+        let created = store
+            .compare_and_swap("k", None, Value::utf8("v1"), Some("entries"), None)
+            .await
+            .unwrap();
+        let observed = match created {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+
+        let applied = store
+            .compare_and_swap(
+                "k",
+                Some(&observed),
+                Value::utf8("v2"),
+                Some("entries"),
+                None,
+            )
+            .await
+            .unwrap();
+        let new_revision = match applied {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+        assert_ne!(new_revision, observed);
+
+        let stale = store
+            .compare_and_swap(
+                "k",
+                Some(&observed),
+                Value::utf8("v3"),
+                Some("entries"),
+                None,
+            )
+            .await
+            .unwrap();
+        match stale {
+            CompareAndSwapResult::Conflict {
+                current: Some(current),
+            } => {
+                assert_eq!(current.value, Value::utf8("v2"));
+                assert_eq!(current.revision, new_revision);
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_cas_same_value_write_changes_revision() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("cassame");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+
+        let observed = store
+            .compare_and_swap("k", None, Value::utf8("same"), Some("entries"), None)
+            .await
+            .unwrap();
+        let revision_before = match observed {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+
+        let again = store
+            .compare_and_swap(
+                "k",
+                Some(&revision_before),
+                Value::utf8("same"),
+                Some("entries"),
+                None,
+            )
+            .await
+            .unwrap();
+        match again {
+            CompareAndSwapResult::Applied { revision } => {
+                assert_ne!(revision, revision_before);
+            }
+            _ => panic!("expected applied"),
+        }
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_compare_and_delete_success_stale_and_missing_conflict() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("casdel");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+
+        let missing = store
+            .compare_and_delete("missing", &Revision::from_bytes([1u8; 16]), Some("entries"))
+            .await
+            .unwrap();
+        match missing {
+            CompareAndDeleteResult::Conflict { current: None } => {}
+            other => panic!("expected missing conflict, got {other:?}"),
+        }
+
+        let created = store
+            .compare_and_swap("k", None, Value::utf8("v"), Some("entries"), None)
+            .await
+            .unwrap();
+        let revision = match created {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+
+        let stale = store
+            .compare_and_delete("k", &Revision::from_bytes([9u8; 16]), Some("entries"))
+            .await
+            .unwrap();
+        match stale {
+            CompareAndDeleteResult::Conflict {
+                current: Some(current),
+            } => {
+                assert_eq!(current.value, Value::utf8("v"));
+                assert_eq!(current.revision, revision);
+            }
+            other => panic!("expected stale conflict, got {other:?}"),
+        }
+
+        let deleted = store
+            .compare_and_delete("k", &revision, Some("entries"))
+            .await
+            .unwrap();
+        assert!(matches!(deleted, CompareAndDeleteResult::Deleted));
+        assert_eq!(
+            store.get_with_revision("k", Some("entries")).await.unwrap(),
+            None
+        );
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_delete_recreate_rejects_stale_revision() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("casaba");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+
+        let first = store
+            .compare_and_swap("k", None, Value::utf8("v1"), Some("entries"), None)
+            .await
+            .unwrap();
+        let first_revision = match first {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+
+        let observed = store
+            .get_with_revision("k", Some("entries"))
+            .await
+            .unwrap()
+            .unwrap();
+        store
+            .compare_and_delete("k", &observed.revision, Some("entries"))
+            .await
+            .unwrap();
+        store
+            .compare_and_swap("k", None, Value::utf8("v2"), Some("entries"), None)
+            .await
+            .unwrap();
+
+        let stale = store
+            .compare_and_swap(
+                "k",
+                Some(&first_revision),
+                Value::utf8("v3"),
+                Some("entries"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(stale, CompareAndSwapResult::Conflict { .. }));
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_ordinary_put_invalidates_observed_revision() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("casinvalidate");
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+
+        let observed = store.get_with_revision("k", Some("entries")).await.unwrap();
+        assert!(observed.is_none());
+
+        store
+            .compare_and_swap("k", None, Value::utf8("v1"), Some("entries"), None)
+            .await
+            .unwrap();
+        let revision = store
+            .get_with_revision("k", Some("entries"))
+            .await
+            .unwrap()
+            .unwrap()
+            .revision;
+
+        store
+            .put("k", Value::utf8("v2"), Some("entries"), None)
+            .await
+            .unwrap();
+
+        let stale = store
+            .compare_and_swap(
+                "k",
+                Some(&revision),
+                Value::utf8("v3"),
+                Some("entries"),
+                None,
+            )
+            .await
+            .unwrap();
+        match stale {
+            CompareAndSwapResult::Conflict {
+                current: Some(current),
+            } => {
+                assert_eq!(current.value, Value::utf8("v2"));
+                assert_ne!(current.revision, revision);
+            }
+            other => panic!("expected conflict after ordinary put, got {other:?}"),
+        }
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_cas_concurrent_contenders_produce_one_success() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("casrace");
+        let store = std::sync::Arc::new(
+            PostgresStore::from_pool(pool.clone(), Some(&table))
+                .await
+                .unwrap(),
+        );
+
+        let created = store
+            .compare_and_swap("k", None, Value::utf8("seed"), Some("entries"), None)
+            .await
+            .unwrap();
+        let observed = match created {
+            CompareAndSwapResult::Applied { revision } => revision,
+            _ => panic!("expected applied"),
+        };
+
+        let contenders: usize = 32;
+        let mut handles = Vec::with_capacity(contenders);
+        for index in 0..contenders {
+            let store = store.clone();
+            handles.push(tokio::spawn(async move {
+                store
+                    .compare_and_swap(
+                        "k",
+                        Some(&observed),
+                        Value::utf8(format!("contender-{index}")),
+                        Some("entries"),
+                        None,
+                    )
+                    .await
+            }));
+        }
+        let mut applied = 0;
+        for handle in handles {
+            match handle.await.unwrap().unwrap() {
+                CompareAndSwapResult::Applied { .. } => applied += 1,
+                CompareAndSwapResult::Conflict { .. } => {}
+            }
+        }
+        assert_eq!(applied, 1, "exactly one contender must succeed");
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_cas_create_if_absent_contention_one_success() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("cascreaterace");
+        let store = std::sync::Arc::new(
+            PostgresStore::from_pool(pool.clone(), Some(&table))
+                .await
+                .unwrap(),
+        );
+
+        let contenders: usize = 32;
+        let mut handles = Vec::with_capacity(contenders);
+        for index in 0..contenders {
+            let store = store.clone();
+            handles.push(tokio::spawn(async move {
+                store
+                    .compare_and_swap(
+                        "absent",
+                        None,
+                        Value::utf8(format!("contender-{index}")),
+                        Some("entries"),
+                        None,
+                    )
+                    .await
+            }));
+        }
+        let mut applied = 0;
+        for handle in handles {
+            match handle.await.unwrap().unwrap() {
+                CompareAndSwapResult::Applied { .. } => applied += 1,
+                CompareAndSwapResult::Conflict { .. } => {}
+            }
+        }
+        assert_eq!(applied, 1, "exactly one create-if-absent must succeed");
+        assert!(store.destroy().await.unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENKEYV_POSTGRES_URL"]
+    async fn postgres_migrates_legacy_schema_by_adding_revision_column() {
+        let pool = sqlx::PgPool::connect(&integration_url()).await.unwrap();
+        let table = table_name("caslegacy");
+        sqlx::query(&format!(
+            "CREATE TABLE {table} (\
+                collection TEXT NOT NULL,\
+                key TEXT NOT NULL,\
+                entry BYTEA NOT NULL,\
+                expires_at TIMESTAMPTZ,\
+                PRIMARY KEY (collection, key)\
+            )"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let legacy_entry = ManagedEntry::new(Value::utf8("legacy"));
+        sqlx::query(&format!(
+            "INSERT INTO {table} (collection, key, entry, expires_at) \
+             VALUES ($1, $2, $3, $4)"
+        ))
+        .bind("entries")
+        .bind("existing")
+        .bind(legacy_entry.encode())
+        .bind(legacy_entry.expires_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let store = PostgresStore::from_pool(pool.clone(), Some(&table))
+            .await
+            .unwrap();
+
+        // The pre-existing row is readable and carries a backfilled revision.
+        let observed = store
+            .get_with_revision("existing", Some("entries"))
+            .await
+            .unwrap()
+            .expect("legacy row must survive migration");
+        assert_eq!(observed.value, Value::utf8("legacy"));
+
+        // CAS keeps working against the migrated table.
+        let updated = store
+            .compare_and_swap(
+                "existing",
+                Some(&observed.revision),
+                Value::utf8("updated"),
+                Some("entries"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(updated, CompareAndSwapResult::Applied { .. }));
 
         assert!(store.destroy().await.unwrap());
     }
