@@ -6,7 +6,7 @@ Async key-value store with a pluggable Rust core and Python bindings.
 
 ```toml
 [dependencies]
-openkeyv = "0.3.0"
+openkeyv = "0.4.0"
 ```
 
 ## Python
