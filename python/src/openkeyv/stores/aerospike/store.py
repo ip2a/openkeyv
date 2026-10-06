@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from math import ceil
 from typing import SupportsFloat, cast, overload
 
+from typing_extensions import Self
+
 from openkeyv._internal import _decode_entry, _encode_entry
 from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.compound import compound_key, get_keys_from_compound_keys, uncompound_key
@@ -151,7 +153,7 @@ class AerospikeStore:
             await self._setup()
             self._setup_complete = True
 
-    async def __aenter__(self) -> "AerospikeStore":
+    async def __aenter__(self) -> Self:
         await self.setup()
         return self
 

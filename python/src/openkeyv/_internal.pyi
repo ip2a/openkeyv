@@ -1,6 +1,6 @@
 from typing import TypeAlias
 
-Value: TypeAlias = bytes | str | int | float | bool | None | list["Value"] | dict[str, "Value"]
+Value: TypeAlias = bytes | str | int | float | bool | list[Value] | dict[str, Value] | None
 TtlResult: TypeAlias = tuple[Value | None, float | None]
 
 class Revision:

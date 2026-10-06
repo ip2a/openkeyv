@@ -2,6 +2,7 @@ import sys
 from types import ModuleType
 
 import pytest
+from typing_extensions import Self
 
 from openkeyv._internal import _encode_entry
 from openkeyv.errors import InvalidKeyError
@@ -12,7 +13,7 @@ class FakeRegistryKey:
         self.hive = hive
         self.path = path
 
-    def __enter__(self) -> "FakeRegistryKey":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:

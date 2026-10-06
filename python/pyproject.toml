@@ -66,7 +66,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "pytest>=8.4.2",
-    "ruff>=0.14.2",
+    "ruff==0.16.10",
 ]
 
 [tool.pytest.ini_options]
@@ -126,7 +126,10 @@ lint.extend-select = [
 ]
 line-length = 140
 
+# Public signatures keep positional parameters for backward compatibility.
 [tool.ruff.lint.extend-per-file-ignores]
+"src/openkeyv/_utils/sanitize.py" = ["PLR0917"]
+"src/openkeyv/wrappers/logging/wrapper.py" = ["PLR0917"]
 "**/tests/*.py" = [
     "S101",
     "S105",

@@ -4,6 +4,8 @@ from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any, SupportsFloat, cast, overload
 
+from typing_extensions import Self
+
 from openkeyv._utils.beartype import bear_enforce
 from openkeyv._utils.constants import DEFAULT_COLLECTION_NAME
 from openkeyv._utils.managed_entry import ManagedEntry
@@ -184,7 +186,7 @@ class ElasticsearchStore:
         await self.setup()
         await self._setup_collection(collection=collection)
 
-    async def __aenter__(self) -> "ElasticsearchStore":
+    async def __aenter__(self) -> Self:
         await self.setup()
         return self
 

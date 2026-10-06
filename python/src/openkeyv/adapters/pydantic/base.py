@@ -12,7 +12,7 @@ from openkeyv.protocols.key_value import AsyncKeyValue, StoreValue
 T = TypeVar("T")
 
 
-class BasePydanticAdapter(Generic[T], ABC):
+class BasePydanticAdapter(ABC, Generic[T]):
     """Base adapter using Pydantic TypeAdapter for validation and serialization.
 
     This abstract base class provides shared functionality for adapters that use
