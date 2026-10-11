@@ -274,7 +274,7 @@ impl PostgresStore {
                 key TEXT NOT NULL,\
                 entry BYTEA NOT NULL,\
                 expires_at TIMESTAMPTZ,\
-                revision BYTEA NOT NULL DEFAULT gen_random_uuid(),\
+                revision BYTEA NOT NULL DEFAULT decode(md5(gen_random_uuid()::text), 'hex'),\
                 PRIMARY KEY (collection, key)\
             )",
             self.config.table_name
@@ -350,7 +350,7 @@ impl PostgresStore {
                 "bytea".to_string(),
                 "bytea".to_string(),
                 "NO".to_string(),
-                Some("gen_random_uuid()".to_string()),
+                Some("decode(md5((gen_random_uuid())::text), 'hex'::text)".to_string()),
                 "NO".to_string(),
                 "NEVER".to_string(),
             ),
@@ -359,7 +359,8 @@ impl PostgresStore {
         // fresh opaque revision for every existing row.
         if columns.len() == 4 && columns[..] == expected_columns[..4] {
             sqlx::query(&format!(
-                "ALTER TABLE {} ADD COLUMN revision BYTEA NOT NULL DEFAULT gen_random_uuid()",
+                "ALTER TABLE {} ADD COLUMN revision BYTEA NOT NULL \
+                 DEFAULT decode(md5(gen_random_uuid()::text), 'hex')",
                 self.config.table_name
             ))
             .execute(&mut *transaction)
@@ -2092,19 +2093,33 @@ mod tests {
             })
             .await
             .unwrap();
+        // Retention 3 over five writes trims k0 and k1; the oldest retained
+        // change is k2 at revision 3.
         let first = replay.recv().await.unwrap().unwrap();
-        assert_eq!(first.key, "k0");
+        assert_eq!(first.key, "k2");
+        assert_eq!(first.revision, 3);
 
-        // Retention 3 keeps k2..k4, so resuming after k0 must report expiry.
+        // Resuming from a cursor inside the trimmed range must report expiry.
         let result = store
             .subscribe(ChangeFeedRequest {
-                start: ChangeStart::After(first.cursor),
+                start: ChangeStart::After(crate::change::ChangeCursor::new("1")),
                 filter: ChangeFilter::default(),
             })
             .await;
         assert!(matches!(result, Err(Error::ChangeCursorExpired { .. })));
 
-        // Resuming from a retained cursor still works.
+        // Resuming from the oldest retained cursor still replays forward.
+        let mut resumed = store
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::After(first.cursor),
+                filter: ChangeFilter::collection("entries"),
+            })
+            .await
+            .unwrap();
+        let replayed = resumed.recv().await.unwrap().unwrap();
+        assert_eq!(replayed.key, "k3");
+
+        // Live delivery keeps working after the replays.
         let mut live = store
             .subscribe(ChangeFeedRequest {
                 start: ChangeStart::Latest,
