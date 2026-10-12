@@ -74,8 +74,8 @@ firestore = ["dep:firestore", "dep:futures-util", "dep:serde", "bytes/serde"]
 firestore-tests = ["firestore", "dep:gcloud-sdk"]
 opensearch = ["dep:opensearch", "dep:serde", "dep:serde_json"]
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
-python-core = ["python", "light", "disk", "sqlite", "redis", "valkey"]
-python-full = ["python-core", "disk", "sqlite", "memcached", "postgres", "mongodb", "duckdb", "vault", "opensearch", "dynamodb", "s3", "firestore"]
+python-core = ["python", "json", "disk", "sqlite", "redis", "valkey"]
+python-full = ["python-core", "keyring", "disk", "sqlite", "memcached", "postgres", "mongodb", "duckdb", "vault", "opensearch", "dynamodb", "s3", "firestore"]
 
 [dev-dependencies]
 tokio-test = "0.4"
