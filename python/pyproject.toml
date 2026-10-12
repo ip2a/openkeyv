@@ -29,6 +29,7 @@ build-backend = "maturin"
 manifest-path = "../rust/crates/openkeyv/Cargo.toml"
 module-name = "openkeyv._internal"
 features = ["python-core"]
+no-default-features = true
 python-source = "src"
 compatibility = "manylinux_2_28"
 auditwheel = "repair"
