@@ -208,6 +208,10 @@ impl AsyncKeyValue for MemoryStore {
         let _mutation = self.client.mutation_lock().lock().await;
         let col = self.get_collection(cname)?;
         let deleted = col.remove(key).is_some();
+        // ponytail: no dashmap guard may live across an await — a task suspended
+        // here pins the outer-map shard, and on a current-thread runtime every
+        // other task sync-parking on that shard freezes the whole scheduler.
+        drop(col);
         if deleted {
             self.client
                 .record_change(cname, key, ChangeOperation::Delete)
@@ -322,6 +326,8 @@ impl AsyncKeyValue for MemoryStore {
                 deleted.push(key);
             }
         }
+        // ponytail: see delete — drop the outer-map guard before awaiting.
+        drop(col);
         for key in &deleted {
             self.client
                 .record_change(cname, key, ChangeOperation::Delete)
@@ -374,73 +380,95 @@ impl AsyncCompareAndSwap for MemoryStore {
         let new_revision = Revision::fresh()?;
 
         let _mutation = self.client.mutation_lock().lock().await;
-        let col = self.get_collection(cname)?;
-        let mut entry_guard = match col.entry(key.to_string()) {
-            Entry::Occupied(occupied) => occupied,
-            Entry::Vacant(vacant) => match expected {
-                None => {
-                    vacant.insert(RevisionedEntry {
-                        entry,
-                        revision: new_revision,
-                    });
-                    self.client
-                        .record_change(cname, key, ChangeOperation::Put)
-                        .await;
-                    return Ok(CompareAndSwapResult::Applied {
-                        revision: new_revision,
-                    });
+        // Mutate under the guards, then drop them before record_change: no dashmap
+        // guard may live across an await, or a suspended task pins the outer-map
+        // shard and freezes a current-thread runtime (every other task sync-parks
+        // on that shard and nothing polls again).
+        let (result, changed) = {
+            let col = self.get_collection(cname)?;
+            match col.entry(key.to_string()) {
+                Entry::Vacant(vacant) => match expected {
+                    None => {
+                        vacant.insert(RevisionedEntry {
+                            entry,
+                            revision: new_revision,
+                        });
+                        (
+                            CompareAndSwapResult::Applied {
+                                revision: new_revision,
+                            },
+                            true,
+                        )
+                    }
+                    Some(_) => (CompareAndSwapResult::Conflict { current: None }, false),
+                },
+                Entry::Occupied(mut occupied) => {
+                    if occupied.get().entry.is_expired() {
+                        // Expired entries are treated exactly as absent.
+                        match expected {
+                            None => {
+                                occupied.insert(RevisionedEntry {
+                                    entry,
+                                    revision: new_revision,
+                                });
+                                (
+                                    CompareAndSwapResult::Applied {
+                                        revision: new_revision,
+                                    },
+                                    true,
+                                )
+                            }
+                            Some(_) => {
+                                // Remove the expired occupied entry within the same
+                                // atomic operation before reporting absence.
+                                occupied.remove();
+                                (CompareAndSwapResult::Conflict { current: None }, false)
+                            }
+                        }
+                    } else {
+                        match expected {
+                            None => (
+                                CompareAndSwapResult::Conflict {
+                                    current: Some(snapshot_to_revisioned_value(
+                                        occupied.get().snapshot(),
+                                    )),
+                                },
+                                false,
+                            ),
+                            Some(expected_revision)
+                                if expected_revision == &occupied.get().revision =>
+                            {
+                                occupied.insert(RevisionedEntry {
+                                    entry,
+                                    revision: new_revision,
+                                });
+                                (
+                                    CompareAndSwapResult::Applied {
+                                        revision: new_revision,
+                                    },
+                                    true,
+                                )
+                            }
+                            Some(_) => (
+                                CompareAndSwapResult::Conflict {
+                                    current: Some(snapshot_to_revisioned_value(
+                                        occupied.get().snapshot(),
+                                    )),
+                                },
+                                false,
+                            ),
+                        }
+                    }
                 }
-                Some(_) => {
-                    return Ok(CompareAndSwapResult::Conflict { current: None });
-                }
-            },
+            }
         };
 
-        let current = entry_guard.get();
-        if current.entry.is_expired() {
-            // Expired entries are treated exactly as absent.
-            match expected {
-                None => {
-                    entry_guard.insert(RevisionedEntry {
-                        entry,
-                        revision: new_revision,
-                    });
-                    self.client
-                        .record_change(cname, key, ChangeOperation::Put)
-                        .await;
-                    return Ok(CompareAndSwapResult::Applied {
-                        revision: new_revision,
-                    });
-                }
-                Some(_) => {
-                    // Remove the expired occupied entry within the same atomic
-                    // operation before reporting absence.
-                    entry_guard.remove();
-                    return Ok(CompareAndSwapResult::Conflict { current: None });
-                }
-            }
+        if changed {
+            self.client
+                .record_change(cname, key, ChangeOperation::Put)
+                .await;
         }
-
-        match expected {
-            None => Ok(CompareAndSwapResult::Conflict {
-                current: Some(snapshot_to_revisioned_value(current.snapshot())),
-            }),
-            Some(expected_revision) if expected_revision == &current.revision => {
-                entry_guard.insert(RevisionedEntry {
-                    entry,
-                    revision: new_revision,
-                });
-                self.client
-                    .record_change(cname, key, ChangeOperation::Put)
-                    .await;
-                Ok(CompareAndSwapResult::Applied {
-                    revision: new_revision,
-                })
-            }
-            Some(_) => Ok(CompareAndSwapResult::Conflict {
-                current: Some(snapshot_to_revisioned_value(current.snapshot())),
-            }),
-        }
+        Ok(result)
     }
 
     async fn compare_and_delete(
@@ -453,33 +481,41 @@ impl AsyncCompareAndSwap for MemoryStore {
         self.setup_collection(cname).await?;
 
         let _mutation = self.client.mutation_lock().lock().await;
-        let col = self.get_collection(cname)?;
-        let entry_guard = match col.entry(key.to_string()) {
-            Entry::Occupied(occupied) => occupied,
-            Entry::Vacant(_) => {
-                return Ok(CompareAndDeleteResult::Conflict { current: None });
+        // ponytail: see compare_and_swap — guards drop before record_change awaits.
+        let (result, deleted) = {
+            let col = self.get_collection(cname)?;
+            let entry_guard = match col.entry(key.to_string()) {
+                Entry::Occupied(occupied) => occupied,
+                Entry::Vacant(_) => {
+                    return Ok(CompareAndDeleteResult::Conflict { current: None });
+                }
+            };
+
+            let current = entry_guard.get();
+            if current.entry.is_expired() {
+                // Expired occupied entry is removed within the same atomic operation
+                // and treated as absent.
+                entry_guard.remove();
+                (CompareAndDeleteResult::Conflict { current: None }, false)
+            } else if expected == &current.revision {
+                entry_guard.remove();
+                (CompareAndDeleteResult::Deleted, true)
+            } else {
+                (
+                    CompareAndDeleteResult::Conflict {
+                        current: Some(snapshot_to_revisioned_value(current.snapshot())),
+                    },
+                    false,
+                )
             }
         };
 
-        let current = entry_guard.get();
-        if current.entry.is_expired() {
-            // Expired occupied entry is removed within the same atomic operation
-            // and treated as absent.
-            entry_guard.remove();
-            return Ok(CompareAndDeleteResult::Conflict { current: None });
-        }
-
-        if expected == &current.revision {
-            entry_guard.remove();
+        if deleted {
             self.client
                 .record_change(cname, key, ChangeOperation::Delete)
                 .await;
-            Ok(CompareAndDeleteResult::Deleted)
-        } else {
-            Ok(CompareAndDeleteResult::Conflict {
-                current: Some(snapshot_to_revisioned_value(current.snapshot())),
-            })
         }
+        Ok(result)
     }
 }
 
@@ -576,6 +612,42 @@ impl AsyncDestroyStore for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: put/delete/CAS used to hold dashmap guards across the
+    /// record_change await. On a current-thread runtime, a task suspended that way
+    /// pins an outer-map shard and every other task sync-parking on it freezes the
+    /// scheduler for good. Two tasks mutating concurrently on one runtime must
+    /// always make progress.
+    #[tokio::test]
+    async fn concurrent_mutators_never_freeze_a_current_thread_runtime() {
+        let store = MemoryStore::new();
+        let writer = tokio::spawn({
+            let store = store.clone();
+            async move {
+                for i in 0..4000u32 {
+                    let key = format!("w{i}");
+                    store.put(&key, Value::from(i as i64), Some("shared"), None).await.unwrap();
+                    store.delete(&key, Some("shared")).await.unwrap();
+                    store
+                        .compare_and_swap(&key, None, Value::from(i as i64), Some("shared"), None)
+                        .await
+                        .unwrap();
+                    store.delete(&key, Some("shared")).await.unwrap();
+                }
+            }
+        });
+        for i in 0..4000u32 {
+            let key = format!("r{i}");
+            store.get(&key, Some("shared")).await.unwrap();
+            store.put(&key, Value::from(i as i64), Some("shared"), None).await.unwrap();
+            store.delete(&key, Some("shared")).await.unwrap();
+        }
+        // If a mutator ever froze the runtime, this join would never resolve.
+        tokio::time::timeout(std::time::Duration::from_secs(30), writer)
+            .await
+            .expect("writer task froze the current-thread runtime")
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn test_memory_store_basic() {
