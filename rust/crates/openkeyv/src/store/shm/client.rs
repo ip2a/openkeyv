@@ -687,7 +687,13 @@ impl ShmClient {
                 .live_entries
                 .fetch_add(1, Ordering::Relaxed);
         }
-        slot.entry_offset.store(handle.offset, Ordering::Relaxed);
+        // Release, not Relaxed: a reader that Acquire-loads this offset must
+        // also see the entry block published above (sequence = 2). On a weakly
+        // ordered CPU a Relaxed store can become visible before the block
+        // publish, and the reader would treat the unpublished block as "no
+        // snapshot", probe past the slot and report Absent for a key that
+        // exists at every linearization point of the overlapping overwrite.
+        slot.entry_offset.store(handle.offset, Ordering::Release);
         slot.sequence.fetch_add(1, Ordering::Release);
         abort_hook("published");
         self.journal_set(JOURNAL_PUBLISHED);
