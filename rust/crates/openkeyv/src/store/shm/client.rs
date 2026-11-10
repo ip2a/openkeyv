@@ -18,11 +18,10 @@ use super::config::ShmCreateConfig;
 use super::entry::{self, EntrySnapshot};
 use super::index::{self, Locate};
 use super::layout::{
-    slot_hash, Layout, SharedMap, ChangeRingSlot, IndexSlot, JournalRecord, FORMAT_VERSION,
-    FREE_CLASSES, HEADER_BYTES, JOURNAL_BYTES, JOURNAL_IDLE, JOURNAL_PREPARED, JOURNAL_PUBLISHED,
-    JOURNAL_RECORDED, KIND_CULL, KIND_REMOVE, KIND_UPSERT, MAGIC, OP_DELETE, OP_PUT,
-    RECORD_ENTRY, RECORD_REGISTRY, SLOT_EMPTY, SLOT_TOMBSTONE, STATE_DESTROYING, STATE_EMPTY,
-    STATE_READY,
+    ChangeRingSlot, FORMAT_VERSION, FREE_CLASSES, HEADER_BYTES, IndexSlot, JOURNAL_BYTES,
+    JOURNAL_IDLE, JOURNAL_PREPARED, JOURNAL_PUBLISHED, JOURNAL_RECORDED, JournalRecord, KIND_CULL,
+    KIND_REMOVE, KIND_UPSERT, Layout, MAGIC, OP_DELETE, OP_PUT, RECORD_ENTRY, RECORD_REGISTRY,
+    SLOT_EMPTY, SLOT_TOMBSTONE, STATE_DESTROYING, STATE_EMPTY, STATE_READY, SharedMap, slot_hash,
 };
 use crate::change::ChangeStart;
 use crate::error::{Error, Result};
@@ -139,12 +138,12 @@ impl ShmClient {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 return Err(Error::StoreInUse {
                     path: config.path.display().to_string(),
-                })
+                });
             }
             Err(error) => {
                 return Err(Error::StoreSetup {
                     message: format!("attach lock failed: {error}"),
-                })
+                });
             }
         }
 
@@ -183,10 +182,9 @@ impl ShmClient {
         }
 
         // Downgrade to a shared attach lock (flock converts atomically).
-        FileExt::lock_shared(&client.attach_lock)
-            .map_err(|error| Error::StoreSetup {
-                message: format!("attach downgrade failed: {error}"),
-            })?;
+        FileExt::lock_shared(&client.attach_lock).map_err(|error| Error::StoreSetup {
+            message: format!("attach downgrade failed: {error}"),
+        })?;
         Ok(client)
     }
 
@@ -308,7 +306,8 @@ impl ShmClient {
         let header = self.map.header();
         header.state.store(STATE_DESTROYING, Ordering::Release);
 
-        self.map.zero_range(HEADER_BYTES as u64, JOURNAL_BYTES as u64)?;
+        self.map
+            .zero_range(HEADER_BYTES as u64, JOURNAL_BYTES as u64)?;
         self.map
             .zero_range(self.layout.off_freelist, (FREE_CLASSES * 8) as u64)?;
         let slot_bytes = self.layout.index_entries * std::mem::size_of::<IndexSlot>() as u64;
@@ -319,13 +318,23 @@ impl ShmClient {
         self.map.zero_range(self.layout.off_ring, ring_bytes)?;
 
         header.magic.store(MAGIC, Ordering::Relaxed);
-        header.format_version.store(FORMAT_VERSION, Ordering::Relaxed);
-        header.layout_bytes.store(self.layout.file_len, Ordering::Relaxed);
-        header.header_bytes.store(HEADER_BYTES as u64, Ordering::Relaxed);
+        header
+            .format_version
+            .store(FORMAT_VERSION, Ordering::Relaxed);
+        header
+            .layout_bytes
+            .store(self.layout.file_len, Ordering::Relaxed);
+        header
+            .header_bytes
+            .store(HEADER_BYTES as u64, Ordering::Relaxed);
         header.store_id0.store(id0, Ordering::Relaxed);
         header.store_id1.store(id1, Ordering::Relaxed);
-        header.arena_capacity.store(self.layout.arena_capacity, Ordering::Relaxed);
-        header.index_entries.store(self.layout.index_entries, Ordering::Relaxed);
+        header
+            .arena_capacity
+            .store(self.layout.arena_capacity, Ordering::Relaxed);
+        header
+            .index_entries
+            .store(self.layout.index_entries, Ordering::Relaxed);
         header
             .change_retention
             .store(self.layout.change_retention, Ordering::Relaxed);
@@ -336,7 +345,9 @@ impl ShmClient {
         header.next_operation_id.store(1, Ordering::Relaxed);
         header.index_generation.store(0, Ordering::Relaxed);
         header.active_index.store(0, Ordering::Relaxed);
-        header.creation_unix_ms.store(now_unix_ms(), Ordering::Relaxed);
+        header
+            .creation_unix_ms
+            .store(now_unix_ms(), Ordering::Relaxed);
         let generation = header.store_generation.load(Ordering::Acquire) + 1;
         header.store_generation.store(generation, Ordering::Release);
         header.state.store(STATE_READY, Ordering::Release);
@@ -359,10 +370,9 @@ impl ShmClient {
 
     /// Blocking take of the writer lock. Only valid inside `spawn_blocking`.
     pub(crate) fn block_write_lock(&self) -> Result<()> {
-        FileExt::lock_exclusive(&self.write_lock)
-            .map_err(|error| Error::StoreConnection {
-                message: format!("shm write lock failed: {error}"),
-            })
+        FileExt::lock_exclusive(&self.write_lock).map_err(|error| Error::StoreConnection {
+            message: format!("shm write lock failed: {error}"),
+        })
     }
 
     pub(crate) fn unlock_write(&self) {
@@ -526,7 +536,12 @@ impl ShmClient {
                 index::reindex(&self.map, &self.layout)?;
             }
             match index::locate(&self.map, &self.layout, RECORD_ENTRY, collection, key)? {
-                Locate::Live { table, index, block, snapshot } => {
+                Locate::Live {
+                    table,
+                    index,
+                    block,
+                    snapshot,
+                } => {
                     let expired = snapshot.is_expired(now_unix_ms());
                     match (&require, expired) {
                         (Require::ExactRevision(expected), false)
@@ -565,11 +580,7 @@ impl ShmClient {
                     if matches!(require, Require::ExactRevision(_)) {
                         return Ok(UpsertOutcome::Conflict { current: None });
                     }
-                    let live = self
-                        .map
-                        .header()
-                        .live_entries
-                        .load(Ordering::Relaxed);
+                    let live = self.map.header().live_entries.load(Ordering::Relaxed);
                     if live * 10 >= self.layout.index_entries * 7 {
                         return Err(Error::StoreCapacity {
                             requested: 1,
@@ -637,9 +648,7 @@ impl ShmClient {
             target.1,
         )?;
 
-        let slot = self
-            .map
-            .index_slot(target.0, target.1, &self.layout)?;
+        let slot = self.map.index_slot(target.0, target.1, &self.layout)?;
         if old_block == 0 {
             self.map
                 .header()
@@ -687,7 +696,12 @@ impl ShmClient {
                 index::reindex(&self.map, &self.layout)?;
             }
             match index::locate(&self.map, &self.layout, record_kind, collection, key)? {
-                Locate::Live { table, index, block, snapshot } => {
+                Locate::Live {
+                    table,
+                    index,
+                    block,
+                    snapshot,
+                } => {
                     if snapshot.is_expired(now_unix_ms()) {
                         if require.is_some() {
                             // Mirror memory: remove the expired corpse and
@@ -702,7 +716,15 @@ impl ShmClient {
                             });
                         }
                     }
-                    return self.commit_remove(record_kind, collection, key, block, table, index, cull);
+                    return self.commit_remove(
+                        record_kind,
+                        collection,
+                        key,
+                        block,
+                        table,
+                        index,
+                        cull,
+                    );
                 }
                 Locate::Vacant { .. } => return Ok(RemoveOutcome::Absent),
                 Locate::Full => index::reindex(&self.map, &self.layout)?,
@@ -844,7 +866,7 @@ impl ShmClient {
             other => {
                 return Err(Error::StoreFormat {
                     message: format!("journal carries unknown kind {other}"),
-                })
+                });
             }
         };
 
@@ -854,13 +876,20 @@ impl ShmClient {
             if journal.emit_change.load(Ordering::Acquire) == 1
                 && !change::ring_contains_operation(&self.map, &self.layout, operation_id)?
             {
-                let source = if kind == KIND_UPSERT { new_block } else { old_block };
-                let snapshot = entry::snapshot_once(&self.map, source)?.ok_or_else(|| {
-                    Error::StoreFormat {
+                let source = if kind == KIND_UPSERT {
+                    new_block
+                } else {
+                    old_block
+                };
+                let snapshot =
+                    entry::snapshot_once(&self.map, source)?.ok_or_else(|| Error::StoreFormat {
                         message: "recovery could not read the journaled block".to_string(),
-                    }
-                })?;
-                let operation = if kind == KIND_UPSERT { OP_PUT } else { OP_DELETE };
+                    })?;
+                let operation = if kind == KIND_UPSERT {
+                    OP_PUT
+                } else {
+                    OP_DELETE
+                };
                 change::append_event(
                     &self.map,
                     &self.layout,

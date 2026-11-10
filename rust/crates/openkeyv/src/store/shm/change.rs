@@ -8,13 +8,13 @@
 //! the recovery path, which re-appends it at a fresh revision.
 
 use super::client::ShmClient;
-use super::layout::{ChangeEventBlock, Layout, SharedMap, EVENT_HEADER_BYTES};
+use super::layout::{ChangeEventBlock, EVENT_HEADER_BYTES, Layout, SharedMap};
 use crate::change::{ChangeCursor, ChangeFilter, ChangeOperation, ChangeStream, StoreChange};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 const BACKOFF_MIN_MS: u64 = 1;
@@ -52,18 +52,21 @@ pub(crate) fn append_event(
     block.sequence.store(1, Ordering::Relaxed);
     block.revision.store(revision, Ordering::Relaxed);
     block.operation.store(operation, Ordering::Relaxed);
-    block
-        .occurred_at_ms
-        .store(now_unix_ms(), Ordering::Relaxed);
+    block.occurred_at_ms.store(now_unix_ms(), Ordering::Relaxed);
     block.store_generation.store(generation, Ordering::Relaxed);
     block.operation_id.store(operation_id, Ordering::Relaxed);
-    block.collection_len.store(collection.len() as u64, Ordering::Relaxed);
+    block
+        .collection_len
+        .store(collection.len() as u64, Ordering::Relaxed);
     block.key_len.store(key.len() as u64, Ordering::Relaxed);
 
     let mut payload_bytes = Vec::with_capacity(payload_len);
     payload_bytes.extend_from_slice(collection.as_bytes());
     payload_bytes.extend_from_slice(key.as_bytes());
-    map.write_words(handle.offset + EVENT_HEADER_BYTES as u64, &chunk_to_words(&payload_bytes))?;
+    map.write_words(
+        handle.offset + EVENT_HEADER_BYTES as u64,
+        &chunk_to_words(&payload_bytes),
+    )?;
     block.sequence.store(2, Ordering::Release);
 
     let slot = map.ring_slot((revision - 1) % layout.change_retention, layout)?;
@@ -123,22 +126,24 @@ fn read_event(map: &SharedMap, layout: &Layout, revision: u64) -> Result<StoreCh
     let key_len = block.key_len.load(Ordering::Relaxed) as usize;
     let words = (collection_len + key_len).div_ceil(8);
     let payload = map.read_words(offset + EVENT_HEADER_BYTES as u64, words)?;
-    let bytes = payload.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>();
-    let collection = String::from_utf8(bytes[..collection_len].to_vec()).map_err(|_| {
-        Error::StoreFormat {
+    let bytes = payload
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect::<Vec<u8>>();
+    let collection =
+        String::from_utf8(bytes[..collection_len].to_vec()).map_err(|_| Error::StoreFormat {
             message: "change event holds a non-UTF-8 collection".to_string(),
-        }
-    })?;
-    let key = String::from_utf8(bytes[collection_len..collection_len + key_len].to_vec())
-        .map_err(|_| Error::StoreFormat {
-            message: "change event holds a non-UTF-8 key".to_string(),
         })?;
+    let key = String::from_utf8(bytes[collection_len..collection_len + key_len].to_vec()).map_err(
+        |_| Error::StoreFormat {
+            message: "change event holds a non-UTF-8 key".to_string(),
+        },
+    )?;
 
     let revision_value = block.revision.load(Ordering::Relaxed);
-    let occurred_at = DateTime::from_timestamp_millis(
-        block.occurred_at_ms.load(Ordering::Relaxed) as i64
-    )
-    .unwrap_or_else(Utc::now);
+    let occurred_at =
+        DateTime::from_timestamp_millis(block.occurred_at_ms.load(Ordering::Relaxed) as i64)
+            .unwrap_or_else(Utc::now);
 
     Ok(StoreChange {
         cursor: ChangeCursor::new(revision_value.to_string()),
@@ -202,10 +207,7 @@ impl ChangeStream for ShmChangeStream {
                 return Err(Error::ChangeFeedLagged { skipped });
             }
 
-            let slot = map.ring_slot(
-                (self.next_revision - 1) % layout.change_retention,
-                layout,
-            )?;
+            let slot = map.ring_slot((self.next_revision - 1) % layout.change_retention, layout)?;
             let slot_sequence = slot.sequence.load(Ordering::Acquire);
             if slot_sequence != self.next_revision {
                 // Crash gap: recovery re-appended this change at a fresh

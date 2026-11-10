@@ -5,8 +5,8 @@
 //! use the lock-free paths in [`super::client`]. Slot mutations always bump
 //! `sequence` so concurrent lock-free readers detect the change and retry.
 
-use super::entry::{snapshot_once, EntrySnapshot};
-use super::layout::{IndexSlot, Layout, SharedMap, SLOT_EMPTY, SLOT_TOMBSTONE};
+use super::entry::{EntrySnapshot, snapshot_once};
+use super::layout::{IndexSlot, Layout, SLOT_EMPTY, SLOT_TOMBSTONE, SharedMap};
 use crate::error::{Error, Result};
 use std::sync::atomic::Ordering;
 
@@ -100,7 +100,12 @@ pub(crate) fn publish_slot(
 
 /// Turn the slot into a tombstone. Callers free the referenced block only
 /// after this has landed, so a crash between the two merely leaks the block.
-pub(crate) fn tombstone_slot(map: &SharedMap, layout: &Layout, table: usize, index: u64) -> Result<()> {
+pub(crate) fn tombstone_slot(
+    map: &SharedMap,
+    layout: &Layout,
+    table: usize,
+    index: u64,
+) -> Result<()> {
     let slot = map.index_slot(table, index, layout)?;
     slot.entry_offset.store(SLOT_TOMBSTONE, Ordering::Relaxed);
     slot.sequence.fetch_add(1, Ordering::Release);
@@ -137,7 +142,8 @@ pub(crate) fn reindex(map: &SharedMap, layout: &Layout) -> Result<()> {
                 message: "reindex observed an unstable entry block".to_string(),
             });
         };
-        let hash = super::layout::slot_hash(snapshot.record_kind, &snapshot.collection, &snapshot.key);
+        let hash =
+            super::layout::slot_hash(snapshot.record_kind, &snapshot.collection, &snapshot.key);
         let step = (hash >> 33) | 1;
         let mut target_index = hash & (layout.index_entries - 1);
         loop {
@@ -223,8 +229,6 @@ pub(crate) fn scan(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn probe_steps_are_always_odd() {
         for hash in [0u64, 1, 0xdead_beef, u64::MAX] {

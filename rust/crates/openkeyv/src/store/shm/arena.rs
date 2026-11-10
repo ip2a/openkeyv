@@ -9,7 +9,7 @@
 //! the remedy is a larger fixed file, not a remap.
 
 use super::layout::{
-    EntryBlockHeader, Layout, SharedMap, BLOCK_HEADER_BYTES, FREE_CLASSES, MIN_BLOCK_BYTES,
+    BLOCK_HEADER_BYTES, EntryBlockHeader, FREE_CLASSES, Layout, MIN_BLOCK_BYTES, SharedMap,
 };
 use crate::error::{Error, Result};
 use std::sync::atomic::Ordering;
@@ -57,10 +57,7 @@ pub(crate) fn alloc(map: &SharedMap, layout: &Layout, payload: usize) -> Result<
                 let buddy = offset + class_bytes(current_class) as u64;
                 push_free(map, layout, buddy, current_class)?;
             }
-            return Ok(BlockHandle {
-                offset,
-                class,
-            });
+            return Ok(BlockHandle { offset, class });
         }
     }
 
@@ -94,7 +91,9 @@ pub(crate) fn free(map: &SharedMap, layout: &Layout, offset: u64) -> Result<()> 
 fn push_free(map: &SharedMap, layout: &Layout, offset: u64, class: usize) -> Result<()> {
     let head = map.freelist_head(class, layout)?;
     let header = map.entry_block(offset)?;
-    header.next_free.store(head.load(Ordering::Relaxed), Ordering::Relaxed);
+    header
+        .next_free
+        .store(head.load(Ordering::Relaxed), Ordering::Relaxed);
     head.store(offset, Ordering::Relaxed);
     Ok(())
 }

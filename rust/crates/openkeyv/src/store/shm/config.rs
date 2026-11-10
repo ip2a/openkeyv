@@ -76,9 +76,7 @@ impl ShmCreateConfig {
                 ),
             });
         }
-        if self.index_entries < MIN_INDEX_ENTRIES
-            || !self.index_entries.is_power_of_two()
-        {
+        if self.index_entries < MIN_INDEX_ENTRIES || !self.index_entries.is_power_of_two() {
             return Err(Error::StoreSetup {
                 message: format!(
                     "shm index_entries must be a power of two >= {MIN_INDEX_ENTRIES}, got {}",

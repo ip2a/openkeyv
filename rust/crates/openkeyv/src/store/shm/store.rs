@@ -6,10 +6,8 @@
 //! another process holds it, so the async runtime never parks on a file lock.
 
 use super::change::ShmChangeStream;
-use super::client::{Require, RemoveOutcome, ShmClient, UpsertOutcome};
-use super::config::{
-    ShmCreateConfig, DEFAULT_COLLECTION, MAX_COLLECTION_BYTES, MAX_KEY_BYTES,
-};
+use super::client::{RemoveOutcome, Require, ShmClient, UpsertOutcome};
+use super::config::{DEFAULT_COLLECTION, MAX_COLLECTION_BYTES, MAX_KEY_BYTES, ShmCreateConfig};
 use super::entry::EntrySnapshot;
 use super::layout::{RECORD_ENTRY, RECORD_REGISTRY};
 use crate::change::ChangeFeedRequest;
@@ -105,14 +103,10 @@ impl ShmStore {
     }
 
     fn decode_value(snapshot: &EntrySnapshot) -> Result<Value> {
-        let kind = ValueKind::from_tag(snapshot.value_kind as u8).ok_or_else(|| {
-            Error::StoreFormat {
-                message: format!(
-                    "entry holds unknown value kind tag {}",
-                    snapshot.value_kind
-                ),
-            }
-        })?;
+        let kind =
+            ValueKind::from_tag(snapshot.value_kind as u8).ok_or_else(|| Error::StoreFormat {
+                message: format!("entry holds unknown value kind tag {}", snapshot.value_kind),
+            })?;
         Ok(Value::new_unchecked(kind, snapshot.value.clone()))
     }
 
@@ -309,17 +303,19 @@ impl AsyncCompareAndSwap for ShmStore {
         let cname = Self::collection_name(collection).to_string();
         let key = key.to_string();
         self.mutate(move |client| {
-            Ok(match client.perform_upsert(&cname, &key, &value, ttl, require)? {
-                UpsertOutcome::Applied { revision } => CompareAndSwapResult::Applied {
-                    revision: Revision::from_bytes(revision),
-                },
-                UpsertOutcome::Conflict { current } => CompareAndSwapResult::Conflict {
-                    current: match current {
-                        Some(snapshot) => Some(ShmStore::revisioned_value(&snapshot)?),
-                        None => None,
+            Ok(
+                match client.perform_upsert(&cname, &key, &value, ttl, require)? {
+                    UpsertOutcome::Applied { revision } => CompareAndSwapResult::Applied {
+                        revision: Revision::from_bytes(revision),
+                    },
+                    UpsertOutcome::Conflict { current } => CompareAndSwapResult::Conflict {
+                        current: match current {
+                            Some(snapshot) => Some(ShmStore::revisioned_value(&snapshot)?),
+                            None => None,
+                        },
                     },
                 },
-            })
+            )
         })
         .await
     }
@@ -335,13 +331,7 @@ impl AsyncCompareAndSwap for ShmStore {
         let expected = *expected;
         self.mutate(move |client| {
             Ok(
-                match client.perform_remove(
-                    RECORD_ENTRY,
-                    &cname,
-                    &key,
-                    Some(&expected),
-                    false,
-                )? {
+                match client.perform_remove(RECORD_ENTRY, &cname, &key, Some(&expected), false)? {
                     RemoveOutcome::Removed => CompareAndDeleteResult::Deleted,
                     RemoveOutcome::Absent => CompareAndDeleteResult::Conflict { current: None },
                     RemoveOutcome::Conflict { current } => CompareAndDeleteResult::Conflict {
@@ -375,7 +365,9 @@ impl AsyncEnumerateKeys for ShmStore {
     async fn keys(&self, collection: Option<&str>, limit: Option<usize>) -> Result<Vec<String>> {
         let cname = Self::collection_name(collection);
         let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE).min(PAGE_LIMIT);
-        let hits = self.client.scan_hits(Some(RECORD_ENTRY), Some(cname), false)?;
+        let hits = self
+            .client
+            .scan_hits(Some(RECORD_ENTRY), Some(cname), false)?;
         Ok(hits
             .into_iter()
             .filter(|hit| !hit.expired)
@@ -433,7 +425,10 @@ impl AsyncDestroyCollection for ShmStore {
 
 #[async_trait]
 impl AsyncChangeFeed for ShmStore {
-    async fn subscribe(&self, request: ChangeFeedRequest) -> Result<Box<dyn crate::change::ChangeStream + Send>> {
+    async fn subscribe(
+        &self,
+        request: ChangeFeedRequest,
+    ) -> Result<Box<dyn crate::change::ChangeStream + Send>> {
         let (next_revision, generation) = self
             .mutate(move |client| client.subscribe_point(&request.start))
             .await?;
@@ -453,22 +448,21 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!(
-            "openkeyv-shm-store-{}-{name}",
-            std::process::id()
-        ));
+        path.push(format!("openkeyv-shm-store-{}-{name}", std::process::id()));
         path
     }
 
     #[tokio::test]
     async fn put_get_delete_roundtrip() {
         let path = temp_path("roundtrip");
-        let store = ShmStore::create(
-            ShmCreateConfig::new(&path).with_capacity_bytes(16 * 1024 * 1024),
-        )
-        .unwrap();
+        let store =
+            ShmStore::create(ShmCreateConfig::new(&path).with_capacity_bytes(16 * 1024 * 1024))
+                .unwrap();
 
-        store.put("alpha", Value::utf8("one"), None, None).await.unwrap();
+        store
+            .put("alpha", Value::utf8("one"), None, None)
+            .await
+            .unwrap();
         let value = store.get("alpha", None).await.unwrap().unwrap();
         assert_eq!(value, Value::utf8("one"));
 

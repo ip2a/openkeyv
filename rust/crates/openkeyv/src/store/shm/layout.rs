@@ -198,7 +198,8 @@ impl Layout {
         let slot_bytes = index_entries * std::mem::size_of::<IndexSlot>() as u64;
         let off_index1 = off_index0 + slot_bytes;
         let off_ring = off_index1 + slot_bytes;
-        let off_arena = align8(off_ring + change_retention * std::mem::size_of::<ChangeRingSlot>() as u64);
+        let off_arena =
+            align8(off_ring + change_retention * std::mem::size_of::<ChangeRingSlot>() as u64);
         Layout {
             file_len,
             index_entries,
@@ -310,7 +311,12 @@ impl SharedMap {
         Ok(unsafe { std::slice::from_raw_parts(self.map.as_ptr().add(offset) as *const T, count) })
     }
 
-    pub(crate) fn index_slot(&self, table: usize, index: u64, layout: &Layout) -> Result<&IndexSlot> {
+    pub(crate) fn index_slot(
+        &self,
+        table: usize,
+        index: u64,
+        layout: &Layout,
+    ) -> Result<&IndexSlot> {
         debug_assert!(table < 2);
         let offset = layout.off_index[table] + index * std::mem::size_of::<IndexSlot>() as u64;
         self.ref_at::<IndexSlot>(offset, std::mem::size_of::<IndexSlot>())
@@ -401,14 +407,14 @@ mod tests {
         let layout = Layout::compute(65_536, 10_000, 256 * 1024 * 1024);
         assert_eq!(layout.off_freelist, 8192);
         let slot_bytes = 65_536 * 16;
-        assert_eq!(layout.off_index[0], align8(layout.off_freelist + FREE_CLASSES as u64 * 8));
+        assert_eq!(
+            layout.off_index[0],
+            align8(layout.off_freelist + FREE_CLASSES as u64 * 8)
+        );
         assert_eq!(layout.off_index[1], layout.off_index[0] + slot_bytes);
         assert_eq!(layout.off_ring, layout.off_index[1] + slot_bytes);
         assert!(layout.off_arena >= layout.off_ring + 10_000 * 16);
-        assert_eq!(
-            layout.arena_capacity,
-            256 * 1024 * 1024 - layout.off_arena
-        );
+        assert_eq!(layout.arena_capacity, 256 * 1024 * 1024 - layout.off_arena);
     }
 
     #[test]

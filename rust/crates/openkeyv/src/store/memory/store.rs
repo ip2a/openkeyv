@@ -626,7 +626,10 @@ mod tests {
             async move {
                 for i in 0..4000u32 {
                     let key = format!("w{i}");
-                    store.put(&key, Value::from(i as i64), Some("shared"), None).await.unwrap();
+                    store
+                        .put(&key, Value::from(i as i64), Some("shared"), None)
+                        .await
+                        .unwrap();
                     store.delete(&key, Some("shared")).await.unwrap();
                     store
                         .compare_and_swap(&key, None, Value::from(i as i64), Some("shared"), None)
@@ -639,7 +642,10 @@ mod tests {
         for i in 0..4000u32 {
             let key = format!("r{i}");
             store.get(&key, Some("shared")).await.unwrap();
-            store.put(&key, Value::from(i as i64), Some("shared"), None).await.unwrap();
+            store
+                .put(&key, Value::from(i as i64), Some("shared"), None)
+                .await
+                .unwrap();
             store.delete(&key, Some("shared")).await.unwrap();
         }
         // If a mutator ever froze the runtime, this join would never resolve.

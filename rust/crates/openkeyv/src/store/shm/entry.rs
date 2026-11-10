@@ -9,7 +9,7 @@
 //! re-verification.
 
 use super::arena;
-use super::layout::{EntryBlockHeader, SharedMap, BLOCK_HEADER_BYTES};
+use super::layout::{BLOCK_HEADER_BYTES, EntryBlockHeader, SharedMap};
 use crate::error::{Error, Result};
 use std::sync::atomic::Ordering;
 
@@ -135,9 +135,15 @@ pub(crate) fn write_entry_block(
     let header: &EntryBlockHeader = map.entry_block(handle.offset)?;
     header.sequence.store(1, Ordering::Relaxed);
     header.flags.store(fields.record_kind, Ordering::Relaxed);
-    header.value_kind.store(fields.value_kind, Ordering::Relaxed);
-    header.created_at_ms.store(fields.created_at_ms, Ordering::Relaxed);
-    header.expires_at_ms.store(fields.expires_at_ms, Ordering::Relaxed);
+    header
+        .value_kind
+        .store(fields.value_kind, Ordering::Relaxed);
+    header
+        .created_at_ms
+        .store(fields.created_at_ms, Ordering::Relaxed);
+    header
+        .expires_at_ms
+        .store(fields.expires_at_ms, Ordering::Relaxed);
     header.revision0.store(
         u64::from_le_bytes(fields.revision[..8].try_into().unwrap()),
         Ordering::Relaxed,
@@ -146,20 +152,32 @@ pub(crate) fn write_entry_block(
         u64::from_le_bytes(fields.revision[8..].try_into().unwrap()),
         Ordering::Relaxed,
     );
-    header.collection_len.store(fields.collection.len() as u64, Ordering::Relaxed);
-    header.key_len.store(fields.key.len() as u64, Ordering::Relaxed);
-    header.value_len.store(fields.value.len() as u64, Ordering::Relaxed);
-    header.size_class.store(handle.class as u64, Ordering::Relaxed);
+    header
+        .collection_len
+        .store(fields.collection.len() as u64, Ordering::Relaxed);
+    header
+        .key_len
+        .store(fields.key.len() as u64, Ordering::Relaxed);
+    header
+        .value_len
+        .store(fields.value.len() as u64, Ordering::Relaxed);
+    header
+        .size_class
+        .store(handle.class as u64, Ordering::Relaxed);
     header.next_free.store(0, Ordering::Relaxed);
 
     // Payload is one packed byte string (collection || key || value) padded to
     // a word boundary; readers slice it back by lengths, so no per-field
     // padding may be inserted.
-    let mut payload_bytes = Vec::with_capacity(fields.collection.len() + fields.key.len() + fields.value.len());
+    let mut payload_bytes =
+        Vec::with_capacity(fields.collection.len() + fields.key.len() + fields.value.len());
     payload_bytes.extend_from_slice(fields.collection.as_bytes());
     payload_bytes.extend_from_slice(fields.key.as_bytes());
     payload_bytes.extend_from_slice(fields.value);
-    map.write_words(handle.offset + BLOCK_HEADER_BYTES as u64, &bytes_to_words(&payload_bytes))?;
+    map.write_words(
+        handle.offset + BLOCK_HEADER_BYTES as u64,
+        &bytes_to_words(&payload_bytes),
+    )?;
 
     // Publish: even sequence with Release so readers that load it see the full
     // block contents.
