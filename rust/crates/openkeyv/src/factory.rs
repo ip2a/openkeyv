@@ -81,6 +81,56 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
             )
             .with_keyspace_migration(store))
         }
+
+        #[cfg(all(feature = "shm", unix))]
+        "shm" => {
+            use crate::store::shm::{ShmConfig, ShmOpenMode, ShmStore};
+
+            let mut shm_config = ShmConfig::open(required(&config.config, "path")?);
+            match string(&config.config, "mode").as_deref() {
+                None | Some("open") => {}
+                Some("create") => shm_config.mode = ShmOpenMode::Create,
+                Some(other) => {
+                    return Err(Error::StoreSetup {
+                        message: format!("shm mode must be 'create' or 'open', got '{other}'"),
+                    })
+                }
+            }
+            if let Some(capacity) = optional_usize(&config.config, "capacity_bytes") {
+                shm_config = shm_config.with_capacity_bytes(capacity as u64);
+            }
+            if let Some(entries) = optional_usize(&config.config, "index_entries") {
+                shm_config = shm_config.with_index_entries(u32::try_from(entries).map_err(
+                    |_| Error::StoreSetup {
+                        message: format!("shm index_entries {entries} exceeds u32"),
+                    },
+                )?);
+            }
+            if let Some(retention) = optional_usize(&config.config, "change_retention") {
+                shm_config = shm_config.with_change_retention(u32::try_from(retention).map_err(
+                    |_| Error::StoreSetup {
+                        message: format!("shm change_retention {retention} exceeds u32"),
+                    },
+                )?);
+            }
+            let store = match shm_config.mode {
+                ShmOpenMode::Create => ShmStore::create(shm_config.create_config())?,
+                ShmOpenMode::Open => ShmStore::open(shm_config.path.clone())?,
+            };
+            let store = std::sync::Arc::new(store);
+            let base = store.clone();
+            let feed = store
+                .change_feed_enabled()
+                .then(|| base.clone() as std::sync::Arc<dyn crate::protocol::AsyncChangeFeed>);
+            Ok(StoreHandle::with_capabilities(
+                store,
+                Some(base.clone()),
+                Some(base.clone()),
+                Some(base.clone()),
+                feed,
+            ))
+        }
+
         #[cfg(feature = "valkey")]
         "valkey" => {
             let mut store_config = crate::store::valkey::ValkeyConfig::default()

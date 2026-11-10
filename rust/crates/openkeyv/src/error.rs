@@ -75,4 +75,13 @@ pub enum Error {
 
     #[error("revision generation failed: {0}")]
     RevisionGeneration(String),
+
+    #[error("shared memory store is in use: {path}")]
+    StoreInUse { path: String },
+
+    #[error("shared memory format mismatch: {message}")]
+    StoreFormat { message: String },
+
+    #[error("shared memory capacity exhausted: requested {requested} bytes, available {available}")]
+    StoreCapacity { requested: u64, available: u64 },
 }

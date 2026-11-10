@@ -25,6 +25,8 @@ pub mod redis;
 pub mod rocksdb;
 #[cfg(feature = "s3")]
 pub mod s3;
+#[cfg(all(feature = "shm", unix))]
+pub mod shm;
 pub mod simple;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
