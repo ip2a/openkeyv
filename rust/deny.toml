@@ -12,6 +12,16 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "The Rust 1.85-compatible AWS SDK dependency line retains rustls-webpki 0.101; no patched MSRV-compatible upgrade is available." },
     { id = "RUSTSEC-2026-0104", reason = "The Rust 1.85-compatible AWS SDK dependency line retains rustls-webpki 0.101; no patched MSRV-compatible upgrade is available." },
     { id = "RUSTSEC-2026-0258", reason = "The Rust 1.85-compatible AWS SDK dependency line retains h2 0.3 via hyper 0.14; the 0.3 branch has no patched release. The in-tree h2 0.4 line is upgraded to 0.4.19." },
+    { id = "RUSTSEC-2026-0346", reason = "The Rust 1.85-compatible AWS SDK dependency line retains rustls 0.21 via aws-smithy-http-client 1.1; no patched MSRV-compatible upgrade is available. The in-tree rustls 0.23 line is upgraded to 0.23.46." },
+    { id = "RUSTSEC-2026-0349", reason = "The Rust 1.85-compatible AWS SDK dependency line retains rustls 0.21 via aws-smithy-http-client 1.1; no patched MSRV-compatible upgrade is available. The in-tree rustls 0.23 line is upgraded to 0.23.46." },
+    { id = "RUSTSEC-2026-0367", reason = "zip 6 arrives only through libduckdb-sys bundled tooling and never extracts attacker-controlled archives here; reaching zip 9 requires a libduckdb-sys release that adopts it." },
+    { id = "RUSTSEC-2026-0368", reason = "zip 6 arrives only through libduckdb-sys bundled tooling and never extracts attacker-controlled archives here; reaching zip 9 requires a libduckdb-sys release that adopts it." },
+    { id = "RUSTSEC-2026-0369", reason = "zip 6 arrives only through libduckdb-sys bundled tooling and never extracts attacker-controlled archives here; reaching zip 9 requires a libduckdb-sys release that adopts it." },
+    { id = "RUSTSEC-2026-0382", reason = "The Rust 1.85-compatible AWS SDK dependency line retains rustls-webpki 0.101 via rustls 0.21; no patched MSRV-compatible upgrade is available. The in-tree 0.103 line is upgraded to 0.103.16." },
+    { id = "RUSTSEC-2026-0387", reason = "The AWS SDK signature line (aws-sigv4 via p256 0.11) pins crypto-bigint 0.4/0.5; 0.7 requires the newer elliptic-curve line that no MSRV-compatible SDK release adopts." },
+    { id = "RUSTSEC-2026-0429", reason = "zip 6 arrives only through libduckdb-sys bundled tooling and never extracts attacker-controlled archives here; reaching zip 9 requires a libduckdb-sys release that adopts it." },
+    { id = "RUSTSEC-2026-0441", reason = "The AWS SDK smithy line retains pin-utils 0.1; unmaintained upstream with no compatible replacement at this SDK version." },
+    { id = "RUSTSEC-2026-0459", reason = "rusqlite 0.32 pins libsqlite3-sys 0.30; the 0.39 fix requires the rusqlite 0.37 migration, tracked as a dedicated follow-up." },
 ]
 
 [licenses]
