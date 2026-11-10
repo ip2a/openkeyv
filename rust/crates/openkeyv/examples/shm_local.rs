@@ -8,8 +8,11 @@
 //!   cargo run --example shm_local --features shm -- watch <path>
 //!   cargo run --example shm_local --features shm -- open <path>
 //!
-//! Terminal 1: `create /tmp/demo` then `put /tmp/demo greeting hello`
-//! Terminal 2: `watch /tmp/demo` (then `get /tmp/demo greeting`)
+//! Terminal 1: `create demo` then `put demo greeting hello`
+//! Terminal 2: `watch demo` (then `get demo greeting`)
+//! The path's parent must not be group/world-writable — `/tmp` (1777) is
+//! refused; use a directory only the owner can write, such as a private
+//! subdirectory of your home.
 
 use openkeyv::change::{ChangeFeedRequest, ChangeStart};
 use openkeyv::protocol::{AsyncChangeFeed, AsyncKeyValue};

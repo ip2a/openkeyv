@@ -27,8 +27,18 @@ use std::os::unix::process::ExitStatusExt;
 #[cfg(feature = "shm-test-hooks")]
 const SIGABRT: i32 = 6;
 
+/// A store path inside a per-process 0700 directory: the store refuses
+/// group/world-writable parents, and `/tmp` on Linux is 1777.
 fn store_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("openkeyv-process-{}-{name}", std::process::id()))
+    let dir = std::env::temp_dir().join(format!("openkeyv-process-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("process test directory must create");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("process test directory permissions must apply");
+    }
+    dir.join(name)
 }
 
 fn child_command(store: &Path, mode: &str) -> Command {

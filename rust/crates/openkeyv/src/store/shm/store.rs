@@ -446,10 +446,20 @@ mod tests {
     use super::*;
     use crate::change::ChangeStart;
 
+    /// A store path inside a per-process 0700 directory. The parent must be
+    /// owner-only because the store refuses group/world-writable parents —
+    /// which includes `/tmp` (1777) on Linux, where `std::env::temp_dir()`
+    /// does not hand out a per-user directory the way macOS does.
     fn temp_path(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("openkeyv-shm-store-{}-{name}", std::process::id()));
-        path
+        let dir = std::env::temp_dir().join(format!("openkeyv-shm-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("test directory must create");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .expect("test directory permissions must apply");
+        }
+        dir.join(name)
     }
 
     #[tokio::test]
@@ -559,5 +569,59 @@ mod tests {
         };
         assert!(error.to_string().contains("change_retention"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A group/world-writable parent lets another user pre-create or replace
+    /// the store and lock files, so `create` must refuse it outright.
+    #[tokio::test]
+    async fn create_rejects_a_writable_parent_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("openkeyv-shm-open-parent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o773)).unwrap();
+        }
+        let path = dir.join("store");
+        let error = match ShmStore::create(
+            ShmCreateConfig::new(&path).with_capacity_bytes(16 * 1024 * 1024),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("create must refuse a world-writable parent"),
+        };
+        assert!(
+            matches!(error, Error::PathSecurity(_)),
+            "expected PathSecurity, got: {error}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Read bits on the parent are harmless — the store files are 0600 — so
+    /// a typical shared home directory (0755) must be accepted.
+    #[tokio::test]
+    async fn create_accepts_a_readable_shared_parent_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("openkeyv-shm-shared-parent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = dir.join("store");
+        let store =
+            ShmStore::create(ShmCreateConfig::new(&path).with_capacity_bytes(16 * 1024 * 1024))
+                .expect("create must accept a 0755 parent");
+        store
+            .put("alpha", Value::utf8("one"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get("alpha", None).await.unwrap(),
+            Some(Value::utf8("one"))
+        );
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

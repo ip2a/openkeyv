@@ -36,8 +36,18 @@ fn workloads() -> Vec<(&'static str, Value)> {
     ]
 }
 
+/// A store path inside a per-process 0700 directory: the store refuses
+/// group/world-writable parents, and `/tmp` on Linux is 1777.
 fn bench_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("openkeyv-bench-{}-{name}", std::process::id()))
+    let dir = std::env::temp_dir().join(format!("openkeyv-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("bench directory must create");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("bench directory permissions must apply");
+    }
+    dir.join(name)
 }
 
 fn default_config(path: &PathBuf) -> ShmCreateConfig {

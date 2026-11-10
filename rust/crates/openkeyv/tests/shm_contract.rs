@@ -52,8 +52,17 @@ fn memory_harness() -> Harness {
 }
 
 fn shm_harness(name: &str) -> Harness {
-    let path =
-        std::env::temp_dir().join(format!("openkeyv-contract-{}-{name}", std::process::id()));
+    // Same rule as the unit tests: the parent must be owner-only because
+    // `/tmp` on Linux (1777) is group/world-writable and refused by the store.
+    let dir = std::env::temp_dir().join(format!("openkeyv-contract-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("contract test directory must create");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("contract test directory permissions must apply");
+    }
+    let path = dir.join(name);
     let store = Arc::new(
         ShmStore::create(
             ShmCreateConfig::new(&path)

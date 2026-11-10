@@ -81,6 +81,27 @@ fn check_private(path: &Path, meta: &std::fs::Metadata) -> Result<()> {
     Ok(())
 }
 
+/// The parent directory only has to keep other users from creating or
+/// replacing the store and lock files, so its group/other *write* bits are
+/// rejected. Read and search bits are harmless: every file we place there is
+/// 0600, which is what makes a typical shared home directory (0755) a valid
+/// store location.
+fn check_parent_writable(path: &Path, meta: &std::fs::Metadata) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mode = meta.permissions().mode();
+        if mode & 0o022 != 0 {
+            return Err(Error::PathSecurity(format!(
+                "{} must not be group- or world-writable (mode {:o}); place the store in \
+                 a directory only the owner can write",
+                path.display(),
+                mode & 0o777
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_parent(path: &Path) -> Result<()> {
     let parent = path.parent().ok_or_else(|| Error::StoreSetup {
         message: format!("path {} has no parent directory", path.display()),
@@ -96,7 +117,7 @@ fn validate_parent(path: &Path) -> Result<()> {
             message: format!("parent {} is not a directory", parent.display()),
         });
     }
-    check_private(parent, &meta)
+    check_parent_writable(parent, &meta)
 }
 
 pub(crate) fn attach_lock_path(path: &Path) -> PathBuf {
@@ -200,6 +221,7 @@ impl ShmClient {
 
     /// Attach to an existing store and replay crash recovery.
     pub(crate) fn open(path: &Path) -> Result<Self> {
+        validate_parent(path)?;
         let meta = std::fs::metadata(path).map_err(|error| Error::StoreSetup {
             message: format!("shm store {} not found: {error}", path.display()),
         })?;
