@@ -5,6 +5,8 @@
 //! not asserted against hand-written expectations, so any future drift in
 //! either backend fails here.
 
+#![cfg(all(feature = "shm", unix))]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
