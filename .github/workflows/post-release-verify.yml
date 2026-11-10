@@ -67,6 +67,11 @@ jobs:
           cd "${tmpdir}"
           cargo init --lib --name openkeyv_crates_verify
           cargo add openkeyv@${{ inputs.version }}
+          # scheduled-thread-pool 0.2.8 (via r2d2 via memcache) landed without
+          # rust-version metadata and pulls parking_lot 0.13, which requires
+          # rustc 1.95; a fresh resolution cannot build on this MSRV pin.
+          # Hold the last 1.85-compatible release until upstream declares one.
+          cargo update scheduled-thread-pool --precise 0.2.7
           cargo check
           echo "[ok] crates.io library dependency verification passed"
 
