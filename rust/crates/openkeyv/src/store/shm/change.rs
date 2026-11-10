@@ -1,14 +1,20 @@
 //! Shared change-feed ring and the subscription stream.
 //!
-//! Writers append event blocks to the arena under the writer lock and publish
-//! them through ring slots. A slot's `sequence` equals the global change
-//! revision of the event it holds, so slot `(rev - 1) % retention` is a stable
-//! address for revision `rev`. A slot whose sequence does not match the
-//! expected revision is a crash gap and is skipped: the event was replaced by
-//! the recovery path, which re-appends it at a fresh revision.
+//! The ring is an array of self-contained event slots (see
+//! [`super::layout::ChangeRingSlot`]). Slot `(rev - 1) % retention` is a
+//! stable address for revision `rev`; the slot's `sequence` carries the
+//! revision once published and [`SLOT_WRITING`] while it is being filled.
+//!
+//! Readers are lock-free. They wait while a reservation is still unpublished
+//! (`next_revision == count`) or a write is in progress, and skip a slot only
+//! when the writer has provably moved past it — a crash gap whose change the
+//! recovery path re-appended at a fresh revision. `read_event` re-verifies the
+//! slot sequence around the copy (seqlock), so a slot rewritten mid-read is
+//! retried, never torn.
 
 use super::client::ShmClient;
-use super::layout::{ChangeEventBlock, EVENT_HEADER_BYTES, Layout, SharedMap};
+use super::config::{MAX_COLLECTION_BYTES, MAX_KEY_BYTES};
+use super::layout::{EVENT_PAYLOAD_WORDS, Layout, SLOT_WRITING, SharedMap};
 use crate::change::{ChangeCursor, ChangeFilter, ChangeOperation, ChangeStream, StoreChange};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -42,35 +48,35 @@ pub(crate) fn append_event(
     if layout.change_retention == 0 {
         return Ok(0);
     }
+    let payload_len = collection.len() + key.len();
+    if payload_len > MAX_COLLECTION_BYTES + MAX_KEY_BYTES {
+        return Err(Error::StoreFormat {
+            message: format!("change event payload of {payload_len} bytes exceeds the slot"),
+        });
+    }
     let header = map.header();
-    let revision = header.change_revision.fetch_add(1, Ordering::Relaxed) + 1;
+    // AcqRel on the reservation publishes the previous event's slot store to
+    // any reader that observes this reservation: a reader that sees
+    // `count >= R + 1` can trust that revision R's slot is fully published.
+    let revision = header.change_revision.fetch_add(1, Ordering::AcqRel) + 1;
     let generation = header.store_generation.load(Ordering::Relaxed);
 
-    let payload_len = collection.len() + key.len();
-    let handle = super::arena::alloc(map, layout, payload_len)?;
-    let block: &ChangeEventBlock = map.event_block(handle.offset)?;
-    block.sequence.store(1, Ordering::Relaxed);
-    block.revision.store(revision, Ordering::Relaxed);
-    block.operation.store(operation, Ordering::Relaxed);
-    block.occurred_at_ms.store(now_unix_ms(), Ordering::Relaxed);
-    block.store_generation.store(generation, Ordering::Relaxed);
-    block.operation_id.store(operation_id, Ordering::Relaxed);
-    block
-        .collection_len
+    let slot = map.ring_slot((revision - 1) % layout.change_retention, layout)?;
+    slot.sequence.store(SLOT_WRITING, Ordering::Relaxed);
+    slot.operation.store(operation, Ordering::Relaxed);
+    slot.occurred_at_ms.store(now_unix_ms(), Ordering::Relaxed);
+    slot.store_generation.store(generation, Ordering::Relaxed);
+    slot.operation_id.store(operation_id, Ordering::Relaxed);
+    slot.collection_len
         .store(collection.len() as u64, Ordering::Relaxed);
-    block.key_len.store(key.len() as u64, Ordering::Relaxed);
+    slot.key_len.store(key.len() as u64, Ordering::Relaxed);
 
     let mut payload_bytes = Vec::with_capacity(payload_len);
     payload_bytes.extend_from_slice(collection.as_bytes());
     payload_bytes.extend_from_slice(key.as_bytes());
-    map.write_words(
-        handle.offset + EVENT_HEADER_BYTES as u64,
-        &chunk_to_words(&payload_bytes),
-    )?;
-    block.sequence.store(2, Ordering::Release);
-
-    let slot = map.ring_slot((revision - 1) % layout.change_retention, layout)?;
-    slot.event_offset.store(handle.offset, Ordering::Relaxed);
+    for (target, word) in slot.payload.iter().zip(chunk_to_words(&payload_bytes)) {
+        target.store(word, Ordering::Relaxed);
+    }
     slot.sequence.store(revision, Ordering::Release);
     Ok(revision)
 }
@@ -105,8 +111,7 @@ pub(crate) fn ring_contains_operation(
         if slot.sequence.load(Ordering::Acquire) != revision {
             continue;
         }
-        let block = map.event_block(slot.event_offset.load(Ordering::Acquire))?;
-        if block.operation_id.load(Ordering::Relaxed) == operation_id {
+        if slot.operation_id.load(Ordering::Relaxed) == operation_id {
             return Ok(true);
         }
     }
@@ -117,18 +122,44 @@ pub(crate) fn now_unix_ms() -> u64 {
     Utc::now().timestamp_millis().max(0) as u64
 }
 
-fn read_event(map: &SharedMap, layout: &Layout, revision: u64) -> Result<StoreChange> {
+/// Read one retained event, seqlock-guarded. `Ok(None)` means the slot changed
+/// under us (write in progress or rewritten); the caller retries the same
+/// revision.
+fn read_event(map: &SharedMap, layout: &Layout, revision: u64) -> Result<Option<StoreChange>> {
     let slot = map.ring_slot((revision - 1) % layout.change_retention, layout)?;
-    let offset = slot.event_offset.load(Ordering::Acquire);
-    let block = map.event_block(offset)?;
+    let sequence = slot.sequence.load(Ordering::Acquire);
+    if sequence != revision {
+        return Ok(None);
+    }
 
-    let collection_len = block.collection_len.load(Ordering::Relaxed) as usize;
-    let key_len = block.key_len.load(Ordering::Relaxed) as usize;
+    let operation_tag = slot.operation.load(Ordering::Relaxed);
+    let occurred_ms = slot.occurred_at_ms.load(Ordering::Relaxed);
+    let collection_len = slot.collection_len.load(Ordering::Relaxed) as usize;
+    let key_len = slot.key_len.load(Ordering::Relaxed) as usize;
+    if collection_len + key_len > EVENT_PAYLOAD_WORDS * 8 {
+        return Err(Error::StoreFormat {
+            message: format!(
+                "change event holds identifiers of {} bytes, above the slot capacity",
+                collection_len + key_len
+            ),
+        });
+    }
     let words = (collection_len + key_len).div_ceil(8);
-    let payload = map.read_words(offset + EVENT_HEADER_BYTES as u64, words)?;
+    let payload: Vec<u64> = slot
+        .payload
+        .iter()
+        .take(words)
+        .map(|word| word.load(Ordering::Relaxed))
+        .collect();
+    // Seqlock re-verify: a rewrite (or a publish in progress) invalidates
+    // everything copied above.
+    if slot.sequence.load(Ordering::Acquire) != sequence {
+        return Ok(None);
+    }
+
     let bytes = payload
         .iter()
-        .flat_map(|w| w.to_le_bytes())
+        .flat_map(|word| word.to_le_bytes())
         .collect::<Vec<u8>>();
     let collection =
         String::from_utf8(bytes[..collection_len].to_vec()).map_err(|_| Error::StoreFormat {
@@ -139,20 +170,16 @@ fn read_event(map: &SharedMap, layout: &Layout, revision: u64) -> Result<StoreCh
             message: "change event holds a non-UTF-8 key".to_string(),
         },
     )?;
+    let occurred_at = DateTime::from_timestamp_millis(occurred_ms as i64).unwrap_or_else(Utc::now);
 
-    let revision_value = block.revision.load(Ordering::Relaxed);
-    let occurred_at =
-        DateTime::from_timestamp_millis(block.occurred_at_ms.load(Ordering::Relaxed) as i64)
-            .unwrap_or_else(Utc::now);
-
-    Ok(StoreChange {
-        cursor: ChangeCursor::new(revision_value.to_string()),
-        revision: revision_value,
+    Ok(Some(StoreChange {
+        cursor: ChangeCursor::new(revision.to_string()),
+        revision,
         collection,
         key,
-        operation: operation_from_tag(block.operation.load(Ordering::Relaxed))?,
+        operation: operation_from_tag(operation_tag)?,
         occurred_at,
-    })
+    }))
 }
 
 /// A resumable stream over the shared change ring.
@@ -210,16 +237,28 @@ impl ChangeStream for ShmChangeStream {
             let slot = map.ring_slot((self.next_revision - 1) % layout.change_retention, layout)?;
             let slot_sequence = slot.sequence.load(Ordering::Acquire);
             if slot_sequence != self.next_revision {
-                // Crash gap: recovery re-appended this change at a fresh
-                // revision; skip the empty slot.
-                self.next_revision += 1;
+                // Wait while the writer has reserved this revision but not
+                // published it yet, or is filling the slot right now. Skip
+                // only once the writer has provably moved past it — a crash
+                // gap whose change recovery re-appended at a fresh revision.
+                if slot_sequence == SLOT_WRITING || self.next_revision == count {
+                    tokio::time::sleep(Duration::from_millis(self.backoff_ms)).await;
+                    self.backoff_ms = (self.backoff_ms * 2).min(BACKOFF_MAX_MS);
+                } else {
+                    self.next_revision += 1;
+                }
                 continue;
             }
-            let change = read_event(map, layout, self.next_revision)?;
-            self.next_revision += 1;
-            self.backoff_ms = BACKOFF_MIN_MS;
-            if self.filter.matches(&change) {
-                return Ok(Some(change));
+            match read_event(map, layout, self.next_revision)? {
+                Some(change) => {
+                    self.next_revision += 1;
+                    self.backoff_ms = BACKOFF_MIN_MS;
+                    if self.filter.matches(&change) {
+                        return Ok(Some(change));
+                    }
+                }
+                // Torn read: the slot changed under us; retry this revision.
+                None => continue,
             }
         }
     }

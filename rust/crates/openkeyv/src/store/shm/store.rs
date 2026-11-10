@@ -453,6 +453,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overwrites_leave_the_arena_bounded() {
+        let path = temp_path("bounded");
+        let store = ShmStore::create(
+            ShmCreateConfig::new(&path)
+                .with_capacity_bytes(16 * 1024 * 1024)
+                .with_change_retention(64),
+        )
+        .unwrap();
+
+        // Far more overwrites than the change ring holds: entry blocks cycle
+        // through the free lists and change events rewrite their ring slot in
+        // place, so the arena high-water mark must plateau after warmup
+        // instead of growing with every write.
+        for _ in 0..256 {
+            store
+                .put("hot", Value::utf8("v"), None, None)
+                .await
+                .unwrap();
+        }
+        let high_water = store
+            .client
+            .map
+            .header()
+            .arena_high_water
+            .load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..256 {
+            store
+                .put("hot", Value::utf8("v"), None, None)
+                .await
+                .unwrap();
+        }
+        let settled = store
+            .client
+            .map
+            .header()
+            .arena_high_water
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            high_water, settled,
+            "arena high water must not grow after warmup"
+        );
+
+        // The ring rewrote in place the whole time: every revision is still
+        // readable and exactly the last 64 revisions are retained.
+        let mut stream = store
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Latest,
+                filter: Default::default(),
+            })
+            .await
+            .unwrap();
+        store
+            .put("hot", Value::utf8("final"), None, None)
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv())
+            .await
+            .expect("live event must arrive")
+            .unwrap()
+            .expect("store not destroyed");
+        assert_eq!(event.key, "hot");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
     async fn put_get_delete_roundtrip() {
         let path = temp_path("roundtrip");
         let store =

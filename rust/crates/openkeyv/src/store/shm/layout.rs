@@ -14,10 +14,11 @@
 //! FREELISTS   FREE_CLASSES * 8 B   one head per size class
 //! INDEX_A     index_entries * 16 B  open-addressed slots
 //! INDEX_B     index_entries * 16 B  shadow table for compaction
-//! RING        change_retention * 16 B  change-feed slots
-//! ARENA       rest of the file      entry/event blocks
+//! RING        change_retention * RING_SLOT_BYTES  self-contained change events
+//! ARENA       rest of the file      entry blocks
 //! ```
 
+use super::config::{MAX_COLLECTION_BYTES, MAX_KEY_BYTES};
 use crate::error::{Error, Result};
 use memmap2::MmapMut;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,8 +32,16 @@ pub(crate) const JOURNAL_BYTES: usize = 4096;
 pub(crate) const MIN_BLOCK_BYTES: usize = 256;
 /// Fixed header of an entry block; payload follows immediately.
 pub(crate) const BLOCK_HEADER_BYTES: usize = 128;
-/// Fixed header of a change-feed event block.
-pub(crate) const EVENT_HEADER_BYTES: usize = 64;
+/// Payload words a ring slot reserves for `collection || key`: the worst-case
+/// identifier pair, rounded up to a word.
+pub(crate) const EVENT_PAYLOAD_WORDS: usize = (MAX_COLLECTION_BYTES + MAX_KEY_BYTES).div_ceil(8);
+/// Fixed size of one change-ring slot: seven header words plus the payload.
+/// Retained history costs exactly `change_retention * RING_SLOT_BYTES` —
+/// bounded by construction, nothing to free.
+pub(crate) const RING_SLOT_BYTES: usize = 7 * 8 + EVENT_PAYLOAD_WORDS * 8;
+/// Smallest usable arena after header, indexes, and the change ring. Create
+/// rejects layouts that leave less: the arena is where entries live.
+pub(crate) const MIN_ARENA_BYTES: u64 = 1024 * 1024;
 /// Size classes are `MIN_BLOCK_BYTES << class`. 32 classes cover up to 2^39 B.
 pub(crate) const FREE_CLASSES: usize = 32;
 
@@ -41,6 +50,10 @@ pub(crate) const RECORD_REGISTRY: u64 = 2;
 
 pub(crate) const SLOT_EMPTY: u64 = 0;
 pub(crate) const SLOT_TOMBSTONE: u64 = 1;
+/// `ChangeRingSlot::sequence` value while a writer is filling the slot.
+/// Deliberately a value no revision can take, so readers can tell an
+/// in-progress write from a published event.
+pub(crate) const SLOT_WRITING: u64 = u64::MAX;
 
 pub(crate) const STATE_EMPTY: u64 = 0;
 pub(crate) const STATE_READY: u64 = 1;
@@ -70,13 +83,29 @@ pub(crate) struct IndexSlot {
     pub sequence: AtomicU64,
 }
 
-/// One change-feed ring slot. `sequence` doubles as the global change revision
-/// of the event stored at `event_offset`; a slot whose `sequence` differs from
-/// the expected revision is a gap (lost to a crash) and is skipped.
+/// One change-feed ring slot: a fixed-size, self-contained change event.
+///
+/// `sequence` doubles as the global change revision of the event held in this
+/// slot: [`SLOT_WRITING`] while the writer fills it, the revision once
+/// published. Slot `(rev - 1) % retention` is a stable address for revision
+/// `rev`; a slot whose sequence is neither the expected revision nor
+/// [`SLOT_WRITING`] is a crash gap and is skipped. Events never touch the
+/// arena — each slot owns its storage, so nothing is ever allocated or freed
+/// for a change feed.
 #[repr(C)]
 pub(crate) struct ChangeRingSlot {
-    pub event_offset: AtomicU64,
+    /// [`SLOT_WRITING`] = being written; otherwise the revision held here.
     pub sequence: AtomicU64,
+    /// `OP_PUT` or `OP_DELETE`.
+    pub operation: AtomicU64,
+    pub occurred_at_ms: AtomicU64,
+    pub store_generation: AtomicU64,
+    /// Mutation id that produced this event; used for crash-recovery dedupe.
+    pub operation_id: AtomicU64,
+    pub collection_len: AtomicU64,
+    pub key_len: AtomicU64,
+    /// `collection || key`, zero-padded to a word boundary.
+    pub payload: [AtomicU64; EVENT_PAYLOAD_WORDS],
 }
 
 /// Fixed file header. Every counter lives here so any process can observe
@@ -159,24 +188,6 @@ pub(crate) struct EntryBlockHeader {
     pub reserved: [AtomicU64; 4],
 }
 
-/// Fixed header of a change-feed event block. Payload
-/// (`collection || key`, zero-padded to 8) follows at `EVENT_HEADER_BYTES`.
-/// Event blocks are immutable once published.
-#[repr(C)]
-pub(crate) struct ChangeEventBlock {
-    pub sequence: AtomicU64,
-    /// Global change revision; equals the owning ring slot's `sequence`.
-    pub revision: AtomicU64,
-    /// `OP_PUT` or `OP_DELETE`.
-    pub operation: AtomicU64,
-    pub occurred_at_ms: AtomicU64,
-    pub store_generation: AtomicU64,
-    /// Mutation id that produced this event; used for crash-recovery dedupe.
-    pub operation_id: AtomicU64,
-    pub collection_len: AtomicU64,
-    pub key_len: AtomicU64,
-}
-
 /// Computes every region offset from the three layout parameters.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layout {
@@ -198,8 +209,7 @@ impl Layout {
         let slot_bytes = index_entries * std::mem::size_of::<IndexSlot>() as u64;
         let off_index1 = off_index0 + slot_bytes;
         let off_ring = off_index1 + slot_bytes;
-        let off_arena =
-            align8(off_ring + change_retention * std::mem::size_of::<ChangeRingSlot>() as u64);
+        let off_arena = align8(off_ring + change_retention * RING_SLOT_BYTES as u64);
         Layout {
             file_len,
             index_entries,
@@ -227,7 +237,7 @@ impl Layout {
         let change_retention = header.change_retention.load(Ordering::Acquire);
         let layout = Self::compute(index_entries, change_retention, file_len);
         let expected_capacity = header.arena_capacity.load(Ordering::Acquire);
-        if layout.arena_capacity != expected_capacity || layout.arena_capacity == 0 {
+        if layout.arena_capacity != expected_capacity || layout.arena_capacity < MIN_ARENA_BYTES {
             return Err(Error::StoreFormat {
                 message: format!(
                     "arena capacity mismatch: header {expected_capacity}, layout {}",
@@ -331,10 +341,6 @@ impl SharedMap {
         self.ref_at::<EntryBlockHeader>(offset, BLOCK_HEADER_BYTES)
     }
 
-    pub(crate) fn event_block(&self, offset: u64) -> Result<&ChangeEventBlock> {
-        self.ref_at::<ChangeEventBlock>(offset, EVENT_HEADER_BYTES)
-    }
-
     pub(crate) fn freelist_head(&self, class: usize, layout: &Layout) -> Result<&AtomicU64> {
         debug_assert!(class < FREE_CLASSES);
         let offset = layout.off_freelist + (class * 8) as u64;
@@ -397,9 +403,12 @@ mod tests {
         assert_eq!(std::mem::size_of::<Header>(), HEADER_BYTES);
         assert_eq!(std::mem::size_of::<JournalRecord>(), JOURNAL_BYTES);
         assert_eq!(std::mem::size_of::<IndexSlot>(), 16);
-        assert_eq!(std::mem::size_of::<ChangeRingSlot>(), 16);
+        assert_eq!(
+            std::mem::size_of::<ChangeRingSlot>(),
+            RING_SLOT_BYTES,
+            "ring slot must be the documented fixed size"
+        );
         assert_eq!(std::mem::size_of::<EntryBlockHeader>(), BLOCK_HEADER_BYTES);
-        assert_eq!(std::mem::size_of::<ChangeEventBlock>(), EVENT_HEADER_BYTES);
     }
 
     #[test]
@@ -413,8 +422,14 @@ mod tests {
         );
         assert_eq!(layout.off_index[1], layout.off_index[0] + slot_bytes);
         assert_eq!(layout.off_ring, layout.off_index[1] + slot_bytes);
-        assert!(layout.off_arena >= layout.off_ring + 10_000 * 16);
+        assert!(layout.off_arena >= layout.off_ring + 10_000 * RING_SLOT_BYTES as u64);
         assert_eq!(layout.arena_capacity, 256 * 1024 * 1024 - layout.off_arena);
+    }
+
+    #[test]
+    fn minimum_file_with_defaults_still_leaves_a_usable_arena() {
+        let layout = Layout::compute(65_536, 8_192, 16 * 1024 * 1024);
+        assert!(layout.arena_capacity >= MIN_ARENA_BYTES);
     }
 
     #[test]

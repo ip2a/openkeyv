@@ -98,3 +98,12 @@ harness = false
 name = "redis_store"
 harness = false
 required-features = ["redis"]
+
+[[bench]]
+name = "shm_store"
+harness = false
+required-features = ["shm"]
+
+[[example]]
+name = "shm_local"
+required-features = ["shm"]

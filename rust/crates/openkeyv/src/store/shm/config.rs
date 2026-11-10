@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 pub(crate) const DEFAULT_CAPACITY_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const DEFAULT_INDEX_ENTRIES: u32 = 65_536;
-pub(crate) const DEFAULT_CHANGE_RETENTION: u32 = 10_000;
+pub(crate) const DEFAULT_CHANGE_RETENTION: u32 = 8_192;
 
 const MIN_CAPACITY_BYTES: u64 = 16 * 1024 * 1024;
 const MIN_INDEX_ENTRIES: u32 = 1_024;
@@ -38,7 +38,9 @@ pub struct ShmCreateConfig {
     pub capacity_bytes: u64,
     /// Slots per hash table; must be a power of two.
     pub index_entries: u32,
-    /// Change-feed ring capacity; 0 disables the change feed.
+    /// Change-feed ring capacity; 0 disables the change feed. Each retained
+    /// event costs about 1.6 KiB of the backing file (a self-contained ring
+    /// slot); create rejects layouts that leave less than 1 MiB for entries.
     pub change_retention: u32,
 }
 

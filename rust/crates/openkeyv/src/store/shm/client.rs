@@ -20,8 +20,9 @@ use super::index::{self, Locate};
 use super::layout::{
     ChangeRingSlot, FORMAT_VERSION, FREE_CLASSES, HEADER_BYTES, IndexSlot, JOURNAL_BYTES,
     JOURNAL_IDLE, JOURNAL_PREPARED, JOURNAL_PUBLISHED, JOURNAL_RECORDED, JournalRecord, KIND_CULL,
-    KIND_REMOVE, KIND_UPSERT, Layout, MAGIC, OP_DELETE, OP_PUT, RECORD_ENTRY, RECORD_REGISTRY,
-    SLOT_EMPTY, SLOT_TOMBSTONE, STATE_DESTROYING, STATE_EMPTY, STATE_READY, SharedMap, slot_hash,
+    KIND_REMOVE, KIND_UPSERT, Layout, MAGIC, MIN_ARENA_BYTES, OP_DELETE, OP_PUT, RECORD_ENTRY,
+    RECORD_REGISTRY, SLOT_EMPTY, SLOT_TOMBSTONE, STATE_DESTROYING, STATE_EMPTY, STATE_READY,
+    SharedMap, slot_hash,
 };
 use crate::change::ChangeStart;
 use crate::error::{Error, Result};
@@ -158,6 +159,15 @@ impl ShmClient {
             config.change_retention as u64,
             config.capacity_bytes,
         );
+        if layout.arena_capacity < MIN_ARENA_BYTES {
+            return Err(Error::StoreSetup {
+                message: format!(
+                    "capacity of {} bytes leaves only {} bytes of entry arena after the index \
+                     and change ring; raise capacity_bytes or lower index_entries/change_retention",
+                    config.capacity_bytes, layout.arena_capacity
+                ),
+            });
+        }
 
         let client = Self {
             map,
