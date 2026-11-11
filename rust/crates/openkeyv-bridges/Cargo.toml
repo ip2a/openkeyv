@@ -1,0 +1,55 @@
+[package]
+name = "openkeyv-bridges"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SDK-backed store bridges for openkeyv - SQL/NoSQL/cloud backends, all opt-in"
+repository = "https://github.com/ip2a/openkeyv"
+keywords = ["kv", "store", "async", "database"]
+categories = ["database", "caching", "asynchronous"]
+
+[dependencies]
+openkeyv = { version = "0.6", path = "../openkeyv" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+bytes = "1.10"
+
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono"], optional = true }
+mongodb = { version = "3.2", default-features = false, features = ["compat-3-0-0", "rustls-tls"], optional = true }
+futures-util = { version = "0.3", optional = true }
+rocksdb = { version = "0.23", features = ["multi-threaded-cf"], optional = true }
+aws-config = { version = "=1.8.0", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process"], optional = true }
+aws-sdk-dynamodb = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true }
+duckdb = { version = "1.2", features = ["bundled", "chrono"], optional = true }
+rusqlite = { version = "0.32", features = ["bundled", "chrono"], optional = true }
+vaultrs = { version = "0.8", optional = true }
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"], optional = true }
+firestore = { version = "0.48", optional = true }
+opensearch = { version = "2.4", optional = true }
+gcloud-sdk = { version = "0.29", optional = true }
+
+[features]
+default = []
+postgres = ["dep:sqlx"]
+mongodb = ["dep:mongodb", "dep:futures-util"]
+rocksdb = ["dep:rocksdb"]
+dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
+s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
+duckdb = ["dep:duckdb"]
+sqlite = ["dep:rusqlite"]
+vault = ["dep:vaultrs", "dep:futures-util"]
+keyring = ["dep:keyring"]
+firestore = ["dep:firestore", "dep:futures-util", "bytes/serde"]
+firestore-tests = ["firestore", "dep:gcloud-sdk"]
+opensearch = ["dep:opensearch"]
+
+[dev-dependencies]
+tempfile = "3.14"

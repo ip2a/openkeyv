@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/openkeyv"]
+members = ["crates/openkeyv", "crates/openkeyv-bridges"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"

@@ -3630,7 +3630,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openkeyv"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -3668,6 +3668,36 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
+ "tracing",
+ "vaultrs",
+]
+
+[[package]]
+name = "openkeyv-bridges"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "aws-sdk-s3",
+ "bytes",
+ "chrono",
+ "duckdb",
+ "firestore",
+ "futures-util",
+ "gcloud-sdk",
+ "keyring",
+ "mongodb",
+ "openkeyv",
+ "opensearch",
+ "rocksdb",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "vaultrs",
 ]
