@@ -20,6 +20,8 @@ tokio.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 bytes = "1.10"
+blake3 = "1.8"
+base64 = "0.22"
 
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono"], optional = true }
 mongodb = { version = "3.2", default-features = false, features = ["compat-3-0-0", "rustls-tls"], optional = true }

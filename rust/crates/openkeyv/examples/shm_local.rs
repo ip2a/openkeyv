@@ -1,6 +1,8 @@
 //! Two-terminal demo of the shared-memory store: one process writes, another
 //! reads and watches the change feed through the same backing file.
 //!
+#![cfg(unix)]
+
 //! Usage:
 //!   cargo run --example shm_local --features shm -- create <path>
 //!   cargo run --example shm_local --features shm -- put <path> <key> <value>
@@ -29,9 +31,6 @@ fn usage() -> ! {
 }
 
 fn main() {
-    #[cfg(not(all(feature = "shm", unix)))]
-    compile_error!("the shm_local example needs a unix platform with the shm feature");
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or_else(|| usage());
 

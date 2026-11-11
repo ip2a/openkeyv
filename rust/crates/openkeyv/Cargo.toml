@@ -15,8 +15,8 @@ categories = ["database", "caching", "asynchronous"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
@@ -28,58 +28,23 @@ flate2 = "1.1"
 base64 = "0.22"
 bytes = "1.10"
 getrandom = "0.3"
-memmap2 = { version = "0.9", optional = true }
-fs2 = { version = "0.4", optional = true }
-gcloud-sdk = { version = "0.29", optional = true }
-
-sled = { version = "0.34", optional = true }
-redis = { version = "0.29", features = ["tokio-comp", "connection-manager"], optional = true }
-socket2 = { version = "0.5", features = ["all"], optional = true }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "chrono"], optional = true }
-mongodb = { version = "3.2", default-features = false, features = ["compat-3-0-0", "rustls-tls"], optional = true }
-futures-util = { version = "0.3", optional = true }
-rocksdb = { version = "0.23", features = ["multi-threaded-cf"], optional = true }
-aws-config = { version = "=1.8.0", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process"], optional = true }
-aws-sdk-dynamodb = { version = "1", optional = true }
-aws-sdk-s3 = { version = "1", optional = true }
-duckdb = { version = "1.2", features = ["bundled", "chrono"], optional = true }
-rusqlite = { version = "0.32", features = ["bundled", "chrono"], optional = true }
-memcache = { version = "0.19", optional = true }
-vaultrs = { version = "0.8", optional = true }
-keyring = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"], optional = true }
-firestore = { version = "0.48", optional = true }
-opensearch = { version = "2.4", optional = true }
+memmap2 = { version = "0.9" }
+fs2 = { version = "0.4" }
+sled = { version = "0.34" }
+redis = { version = "0.29", features = ["tokio-comp", "connection-manager"] }
+socket2 = { version = "0.5", features = ["all"] }
+memcache = { version = "0.19", default-features = false }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], optional = true }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional = true }
 
 [features]
-default = ["light", "redis", "memcached", "valkey"]
-
-# 零成本后端，连 redis 都没有
-light = ["json", "keyring"]
-
-json = ["dep:serde_json", "dep:serde"]
-shm = ["dep:memmap2", "dep:fs2"]
-shm-test-hooks = ["shm"]
-disk = ["dep:sled"]
-redis = ["dep:redis", "dep:socket2"]
-postgres = ["dep:sqlx"]
-mongodb = ["dep:mongodb", "dep:futures-util"]
-rocksdb = ["dep:rocksdb"]
-dynamodb = ["dep:aws-config", "dep:aws-sdk-dynamodb"]
-s3 = ["dep:aws-config", "dep:aws-sdk-s3"]
-duckdb = ["dep:duckdb"]
-sqlite = ["dep:rusqlite"]
-memcached = ["dep:memcache"]
-valkey = ["dep:redis", "dep:socket2"]
-vault = ["dep:vaultrs", "dep:futures-util", "dep:serde", "dep:serde_json"]
-keyring = ["dep:keyring"]
-firestore = ["dep:firestore", "dep:futures-util", "dep:serde", "bytes/serde"]
-firestore-tests = ["firestore", "dep:gcloud-sdk"]
-opensearch = ["dep:opensearch", "dep:serde", "dep:serde_json"]
+default = []
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]
-python-core = ["python", "json", "disk", "sqlite", "redis", "valkey"]
-python-full = ["python-core", "keyring", "disk", "sqlite", "memcached", "postgres", "mongodb", "duckdb", "vault", "opensearch", "dynamodb", "s3", "firestore"]
+# Placeholder chains until the python round redefines the wheel feature sets:
+# the backend features they used to aggregate are gone (resident or bridged).
+python-core = ["python"]
+python-full = ["python-core"]
+shm-test-hooks = []
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -97,13 +62,10 @@ harness = false
 [[bench]]
 name = "redis_store"
 harness = false
-required-features = ["redis"]
 
 [[bench]]
 name = "shm_store"
 harness = false
-required-features = ["shm"]
 
 [[example]]
 name = "shm_local"
-required-features = ["shm"]

@@ -37,7 +37,8 @@ impl ManagedEntry {
         })
     }
 
-    pub(crate) fn validate_ttl(ttl_secs: f64) -> Result<()> {
+    /// Reject TTLs the store family cannot represent (negative, NaN, overflow).
+    pub fn validate_ttl(ttl_secs: f64) -> Result<()> {
         Self::expiration_at(Utc::now(), ttl_secs).map(|_| ())
     }
 

@@ -133,40 +133,10 @@ async fn filetree_identity_regression() {
     assert_collection_identity_and_destruction(&store).await;
 }
 
-#[cfg(feature = "disk")]
 #[tokio::test]
 async fn disk_identity_regression() {
     let directory = tempfile::tempdir().unwrap();
     let store = openkeyv::store::disk::DiskStore::new(directory.path()).unwrap();
-    assert_exact_identity(&store).await;
-    assert_collection_identity_and_destruction(&store).await;
-}
-
-#[cfg(feature = "rocksdb")]
-#[tokio::test]
-async fn rocksdb_identity_regression() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = openkeyv::store::rocksdb::RocksDBStore::new(directory.path()).unwrap();
-    assert_exact_identity(&store).await;
-    assert_collection_identity_and_destruction(&store).await;
-}
-
-#[cfg(feature = "duckdb")]
-#[tokio::test]
-async fn duckdb_identity_regression() {
-    let store = openkeyv::store::duckdb::DuckDBStore::new(None, None)
-        .await
-        .unwrap();
-    assert_exact_identity(&store).await;
-    assert_collection_identity_and_destruction(&store).await;
-}
-
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn sqlite_identity_regression() {
-    let store = openkeyv::store::sqlite::SqliteStore::new(None, None)
-        .await
-        .unwrap();
     assert_exact_identity(&store).await;
     assert_collection_identity_and_destruction(&store).await;
 }

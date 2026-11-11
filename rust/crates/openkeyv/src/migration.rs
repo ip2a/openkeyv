@@ -16,7 +16,6 @@ pub trait AsyncKeyspaceMigration: Send + Sync {
 }
 
 /// Rewrite legacy flat identities into `keyspace` in place.
-#[cfg(any(feature = "redis", feature = "valkey"))]
 pub async fn migrate_into_keyspace<S>(
     store: &S,
     keyspace: &Subspace,

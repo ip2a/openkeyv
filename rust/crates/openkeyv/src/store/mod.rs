@@ -1,36 +1,10 @@
-#[cfg(feature = "disk")]
 pub mod disk;
-#[cfg(feature = "duckdb")]
-pub mod duckdb;
-#[cfg(feature = "dynamodb")]
-pub mod dynamodb;
 pub mod filetree;
-#[cfg(feature = "firestore")]
-pub mod firestore;
-#[cfg(feature = "keyring")]
-pub mod keyring;
-#[cfg(feature = "memcached")]
 pub mod memcached;
 pub mod memory;
-#[cfg(feature = "mongodb")]
-pub mod mongodb;
 pub mod null;
-#[cfg(feature = "opensearch")]
-pub mod opensearch;
-#[cfg(feature = "postgres")]
-pub mod postgres;
-#[cfg(feature = "redis")]
 pub mod redis;
-#[cfg(feature = "rocksdb")]
-pub mod rocksdb;
-#[cfg(feature = "s3")]
-pub mod s3;
-#[cfg(all(feature = "shm", unix))]
+#[cfg(unix)]
 pub mod shm;
 pub mod simple;
-#[cfg(feature = "sqlite")]
-pub mod sqlite;
-#[cfg(feature = "valkey")]
 pub mod valkey;
-#[cfg(feature = "vault")]
-pub mod vault;

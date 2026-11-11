@@ -1,6 +1,8 @@
 //! Benchmarks for the SHM store: warmed-up single-process read/write/CAS/
 //! batch, plus two-process workloads where a real helper process reads the
 //! same store concurrently.
+#![cfg(unix)]
+
 //!
 //! Run with: cargo bench --bench shm_store --features shm
 //!

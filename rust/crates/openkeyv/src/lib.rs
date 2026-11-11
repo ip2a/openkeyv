@@ -15,37 +15,38 @@
 //!
 //! ## Backends
 //!
-//! | Backend | Feature | Description |
-//! |---------|---------|-------------|
-//! | Memory | default | In-memory DashMap |
-//! | Disk | `disk` | Sled embedded DB |
-//! | Redis | `redis` | Redis protocol |
-//! | RocksDB | `rocksdb` | RocksDB embedded |
-//! | Postgres | `postgres` | PostgreSQL via sqlx |
-//! | MongoDB | `mongodb` | MongoDB |
-//! | DynamoDB | `dynamodb` | AWS DynamoDB |
-//! | S3 | `s3` | AWS S3 |
-//! | DuckDB | `duckdb` | DuckDB embedded |
-//! | SQLite | `sqlite` | SQLite embedded |
-//! | Memcached | `memcached` | Memcached |
-//! | Valkey | `valkey` | Valkey (Redis-compatible) |
-//! | Vault | `vault` | HashiCorp Vault |
-//! | Keyring | `keyring` | OS keyring |
-//! | Firestore | `firestore` | Google Firestore |
-//! | OpenSearch | `opensearch` | OpenSearch |
+//! Native backends ship unconditionally. SDK-backed backends live in the
+//! `openkeyv-bridges` crate, each behind its own feature.
+//!
+//! | Backend | Where | Description |
+//! |---------|-------|-------------|
+//! | Memory | core | In-memory DashMap |
+//! | Disk | core | Sled embedded DB |
+//! | Redis | core | Redis protocol |
+//! | Valkey | core | Valkey (Redis-compatible) |
+//! | Memcached | core | Memcached |
+//! | SHM | core (unix only) | Shared-memory store |
+//! | RocksDB | bridges `rocksdb` | RocksDB embedded |
+//! | Postgres | bridges `postgres` | PostgreSQL via sqlx |
+//! | MongoDB | bridges `mongodb` | MongoDB |
+//! | DynamoDB | bridges `dynamodb` | AWS DynamoDB |
+//! | S3 | bridges `s3` | AWS S3 |
+//! | DuckDB | bridges `duckdb` | DuckDB embedded |
+//! | SQLite | bridges `sqlite` | SQLite embedded |
+//! | Vault | bridges `vault` | HashiCorp Vault |
+//! | Keyring | bridges `keyring` | OS keyring |
+//! | Firestore | bridges `firestore` | Google Firestore |
+//! | OpenSearch | bridges `opensearch` | OpenSearch |
 
-#[cfg(any(feature = "redis", feature = "valkey"))]
 mod cas;
 pub mod change;
 pub mod entry;
 pub mod error;
-#[cfg(feature = "json")]
 pub mod factory;
 pub mod handle;
 pub mod migration;
 pub mod protocol;
 pub mod store;
-#[cfg(feature = "json")]
 pub mod store_config;
 pub mod utils;
 pub mod value;
@@ -62,7 +63,6 @@ pub use entry::ManagedEntry;
 pub use error::{Error, Result};
 pub use handle::{StoreCapabilities, StoreHandle};
 pub use migration::AsyncKeyspaceMigration;
-#[cfg(any(feature = "redis", feature = "valkey"))]
 pub use migration::migrate_into_keyspace;
 pub use migration::{
     MigrationOptions, MigrationReport, apply_change, copy_snapshot, copy_snapshot_with_feed,
@@ -73,7 +73,6 @@ pub use protocol::{
     AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, BaseStore,
     CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue,
 };
-#[cfg(feature = "json")]
 pub use store_config::StoreConfig;
 pub use utils::compound::{
     Subspace, compound_key, decompound_key, subspace_compound_key, subspace_decompound_key,
