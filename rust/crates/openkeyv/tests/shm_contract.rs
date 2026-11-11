@@ -12,15 +12,15 @@ use std::time::{Duration, Instant};
 
 use openkeyv::Revision;
 use openkeyv::change::{
-    ChangeCursor, ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream,
-    StoreChange,
+    ChangeCause, ChangeCursor, ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart,
+    ChangeStream, StoreChange,
 };
 use openkeyv::protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
     AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
     CompareAndSwapResult,
 };
-use openkeyv::store::memory::MemoryStore;
+use openkeyv::store::memory::{MemoryConfig, MemoryStore};
 use openkeyv::store::shm::{ShmCreateConfig, ShmStore};
 use openkeyv::value::Value;
 
@@ -126,8 +126,9 @@ async fn drain(stream: &mut Box<dyn ChangeStream + Send>, expected: usize) -> Ve
     changes
 }
 
-/// Events with backend-specific fields (occurred_at) stripped for comparison.
-fn event_summary(changes: &[StoreChange]) -> Vec<(u64, String, String, String)> {
+/// Events with backend-specific fields stripped for comparison. The cause
+/// rides along: cause tagging is part of the differential contract.
+fn event_summary(changes: &[StoreChange]) -> Vec<(u64, String, String, String, String)> {
     changes
         .iter()
         .map(|c| {
@@ -136,6 +137,7 @@ fn event_summary(changes: &[StoreChange]) -> Vec<(u64, String, String, String)> 
                 c.cursor.as_str().to_string(),
                 c.collection.clone(),
                 format!("{:?}/{}", c.operation, c.key),
+                format!("{:?}", c.cause),
             )
         })
         .collect()
@@ -219,20 +221,127 @@ async fn scenario_ttl_expiry(h: &Harness) {
     );
     tokio::time::sleep(Duration::from_millis(120)).await;
 
-    // Lazy expiry: reads report absence.
+    // Expiry (lazy on memory, swept on shm): reads report absence.
     assert_eq!(h.kv.get("e1", None).await.unwrap(), None);
     assert_eq!(h.kv.ttl("e1", None).await.unwrap(), None);
     assert_eq!(h.cas.get_with_revision("e1", None).await.unwrap(), None);
-
-    // Deleting an expired key still reports success (memory parity).
-    assert!(h.kv.delete("e1", None).await.unwrap());
-    assert!(!h.kv.delete("e1", None).await.unwrap());
 }
 
 #[tokio::test]
 async fn ttl_expiry_and_expired_delete_match() {
     scenario_ttl_expiry(&memory_harness()).await;
     scenario_ttl_expiry(&shm_harness("ttl_expiry")).await;
+}
+
+/// Caller-issued mutations stay `Explicit` on every backend.
+#[tokio::test]
+async fn explicit_mutations_stay_cause_explicit() {
+    for h in [&memory_harness(), &shm_harness("explicit_cause")] {
+        let mut stream = subscribe_live(h).await;
+        h.kv.put("x", Value::utf8("1"), None, None).await.unwrap();
+        assert!(h.kv.delete("x", None).await.unwrap());
+        let put = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+            .await
+            .expect("put event must arrive")
+            .expect("stream must not error")
+            .expect("stream must not end");
+        let delete = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+            .await
+            .expect("delete event must arrive")
+            .expect("stream must not error")
+            .expect("stream must not end");
+        assert_eq!(put.cause, ChangeCause::Explicit);
+        assert_eq!(delete.cause, ChangeCause::Explicit);
+    }
+}
+
+/// Active expiry on shm: a TTL entry is physically removed and emits exactly
+/// one `Expired` delete within 2s with no writes touching the key. The
+/// sweeper runs on its own thread, so this drives itself.
+#[tokio::test]
+async fn ttl_entry_is_removed_and_emits_expired_within_2s() {
+    let h = shm_harness("ttl_sweep");
+    let mut stream = subscribe_live(&h).await;
+    h.kv
+        .put("victim", Value::utf8("dies"), None, Some(0.05))
+        .await
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_put = false;
+    let expired = loop {
+        let change = tokio::time::timeout(Duration::from_millis(500), stream.recv())
+            .await
+            .expect("events must keep arriving")
+            .expect("stream must not error")
+            .expect("stream must not end");
+        match (&change.operation, change.key.as_str()) {
+            (ChangeOperation::Put, "victim") => {
+                assert_eq!(change.cause, ChangeCause::Explicit);
+                saw_put = true;
+            }
+            (ChangeOperation::Delete, "victim") => break change,
+            _ => {}
+        }
+        assert!(Instant::now() < deadline, "no Expired removal within 2s");
+    };
+    assert!(saw_put, "the put event must precede the removal");
+    assert_eq!(expired.cause, ChangeCause::Expired);
+
+    // Physically gone: enumeration misses it and a delete reports absence.
+    assert!(!h
+        .keys
+        .keys(Some("default_collection"), None)
+        .await
+        .unwrap()
+        .contains(&"victim".to_string()));
+    assert!(!h.kv.delete("victim", None).await.unwrap());
+}
+
+/// Capacity-driven eviction on memory emits `Expired` deletes — the same
+/// cause shm's cull and sweep paths carry (backend parity of cause).
+#[tokio::test]
+async fn memory_eviction_emits_expired_cause() {
+    let store = Arc::new(MemoryStore::with_config(MemoryConfig::new(Some(2), None, None)));
+    store
+        .put("a", Value::utf8("1"), None, None)
+        .await
+        .unwrap();
+    store
+        .put("b", Value::utf8("2"), None, None)
+        .await
+        .unwrap();
+    let mut stream = store
+        .subscribe(ChangeFeedRequest {
+            start: ChangeStart::Latest,
+            filter: Default::default(),
+        })
+        .await
+        .unwrap();
+    store
+        .put("c", Value::utf8("3"), None, None)
+        .await
+        .unwrap();
+
+    // put() records the Put for "c" first, then the capacity-eviction
+    // Delete for "a" — drain both in order.
+    let put_c = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("put event must arrive")
+        .expect("stream must not error")
+        .expect("stream must not end");
+    assert_eq!(put_c.key, "c");
+    assert_eq!(put_c.operation, ChangeOperation::Put);
+    assert_eq!(put_c.cause, ChangeCause::Explicit);
+
+    let evicted = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("eviction event must arrive")
+        .expect("stream must not error")
+        .expect("stream must not end");
+    assert_eq!(evicted.key, "a", "capacity eviction removes the smallest key");
+    assert_eq!(evicted.operation, ChangeOperation::Delete);
+    assert_eq!(evicted.cause, ChangeCause::Expired);
 }
 
 async fn scenario_cas(h: &Harness) {
@@ -392,6 +501,10 @@ async fn cas_over_expired_entries_matches() {
 }
 
 async fn scenario_cull(h: &Harness) {
+    // Subscribe before the TTL put: on shm the expiry sweeper may reclaim
+    // the key before the explicit cull runs, and the Delete/Expired must be
+    // observed exactly once — from whichever mechanism fired.
+    let mut stream = subscribe_live(h).await;
     h.kv.put("gone", Value::utf8("v"), None, Some(0.05))
         .await
         .unwrap();
@@ -400,17 +513,51 @@ async fn scenario_cull(h: &Harness) {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(120)).await;
 
-    let mut stream = subscribe_live(h).await;
     h.cull.cull().await.unwrap();
 
-    let events = drain(&mut stream, 1).await;
-    assert_eq!(
-        events.len(),
-        1,
-        "cull must emit exactly one Delete for the expired key"
-    );
-    assert_eq!(events[0].key, "gone");
-    assert!(matches!(events[0].operation, ChangeOperation::Delete));
+    // Collect past the two Puts until the Delete for "gone" shows up.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut expired_delete = None;
+    while expired_delete.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "no Delete/Expired for the expired key within 5s"
+        );
+        let change = tokio::time::timeout(Duration::from_millis(500), stream.recv())
+            .await
+            .expect("recv must not hang")
+            .expect("change stream must not error")
+            .expect("change stream must not end");
+        if matches!(change.operation, ChangeOperation::Delete) && change.key == "gone" {
+            assert_eq!(
+                change.cause,
+                ChangeCause::Expired,
+                "expiry removal must carry the Expired cause"
+            );
+            expired_delete = Some(change);
+        }
+    }
+
+    // Quiet window: neither the sweeper nor a second cull may re-emit.
+    let quiet_end = Instant::now() + Duration::from_millis(300);
+    loop {
+        let remaining = quiet_end
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.recv()).await {
+            Ok(Ok(Some(change))) => assert!(
+                !(matches!(change.operation, ChangeOperation::Delete)
+                    && change.key == "gone"),
+                "expired key must be removed exactly once"
+            ),
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => panic!("change stream must not error: {error}"),
+            Err(_quiet) => break,
+        }
+    }
 
     assert_eq!(h.kv.get("gone", None).await.unwrap(), None);
     assert_eq!(
@@ -586,13 +733,14 @@ async fn scenario_feed_cursor(h: &Harness) {
     assert_eq!(
         event_summary(&events),
         vec![
-            (1, "1".into(), "default_collection".into(), "Put/f1".into()),
-            (2, "2".into(), "default_collection".into(), "Put/f2".into()),
+            (1, "1".into(), "default_collection".into(), "Put/f1".into(), "Explicit".into()),
+            (2, "2".into(), "default_collection".into(), "Put/f2".into(), "Explicit".into()),
             (
                 3,
                 "3".into(),
                 "default_collection".into(),
-                "Delete/f1".into()
+                "Delete/f1".into(),
+                "Explicit".into()
             ),
         ]
     );
@@ -759,7 +907,7 @@ async fn v1_backing_file_is_rejected_loudly() {
 /// the final state converges with the store's own final state.
 async fn scenario_sync_snapshot(h: &Harness) {
     use openkeyv::migration::sync_snapshot;
-    use std::collections::HashMap;
+    use std::collections::HashSet;
 
     // Warm the store so the snapshot has real content.
     for i in 0..20 {
@@ -772,10 +920,11 @@ async fn scenario_sync_snapshot(h: &Harness) {
     let (mut stream, entries) = sync_snapshot(h.sync.as_ref(), ChangeFilter::default())
         .await
         .expect("sync_snapshot must succeed");
-    let mut state: HashMap<(String, String), Vec<u8>> = entries
-        .into_iter()
-        .map(|entry| ((entry.collection, entry.key), entry.value.value.bytes().to_vec()))
-        .collect();
+    // The consumer's view starts as the snapshot, then applies every change
+    // the stream delivers; after the drain it must equal the store's real
+    // final state exactly.
+    let mut live: HashSet<String> =
+        entries.into_iter().map(|entry| entry.key).collect();
 
     // Chaos: interleave puts of fresh keys, overwrites, and deletes while the
     // consumer drains the stream.
@@ -800,37 +949,47 @@ async fn scenario_sync_snapshot(h: &Harness) {
         }
     }
 
-    // Drain everything the stream buffered: recv tails live forever, so a
-    // short quiet window ends the drain.
+    // Drain everything the stream buffered, folding each change into the
+    // consumer view; recv tails live forever, so a short quiet window ends
+    // the drain.
     let mut seen = 0usize;
     loop {
         match tokio::time::timeout(Duration::from_millis(400), stream.recv()).await {
-            Ok(Ok(Some(_))) => seen += 1,
+            Ok(Ok(Some(change))) => {
+                seen += 1;
+                match change.operation {
+                    ChangeOperation::Put => {
+                        live.insert(change.key);
+                    }
+                    ChangeOperation::Delete => {
+                        live.remove(&change.key);
+                    }
+                }
+            }
             Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
         }
     }
     assert!(seen > 0, "the stream must have carried the overlapping writes");
 
-    // Reconcile: final state of the consumer equals the store's real state.
-    for key in h.keys.keys(Some("sync"), None).await.unwrap() {
-        let value = h.kv.get(&key, Some("sync")).await.unwrap();
+    // Converge: snapshot ∪ stream equals the store's real final key set.
+    let store_keys: HashSet<String> = h
+        .keys
+        .keys(Some("sync"), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        live, store_keys,
+        "the consumer's folded view must equal the store's final state"
+    );
+
+    // Every surviving key is readable, and deleted keys are gone.
+    for key in &store_keys {
         assert!(
-            value.is_some(),
+            h.kv.get(key, Some("sync")).await.unwrap().is_some(),
             "every key the store reports must be readable"
         );
-    }
-    // And the deleted keys are gone.
-    for i in (0..20).step_by(5).skip(1) {
-        let key = format!("pre{i}");
-        if !h
-            .keys
-            .keys(Some("sync"), None)
-            .await
-            .unwrap()
-            .contains(&key)
-        {
-            assert_eq!(h.kv.get(&key, Some("sync")).await.unwrap(), None);
-        }
     }
 }
 
@@ -838,4 +997,73 @@ async fn scenario_sync_snapshot(h: &Harness) {
 async fn sync_snapshot_loses_no_events_under_chaos() {
     scenario_sync_snapshot(&memory_harness()).await;
     scenario_sync_snapshot(&shm_harness("sync_snapshot")).await;
+}
+
+/// The named-semaphore wakeup (not a poll loop): an idle subscriber parked in
+/// `sem_timedwait` sees a fresh event within single-digit milliseconds.
+#[tokio::test]
+async fn wakeup_wakes_a_waiter_within_5ms() {
+    let h = shm_harness("wake_latency");
+    let mut stream = subscribe_live(&h).await;
+    let mut latencies = Vec::new();
+    for i in 0..10 {
+        let key = format!("wake-{i}");
+        // Settle so the stream is parked inside the semaphore wait when the
+        // write lands; only a working wakeup delivers in single-digit ms.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let sent = Instant::now();
+        h.kv
+            .put(&key, Value::utf8("1"), None, None)
+            .await
+            .unwrap();
+        let change = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+            .await
+            .expect("event must arrive within 5s")
+            .expect("stream must not error")
+            .expect("stream must not end while the store lives");
+        assert_eq!(change.key, key);
+        latencies.push(sent.elapsed().as_millis() as u64);
+    }
+    latencies.sort_unstable();
+    let median = latencies[latencies.len() / 2];
+    let max = latencies[latencies.len() - 1];
+    assert!(
+        median < 5,
+        "median wake latency {median}ms >= 5ms: the subscriber is polling, not waking"
+    );
+    assert!(max < 100, "worst wake latency {max}ms >= 100ms");
+}
+
+/// 16 streams max across all processes (one header slot each); the 17th
+/// subscriber must fail loudly instead of silently degrading to polling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_free_slot_is_loud() {
+    const NOTIFY_SLOTS: usize = 16; // layout::NOTIFY_SLOTS
+    let h = shm_harness("notify_exhaustion");
+
+    // Hold every slot with a parked recv; registration happens on the first
+    // idle wait, so each holder claims its slot shortly after subscribe.
+    let mut holders = Vec::new();
+    for _ in 0..NOTIFY_SLOTS {
+        let mut stream = subscribe_live(&h).await;
+        holders.push(tokio::spawn(async move {
+            let _ = stream.recv().await;
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The 17th stream subscribes fine but fails loudly at its first idle wait.
+    let mut late = subscribe_live(&h).await;
+    let error = tokio::time::timeout(Duration::from_secs(5), late.recv())
+        .await
+        .expect("the loud failure must surface, not hang")
+        .expect_err("the 17th concurrent stream must fail registration");
+    assert!(
+        error.to_string().contains("no free notify slot"),
+        "wrong error: {error}"
+    );
+
+    for holder in holders {
+        holder.abort();
+    }
 }

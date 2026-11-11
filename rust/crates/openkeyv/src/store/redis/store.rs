@@ -170,6 +170,7 @@ fn stream_change(entry: &StreamId) -> Result<StoreChange> {
         collection,
         key,
         operation,
+        cause: crate::change::ChangeCause::Explicit,
         occurred_at,
     })
 }

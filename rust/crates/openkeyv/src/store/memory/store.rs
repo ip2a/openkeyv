@@ -1,7 +1,7 @@
 use super::client::{MemoryClient, RevisionedEntry, RevisionedEntrySnapshot};
 use super::config::{MemoryConfig, SeedData};
 use super::error::{Error, Result};
-use crate::change::{ChangeFeedRequest, ChangeOperation, ChangeStream};
+use crate::change::{ChangeCause, ChangeFeedRequest, ChangeOperation, ChangeStream};
 use crate::entry::ManagedEntry;
 use crate::protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
@@ -191,11 +191,11 @@ impl AsyncKeyValue for MemoryStore {
             Vec::new()
         };
         self.client
-            .record_change(cname, key, ChangeOperation::Put)
+            .record_change(cname, key, ChangeOperation::Put, ChangeCause::Explicit)
             .await;
         for deleted_key in deleted {
             self.client
-                .record_change(cname, &deleted_key, ChangeOperation::Delete)
+                .record_change(cname, &deleted_key, ChangeOperation::Delete, ChangeCause::Expired)
                 .await;
         }
         Ok(())
@@ -214,7 +214,7 @@ impl AsyncKeyValue for MemoryStore {
         drop(col);
         if deleted {
             self.client
-                .record_change(cname, key, ChangeOperation::Delete)
+                .record_change(cname, key, ChangeOperation::Delete, ChangeCause::Explicit)
                 .await;
         }
         Ok(deleted)
@@ -303,12 +303,12 @@ impl AsyncKeyValue for MemoryStore {
         };
         for key in keys {
             self.client
-                .record_change(cname, key, ChangeOperation::Put)
+                .record_change(cname, key, ChangeOperation::Put, ChangeCause::Explicit)
                 .await;
         }
         for deleted_key in deleted {
             self.client
-                .record_change(cname, &deleted_key, ChangeOperation::Delete)
+                .record_change(cname, &deleted_key, ChangeOperation::Delete, ChangeCause::Expired)
                 .await;
         }
         Ok(())
@@ -330,7 +330,7 @@ impl AsyncKeyValue for MemoryStore {
         drop(col);
         for key in &deleted {
             self.client
-                .record_change(cname, key, ChangeOperation::Delete)
+                .record_change(cname, key, ChangeOperation::Delete, ChangeCause::Explicit)
                 .await;
         }
         Ok(deleted.len())
@@ -465,7 +465,7 @@ impl AsyncCompareAndSwap for MemoryStore {
 
         if changed {
             self.client
-                .record_change(cname, key, ChangeOperation::Put)
+                .record_change(cname, key, ChangeOperation::Put, ChangeCause::Explicit)
                 .await;
         }
         Ok(result)
@@ -512,7 +512,7 @@ impl AsyncCompareAndSwap for MemoryStore {
 
         if deleted {
             self.client
-                .record_change(cname, key, ChangeOperation::Delete)
+                .record_change(cname, key, ChangeOperation::Delete, ChangeCause::Explicit)
                 .await;
         }
         Ok(result)
@@ -545,7 +545,7 @@ impl AsyncCull for MemoryStore {
         }
         for (collection, key) in deleted {
             self.client
-                .record_change(&collection, &key, ChangeOperation::Delete)
+                .record_change(&collection, &key, ChangeOperation::Delete, ChangeCause::Expired)
                 .await;
         }
         Ok(())
@@ -588,7 +588,12 @@ impl AsyncDestroyCollection for MemoryStore {
             let keys: Vec<String> = col.iter().map(|entry| entry.key().clone()).collect();
             for key in keys {
                 self.client
-                    .record_change(collection, &key, ChangeOperation::Delete)
+                    .record_change(
+                        collection,
+                        &key,
+                        ChangeOperation::Delete,
+                        ChangeCause::Explicit,
+                    )
                     .await;
             }
             Ok(true)

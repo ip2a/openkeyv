@@ -193,6 +193,47 @@ fn child_entry() {
             });
             println!("WATCH_ENDED");
         }
+        // Subscribe, then measure each event's arrival latency against the
+        // writer-side occurred_at stamp and report per-event markers the
+        // parent reads back.
+        "measure_wake" => {
+            let count: usize = std::env::var("OKV_CHILD_COUNT").unwrap().parse().unwrap();
+            let store = ShmStore::open(&store_path).expect("child must open the store");
+            runtime
+                .block_on(store.put("wake-armed", Value::utf8("1"), None, None))
+                .expect("child readiness marker must succeed");
+            let mut stream = runtime
+                .block_on(store.subscribe(ChangeFeedRequest {
+                    start: ChangeStart::Latest,
+                    filter: Default::default(),
+                }))
+                .expect("child subscribe must succeed");
+            for i in 0..count {
+                let event = runtime
+                    .block_on(stream.recv())
+                    .expect("child stream must not error")
+                    .expect("child stream must not end while the store lives");
+                let latency_ms = (chrono::Utc::now() - event.occurred_at)
+                    .num_milliseconds()
+                    .max(0) as u64;
+                runtime
+                    .block_on(store.put(
+                        &format!("wake-latency-{i}"),
+                        Value::utf8(latency_ms.to_string()),
+                        None,
+                        None,
+                    ))
+                    .expect("child latency marker must succeed");
+            }
+            println!("WAKE_MEASURED");
+        }
+        // No writes here: the store already holds a TTL victim. The first
+        // commit this process attempts IS the expiry sweep, so the armed
+        // abort hook fires mid-cull.
+        "ttl_crash" => {
+            let _store = ShmStore::open(&store_path).expect("child must open the store");
+            std::thread::sleep(Duration::from_secs(3));
+        }
         other => panic!("unknown child mode: {other}"),
     }
 }
@@ -357,6 +398,73 @@ async fn cross_process_feed_replay_lag_and_destroy() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A subscriber in a separate process, parked on its semaphore, sees each
+/// write within single-digit milliseconds: the named-semaphore wakeup works
+/// across process boundaries (a poll fallback would median ~25ms).
+#[tokio::test]
+async fn cross_process_wake_is_sub5ms() {
+    let path = store_path("wake_cross");
+    let store = ShmStore::create(small_config(&path)).expect("store must create");
+    let count = 20usize;
+
+    let mut child = child_command(&path, "measure_wake")
+        .env("OKV_CHILD_COUNT", count.to_string())
+        .spawn()
+        .expect("measure child must spawn");
+
+    // Wait for the child to attach and subscribe before measuring.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if store.get("wake-armed", None).await.unwrap().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "child never armed its watch");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300)); // registration settles
+
+    let mut latencies = Vec::new();
+    for i in 0..count {
+        let target = format!("wake-target-{i}");
+        store
+            .put(&target, Value::utf8("1"), None, None)
+            .await
+            .unwrap();
+        let marker = format!("wake-latency-{i}");
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        let latency = loop {
+            match store.get(&marker, None).await.unwrap() {
+                Some(value) => {
+                    let text = String::from_utf8(value.bytes().to_vec())
+                        .expect("latency marker must be utf8");
+                    break text.parse::<u64>().expect("latency marker must parse");
+                }
+                None => {
+                    assert!(
+                        Instant::now() < marker_deadline,
+                        "latency marker {i} never arrived"
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+        };
+        latencies.push(latency);
+    }
+
+    latencies.sort_unstable();
+    let median = latencies[count / 2];
+    let max = latencies[count - 1];
+    assert!(
+        median < 5,
+        "cross-process wake median {median}ms >= 5ms: wakeup is not crossing processes"
+    );
+    assert!(max < 100, "worst cross-process latency {max}ms >= 100ms");
+
+    let status = wait_with_timeout(&mut child, 15);
+    assert!(status.success(), "measure child failed: {status}");
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn cross_process_cas_has_exactly_one_winner() {
     let path = store_path("cas_race");
@@ -440,6 +548,57 @@ async fn store_in_use_and_recreate_after_kill() {
 /// recovered handle.
 async fn recovered(path: &Path) -> ShmStore {
     ShmStore::open(path).expect("reopen after crash must succeed")
+}
+
+/// A sweep-driven cull that crashes mid-mutation is completed by recovery
+/// with exactly one `Expired` delete: expiry removals are journaled like any
+/// other mutation. The parent lays the TTL victim and detaches; the child's
+/// armed hook aborts inside the sweep's commit.
+#[tokio::test]
+#[cfg(feature = "shm-test-hooks")]
+async fn expiry_sweep_crash_completes_via_journal() {
+    let path = store_path("crash_sweep");
+    {
+        let store = ShmStore::create(small_config(&path).with_change_retention(1_000))
+            .expect("store must create");
+        store
+            .put("victim", Value::utf8("dies"), None, Some(0.3))
+            .await
+            .unwrap();
+        // Drop: this process's sweeper stops, the child sweeps alone.
+    }
+
+    let status = run_child(&path, "ttl_crash", &[("OKV_SHM_ABORT_AT", "published")]);
+    assert_eq!(status.signal(), Some(SIGABRT), "the sweep must abort mid-cull");
+
+    let store = recovered(&path).await;
+    assert_eq!(store.get("victim", None).await.unwrap(), None);
+    let mut stream = store
+        .subscribe(ChangeFeedRequest {
+            start: ChangeStart::Beginning,
+            filter: Default::default(),
+        })
+        .await
+        .unwrap();
+    let put = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("put event must replay")
+        .expect("stream must not error")
+        .expect("stream must not end");
+    assert_eq!(put.key, "victim");
+    assert!(matches!(put.operation, ChangeOperation::Put));
+    assert_eq!(put.cause, openkeyv::change::ChangeCause::Explicit);
+
+    let delete = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("recovered expiry event must replay")
+        .expect("stream must not error")
+        .expect("stream must not end");
+    assert_eq!(delete.key, "victim");
+    assert!(matches!(delete.operation, ChangeOperation::Delete));
+    assert_eq!(delete.cause, openkeyv::change::ChangeCause::Expired);
+
+    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test]

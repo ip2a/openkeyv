@@ -98,20 +98,6 @@ pub(crate) fn publish_slot(
     Ok(())
 }
 
-/// Turn the slot into a tombstone. Callers free the referenced block only
-/// after this has landed, so a crash between the two merely leaks the block.
-pub(crate) fn tombstone_slot(
-    map: &SharedMap,
-    layout: &Layout,
-    table: usize,
-    index: u64,
-) -> Result<()> {
-    let slot = map.index_slot(table, index, layout)?;
-    slot.entry_offset.store(SLOT_TOMBSTONE, Ordering::Relaxed);
-    slot.sequence.fetch_add(1, Ordering::Release);
-    Ok(())
-}
-
 /// True when the live table would benefit from compaction into the shadow.
 pub(crate) fn needs_reindex(map: &SharedMap) -> bool {
     let header = map.header();

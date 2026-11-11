@@ -415,6 +415,7 @@ mod tests {
             collection: "services".to_string(),
             key: "key".to_string(),
             operation: ChangeOperation::Put,
+            cause: crate::change::ChangeCause::Explicit,
             occurred_at: Utc::now(),
         };
         apply_change(&source, &target, &put, &MigrationOptions::default())

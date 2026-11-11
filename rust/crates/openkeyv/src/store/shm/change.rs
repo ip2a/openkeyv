@@ -38,6 +38,7 @@ pub(crate) fn append_event(
     map: &SharedMap,
     layout: &Layout,
     operation: u64,
+    cause: crate::change::ChangeCause,
     collection: &str,
     key: &str,
     operation_id: u64,
@@ -67,7 +68,7 @@ pub(crate) fn append_event(
     slot.collection_len
         .store(collection.len() as u64, Ordering::Relaxed);
     slot.key_len.store(key.len() as u64, Ordering::Relaxed);
-    slot.cause.store(super::layout::CAUSE_EXPLICIT, Ordering::Relaxed);
+    slot.cause.store(cause.tag(), Ordering::Relaxed);
 
     let mut payload_bytes = Vec::with_capacity(payload_len);
     payload_bytes.extend_from_slice(collection.as_bytes());
@@ -132,6 +133,7 @@ fn read_event(map: &SharedMap, layout: &Layout, revision: u64) -> Result<Option<
 
     let operation_tag = slot.operation.load(Ordering::Relaxed);
     let occurred_ms = slot.occurred_at_ms.load(Ordering::Relaxed);
+    let cause_tag = slot.cause.load(Ordering::Relaxed);
     let collection_len = slot.collection_len.load(Ordering::Relaxed) as usize;
     let key_len = slot.key_len.load(Ordering::Relaxed) as usize;
     if collection_len + key_len > EVENT_PAYLOAD_WORDS * 8 {
@@ -169,6 +171,9 @@ fn read_event(map: &SharedMap, layout: &Layout, revision: u64) -> Result<Option<
         },
     )?;
     let occurred_at = DateTime::from_timestamp_millis(occurred_ms as i64).unwrap_or_else(Utc::now);
+    let cause = crate::change::ChangeCause::from_tag(cause_tag).ok_or_else(|| Error::StoreFormat {
+        message: format!("change event carries unknown cause tag {cause_tag}"),
+    })?;
 
     Ok(Some(StoreChange {
         cursor: ChangeCursor::new(revision.to_string()),
@@ -176,6 +181,7 @@ fn read_event(map: &SharedMap, layout: &Layout, revision: u64) -> Result<Option<
         collection,
         key,
         operation: operation_from_tag(operation_tag)?,
+        cause,
         occurred_at,
     }))
 }

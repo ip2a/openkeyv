@@ -13,8 +13,7 @@
 //! poller.
 
 use super::layout::{NOTIFY_SLOTS, SharedMap};
-use crate::error::{Error, Result};
-use std::ffi::CString;
+use crate::error::{Error, Result};use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;

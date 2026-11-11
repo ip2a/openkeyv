@@ -56,8 +56,8 @@ pub mod wrapper;
 pub mod py;
 
 pub use change::{
-    ChangeCursor, ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream,
-    ChangeSubscription, StoreChange,
+    ChangeCause, ChangeCursor, ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart,
+    ChangeStream, ChangeSubscription, StoreChange,
 };
 pub use entry::ManagedEntry;
 pub use error::{Error, Result};

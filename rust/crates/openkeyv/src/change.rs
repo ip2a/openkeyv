@@ -30,6 +30,34 @@ pub enum ChangeOperation {
     Delete,
 }
 
+/// What drove a store change. Tag values are the wire encoding in the shm
+/// change ring and journal (`CAUSE_*`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ChangeCause {
+    /// A caller-issued mutation.
+    #[default]
+    Explicit = 0,
+    /// The store itself removed the entry: TTL expiry or capacity eviction.
+    Expired = 1,
+}
+
+impl ChangeCause {
+    pub(crate) fn from_tag(tag: u64) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Explicit),
+            1 => Some(Self::Expired),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn tag(self) -> u64 {
+        match self {
+            Self::Explicit => 0,
+            Self::Expired => 1,
+        }
+    }
+}
+
 /// Durable technical record describing one successful KV mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreChange {
@@ -38,6 +66,8 @@ pub struct StoreChange {
     pub collection: String,
     pub key: String,
     pub operation: ChangeOperation,
+    /// Why the change happened; deletions can be caller-issued or store-driven.
+    pub cause: ChangeCause,
     pub occurred_at: DateTime<Utc>,
 }
 

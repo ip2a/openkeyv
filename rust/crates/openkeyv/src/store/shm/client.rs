@@ -25,7 +25,7 @@ use super::layout::{
     REHASH_IDLE, RECORD_ENTRY, RECORD_REGISTRY, SLOT_EMPTY, SLOT_TOMBSTONE, STATE_DESTROYING,
     STATE_EMPTY, STATE_READY, SharedMap, slot_hash,
 };
-use crate::change::ChangeStart;
+use crate::change::{ChangeCause, ChangeStart};
 use crate::error::{Error, Result};
 use crate::protocol::Revision;
 use crate::value::Value;
@@ -34,7 +34,32 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
+
+/// Handle to a store's expiry sweeper thread. Dropping the handle stops the
+/// thread AND joins it, so the sweeper can never outlive the store instance
+/// that spawned it: it holds a client Arc (keeping the attach/write flocks
+/// and fds alive) and its own sweep-lock fd — a recreate right after drop
+/// would race those leftovers if teardown stayed detached.
+pub(crate) struct ExpirySweeper {
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    _worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ExpirySweeper {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop.store(true, Ordering::Release);
+        }
+        // The thread exits within one 25ms tick (plus at most one bounded
+        // in-progress sweep); join waits out that window so every fd and
+        // flock of this store instance is closed by the time drop returns.
+        if let Some(worker) = self._worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 pub(crate) struct ShmClient {
     pub(crate) map: SharedMap,
@@ -604,10 +629,10 @@ impl ShmClient {
                             });
                         }
                         (Require::ExactRevision(_), true) => {
-                            // Expired entries are absent for CAS purposes;
-                            // drop the corpse so probes get faster. No event,
-                            // no journal: expiry is not a change.
-                            self.cleanup_expired(table, index, block)?;
+                            // Expired entries are absent for CAS purposes.
+                            // The corpse stays until the expiry sweep culls
+                            // it with an Expired change event — memory keeps
+                            // the corpse too, and expiry is a change.
                             return Ok(UpsertOutcome::Conflict { current: None });
                         }
                         (Require::Absent, false) => {
@@ -707,6 +732,23 @@ impl ShmClient {
                 .live_entries
                 .fetch_add(1, Ordering::Relaxed);
         }
+        // TTL entries join the intrusive expiry chain (singly-linked,
+        // insert-at-head) inside the journaled window, before the slot flip:
+        // a crash leaves at most a stale node, which the sweep's identity
+        // check drops lazily. There is no unlink anywhere — an overwritten
+        // or removed entry's node simply fails validation on the next walk.
+        if expires_ms != 0 {
+            let header = self.map.header();
+            let block_header = self.map.entry_block(handle.offset)?;
+            block_header.reserved[0].store(
+                header.expiry_head.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            header.expiry_head.store(handle.offset, Ordering::Relaxed);
+            header.expiry_count.fetch_add(1, Ordering::Relaxed);
+            // Wake the sweepers: a due of 0 means "run on the next tick".
+            header.expiry_cycle_due_ms.store(0, Ordering::Relaxed);
+        }
         // Release, not Relaxed: a reader that Acquire-loads this offset must
         // also see the entry block published above (sequence = 2). On a weakly
         // ordered CPU a Relaxed store can become visible before the block
@@ -723,6 +765,7 @@ impl ShmClient {
                 &self.map,
                 &self.layout,
                 OP_PUT,
+                ChangeCause::Explicit,
                 collection,
                 key,
                 operation_id,
@@ -762,9 +805,9 @@ impl ShmClient {
                 } => {
                     if snapshot.is_expired(now_unix_ms()) {
                         if require.is_some() {
-                            // Mirror memory: remove the expired corpse and
-                            // report absence regardless of the expectation.
-                            self.cleanup_expired(table, index, block)?;
+                            // Mirror memory: report absence regardless of the
+                            // expectation; the sweep reclaims the corpse with
+                            // an Expired change event.
                             return Ok(RemoveOutcome::Conflict { current: None });
                         }
                     } else if let Some(expected) = require {
@@ -819,10 +862,18 @@ impl ShmClient {
         self.journal_set(JOURNAL_PUBLISHED);
 
         if self.layout.change_retention > 0 && record_kind == RECORD_ENTRY {
+            // Culls are store-driven removals (capacity or TTL sweep) and
+            // carry the Expired cause; explicit deletes stay Explicit.
+            let cause = if cull {
+                ChangeCause::Expired
+            } else {
+                ChangeCause::Explicit
+            };
             change::append_event(
                 &self.map,
                 &self.layout,
                 OP_DELETE,
+                cause,
                 collection,
                 key,
                 operation_id,
@@ -835,16 +886,161 @@ impl ShmClient {
         Ok(RemoveOutcome::Removed)
     }
 
-    /// Remove an expired corpse without journal or change event. Writer lock
-    /// held. Crash-safe by ordering: tombstone first, free second — the worst
-    /// crash outcome is a leaked block, never a dangling slot pointing at a
-    /// block that will be reused.
-    fn cleanup_expired(&self, table: usize, index: u64, block: u64) -> Result<()> {
-        index::tombstone_slot(&self.map, &self.layout, table, index)?;
+    // ----- expiry sweep ----------------------------------------------------
+
+    /// Run one bounded expiry cycle over the intrusive TTL chain. Writer lock
+    /// held. A node counts only while its block still hash-locates back to
+    /// it, so overwritten or removed entries drop out lazily and block reuse
+    /// self-corrects the chain — there is no unlink anywhere on the write
+    /// path. Expired nodes are culled through the normal journaled remove,
+    /// which emits the `Expired` change event; the rebuilt chain stays in
+    /// chain order and the un-walked tail is relinked, so nothing is ever
+    /// lost, only deferred to a later cycle.
+    pub(crate) fn expire_slice(&self) -> Result<()> {
         let header = self.map.header();
-        header.live_entries.fetch_sub(1, Ordering::Relaxed);
-        header.tombstones.fetch_add(1, Ordering::Relaxed);
-        arena::free(&self.map, &self.layout, block)
+        if header.state.load(Ordering::Acquire) != STATE_READY {
+            return Ok(());
+        }
+        let now = now_unix_ms();
+        if now < header.expiry_cycle_due_ms.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        const REMOVE_BUDGET: u64 = 256;
+        const WALK_CAP: u64 = 4096;
+        const CYCLE_MS: u64 = 50;
+
+        let total = header.expiry_count.load(Ordering::Acquire);
+        let mut removed = 0u64;
+        let mut walked = 0u64;
+        let mut kept = 0u64;
+        let mut new_head = 0u64;
+        let mut last_kept = 0u64;
+        let mut cursor = header.expiry_head.load(Ordering::Acquire);
+
+        while cursor != 0 && removed < REMOVE_BUDGET && walked < WALK_CAP.min(total.max(1)) {
+            walked += 1;
+            let next = self
+                .map
+                .entry_block(cursor)?
+                .reserved[0]
+                .load(Ordering::Relaxed);
+            // Validate the node: the block must be a live TTL entry the index
+            // still points at; anything else is a stale leftover.
+            let validated = match entry::snapshot_once(&self.map, cursor)? {
+                Some(snapshot)
+                    if snapshot.record_kind == RECORD_ENTRY && snapshot.expires_at_ms != 0 =>
+                {
+                    match index::locate(
+                        &self.map,
+                        &self.layout,
+                        RECORD_ENTRY,
+                        &snapshot.collection,
+                        &snapshot.key,
+                    )? {
+                        Locate::Live { block, .. } if block == cursor => Some(snapshot),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            match validated {
+                Some(snapshot) if snapshot.expires_at_ms <= now => {
+                    self.perform_remove(
+                        RECORD_ENTRY,
+                        &snapshot.collection,
+                        &snapshot.key,
+                        None,
+                        true,
+                    )?;
+                    removed += 1;
+                }
+                Some(_) => {
+                    if last_kept != 0 {
+                        self.map
+                            .entry_block(last_kept)?
+                            .reserved[0]
+                            .store(cursor, Ordering::Relaxed);
+                    } else {
+                        new_head = cursor;
+                    }
+                    last_kept = cursor;
+                    kept += 1;
+                }
+                None => {}
+            }
+            cursor = next;
+        }
+        // Relink the un-walked tail so remaining nodes stay reachable.
+        if last_kept != 0 {
+            self.map
+                .entry_block(last_kept)?
+                .reserved[0]
+                .store(cursor, Ordering::Relaxed);
+        } else {
+            new_head = cursor;
+        }
+
+        let remaining = kept + (total.saturating_sub(walked));
+        header.expiry_head.store(new_head, Ordering::Relaxed);
+        header.expiry_count.store(remaining, Ordering::Relaxed);
+        // Idle stores park the sweepers entirely; a fresh TTL put re-arms by
+        // storing a due of 0.
+        header.expiry_cycle_due_ms.store(
+            if remaining == 0 {
+                u64::MAX
+            } else {
+                now + CYCLE_MS
+            },
+            Ordering::Release,
+        );
+        Ok(())
+    }
+
+    /// Dedicated sweeper thread: ticks twice per cycle, checks the due stamp
+    /// lock-free, and runs [`ShmClient::expire_slice`] under the writer lock
+    /// when due. Every process holding the store sweeps; flock serializes
+    /// them, and idle stores cost only the due read. A plain OS thread, not
+    /// a tokio task — stores are created from sync contexts too.
+    ///
+    /// The sweeper opens its *own* `.write.lock` file description. flock on
+    /// the same description converts instead of blocking (one `open()` shared
+    /// with the mutate paths would let the sweep interleave with writers);
+    /// a second description on the same file genuinely conflicts, same
+    /// process included.
+    pub(crate) fn spawn_expiry_sweeper(
+        client: &Arc<ShmClient>,
+    ) -> Result<ExpirySweeper> {
+        let sweep_lock = open_lock_file(&write_lock_path(&client.path()))?;
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let client = Arc::clone(client);
+        let worker = std::thread::Builder::new()
+            .name("openkeyv-shm-expiry".to_owned())
+            .spawn(move || {
+                while !flag.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    let header = client.map.header();
+                    if header.state.load(Ordering::Acquire) != STATE_READY {
+                        continue;
+                    }
+                    if change::now_unix_ms()
+                        < header.expiry_cycle_due_ms.load(Ordering::Acquire)
+                    {
+                        continue;
+                    }
+                    if FileExt::lock_exclusive(&sweep_lock).is_err() {
+                        continue;
+                    }
+                    let _ = client.expire_slice();
+                    let _ = FileExt::unlock(&sweep_lock);
+                }
+            })
+            .expect("expiry sweeper thread must spawn");
+        Ok(ExpirySweeper {
+            stop: Some(stop),
+            _worker: Some(worker),
+        })
     }
 
     // ----- journal ---------------------------------------------------------
@@ -948,10 +1144,18 @@ impl ShmClient {
                 } else {
                     OP_DELETE
                 };
+                // The cause is derivable from the journaled kind: culls are
+                // store-driven removals, everything else is explicit.
+                let cause = if kind == KIND_CULL {
+                    ChangeCause::Expired
+                } else {
+                    ChangeCause::Explicit
+                };
                 change::append_event(
                     &self.map,
                     &self.layout,
                     operation,
+                    cause,
                     &snapshot.collection,
                     &snapshot.key,
                     operation_id,

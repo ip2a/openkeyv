@@ -1,4 +1,5 @@
 use crate::change::{
+    ChangeCause,
     ChangeCursor, ChangeFilter, ChangeOperation, ChangeStart, ChangeStream, StoreChange,
 };
 use crate::entry::ManagedEntry;
@@ -122,6 +123,7 @@ impl MemoryClient {
         collection: &str,
         key: &str,
         operation: ChangeOperation,
+        cause: ChangeCause,
     ) {
         let mut state = self.changes.lock().await;
         state.revision += 1;
@@ -131,6 +133,7 @@ impl MemoryClient {
             collection: collection.to_string(),
             key: key.to_string(),
             operation,
+            cause,
             occurred_at: Utc::now(),
         };
 

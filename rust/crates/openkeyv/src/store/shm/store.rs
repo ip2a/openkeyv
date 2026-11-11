@@ -36,6 +36,9 @@ const PAGE_LIMIT: usize = 10_000;
 /// uses [`ShmStore::open`].
 pub struct ShmStore {
     client: Arc<ShmClient>,
+    /// Held for its Drop side effect (stop the thread); the sweeper holds
+    /// its own client Arc, so teardown order is safe either way.
+    _sweeper: super::client::ExpirySweeper,
 }
 
 impl ShmStore {
@@ -43,15 +46,21 @@ impl ShmStore {
     /// fails with [`Error::StoreInUse`] while any other process holds the
     /// store attached.
     pub fn create(config: ShmCreateConfig) -> Result<Self> {
+        let client = Arc::new(ShmClient::create(&config)?);
+        let sweeper = ShmClient::spawn_expiry_sweeper(&client)?;
         Ok(Self {
-            client: Arc::new(ShmClient::create(&config)?),
+            _sweeper: sweeper,
+            client,
         })
     }
 
     /// Attach to an existing store, replaying crash recovery first.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let client = Arc::new(ShmClient::open(path.into().as_path())?);
+        let sweeper = ShmClient::spawn_expiry_sweeper(&client)?;
         Ok(Self {
-            client: Arc::new(ShmClient::open(path.into().as_path())?),
+            _sweeper: sweeper,
+            client,
         })
     }
 

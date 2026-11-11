@@ -67,9 +67,6 @@ pub(crate) const STATE_DESTROYING: u64 = 2;
 pub(crate) const OP_PUT: u64 = 1;
 pub(crate) const OP_DELETE: u64 = 2;
 
-/// `ChangeRingSlot::cause` / journal cause word: an explicit mutation.
-pub(crate) const CAUSE_EXPLICIT: u64 = 0;
-
 /// `Header::rehash_cursor` value while no incremental rehash is in flight.
 /// Any other value is the next unvisited source bucket of an active rehash.
 pub(crate) const REHASH_IDLE: u64 = u64::MAX;
@@ -131,7 +128,7 @@ pub(crate) struct ChangeRingSlot {
     pub operation_id: AtomicU64,
     pub collection_len: AtomicU64,
     pub key_len: AtomicU64,
-    /// [`CAUSE_EXPLICIT`] or [`CAUSE_EXPIRED`].
+    /// [`ChangeCause::tag()`] encoding: 0 = explicit, 1 = expired.
     pub cause: AtomicU64,
     /// `collection || key`, zero-padded to a word boundary.
     pub payload: [AtomicU64; EVENT_PAYLOAD_WORDS],
