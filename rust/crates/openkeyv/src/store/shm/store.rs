@@ -253,20 +253,40 @@ impl AsyncKeyValue for ShmStore {
         if let Some(secs) = ttl {
             Self::validate_ttl(secs)?;
         }
-        for (key, value) in keys.iter().zip(values) {
-            self.put(key, value.clone(), collection, ttl).await?;
-        }
-        Ok(())
+        let cname = Self::collection_name(collection).to_string();
+        let batch: Vec<(String, Value)> = keys
+            .iter()
+            .cloned()
+            .zip(values.iter().cloned())
+            .collect();
+        // One writer-lock acquisition for the whole batch: other writers never
+        // interleave, and each key still commits through the full journaled
+        // pipeline (crash semantics identical to single-key puts).
+        self.mutate(move |client| {
+            for (key, value) in &batch {
+                client.perform_upsert(&cname, key, value, ttl, Require::Any)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn delete_many(&self, keys: &[String], collection: Option<&str>) -> Result<usize> {
-        let mut deleted = 0;
-        for key in keys {
-            if self.delete(key, collection).await? {
-                deleted += 1;
+        let cname = Self::collection_name(collection).to_string();
+        let batch: Vec<String> = keys.to_vec();
+        self.mutate(move |client| {
+            let mut deleted = 0;
+            for key in &batch {
+                if matches!(
+                    client.perform_remove(RECORD_ENTRY, &cname, key, None, false)?,
+                    RemoveOutcome::Removed
+                ) {
+                    deleted += 1;
+                }
             }
-        }
-        Ok(deleted)
+            Ok(deleted)
+        })
+        .await
     }
 }
 
@@ -524,6 +544,78 @@ mod tests {
             .unwrap()
             .expect("store not destroyed");
         assert_eq!(event.key, "hot");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn batch_takes_the_writer_lock_once() {
+        use std::time::Instant;
+
+        let path = temp_path("batch");
+        let store = Arc::new(
+            ShmStore::create(
+                ShmCreateConfig::new(&path)
+                    .with_capacity_bytes(16 * 1024 * 1024)
+                    .with_change_retention(4_096),
+            )
+            .unwrap(),
+        );
+        let keys: Vec<String> = (0..500).map(|i| format!("k{i}")).collect();
+        let values: Vec<Value> = (0..500).map(|i| Value::utf8(format!("v{i}"))).collect();
+
+        // Hold the cross-process writer lock from a second file description,
+        // the way another process would.
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("write.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&hold).unwrap();
+
+        let started = Instant::now();
+        let task = {
+            let store = Arc::clone(&store);
+            let keys = keys.clone();
+            let values = values.clone();
+            tokio::spawn(async move { store.put_many(&keys, &values, Some("batch"), None).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !task.is_finished(),
+            "the batch must still be waiting for the writer lock"
+        );
+        fs2::FileExt::unlock(&hold).unwrap();
+        task.await.unwrap().unwrap();
+        assert!(
+            started.elapsed().as_secs() < 5,
+            "one lock acquisition must suffice for the whole batch, took {:?}",
+            started.elapsed()
+        );
+        for (key, value) in keys.iter().zip(&values) {
+            assert_eq!(
+                store.get(key, Some("batch")).await.unwrap().as_ref(),
+                Some(value)
+            );
+        }
+
+        // The batch emitted 500 events with consecutive revisions.
+        let mut stream = store
+            .subscribe(ChangeFeedRequest {
+                start: ChangeStart::Beginning,
+                filter: Default::default(),
+            })
+            .await
+            .unwrap();
+        for expected in 1u64..=500 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv())
+                .await
+                .expect("event must arrive")
+                .unwrap()
+                .expect("store not destroyed");
+            assert_eq!(event.revision, expected, "revisions must be consecutive");
+        }
         let _ = std::fs::remove_file(&path);
     }
 
