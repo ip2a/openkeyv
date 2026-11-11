@@ -484,46 +484,66 @@ impl ShmClient {
         let header = self.map.header();
         let layout = &self.layout;
         let generation0 = header.index_generation.load(Ordering::Acquire);
-        let table = header.active_index.load(Ordering::Acquire) as usize;
-        let count = layout.index_entries;
+        let source = header.active_index.load(Ordering::Acquire) as usize;
+        let rehashing = header.rehash_cursor.load(Ordering::Acquire) != REHASH_IDLE;
+        let source_count = header.index_entries.load(Ordering::Acquire);
+        let target_count = if rehashing {
+            header.index_entries_target.load(Ordering::Acquire)
+        } else {
+            0
+        };
         let hash = slot_hash(record_kind, collection, key);
         let step = (hash >> 33) | 1;
-        let mut slot_index = hash & (count - 1);
 
-        for _ in 0..count {
-            let slot = self.map.index_slot(table, slot_index, layout)?;
-            let offset0 = slot.entry_offset.load(Ordering::Acquire);
-            if offset0 == SLOT_EMPTY {
-                return Ok(Found::Absent);
+        // Dual probe while a rehash is in flight: keys not yet moved live in
+        // the source, everything else (and all new inserts) in the target.
+        // A generation bump (rehash completion) invalidates the whole read
+        // via the revalidation below; mid-rehash moves keep the generation
+        // stable, so readers no longer restart on every mutation.
+        for (table, count) in [
+            (source, source_count),
+            (1 - source, target_count),
+        ] {
+            if count == 0 {
+                continue;
             }
-            if offset0 != SLOT_TOMBSTONE {
-                if let Some(snapshot) = entry::snapshot_once(&self.map, offset0)? {
-                    if snapshot.record_kind == record_kind
-                        && snapshot.collection == collection
-                        && snapshot.key == key
-                    {
-                        let sequence0 = slot.sequence.load(Ordering::Acquire);
-                        // Re-verify: the slot or table may have moved under us.
-                        let offset1 = slot.entry_offset.load(Ordering::Acquire);
-                        let sequence1 = slot.sequence.load(Ordering::Acquire);
-                        let generation1 = header.index_generation.load(Ordering::Acquire);
-                        if offset1 != offset0
-                            || sequence1 != sequence0
-                            || generation1 != generation0
+            let mut slot_index = hash & (count - 1);
+            for _ in 0..count {
+                let slot = self.map.index_slot(table, slot_index, layout)?;
+                let offset0 = slot.entry_offset.load(Ordering::Acquire);
+                if offset0 == SLOT_EMPTY {
+                    // Not in this table; a rehash may hold it in the other.
+                    break;
+                }
+                if offset0 != SLOT_TOMBSTONE {
+                    if let Some(snapshot) = entry::snapshot_once(&self.map, offset0)? {
+                        if snapshot.record_kind == record_kind
+                            && snapshot.collection == collection
+                            && snapshot.key == key
                         {
-                            return Ok(Found::Unstable);
+                            let sequence0 = slot.sequence.load(Ordering::Acquire);
+                            // Re-verify: the slot or table may have moved under us.
+                            let offset1 = slot.entry_offset.load(Ordering::Acquire);
+                            let sequence1 = slot.sequence.load(Ordering::Acquire);
+                            let generation1 = header.index_generation.load(Ordering::Acquire);
+                            if offset1 != offset0
+                                || sequence1 != sequence0
+                                || generation1 != generation0
+                            {
+                                return Ok(Found::Unstable);
+                            }
+                            if snapshot.is_expired(now_unix_ms()) {
+                                // Expired entries stay in place until a writer
+                                // removes them; readers report absence (memory
+                                // parity).
+                                return Ok(Found::Absent);
+                            }
+                            return Ok(Found::Matched(snapshot));
                         }
-                        if snapshot.is_expired(now_unix_ms()) {
-                            // Expired entries stay in place until a writer
-                            // removes them; readers report absence (memory
-                            // parity).
-                            return Ok(Found::Absent);
-                        }
-                        return Ok(Found::Matched(snapshot));
                     }
                 }
+                slot_index = (slot_index + step) & (count - 1);
             }
-            slot_index = (slot_index + step) & (count - 1);
         }
         Ok(Found::Absent)
     }
@@ -582,7 +602,10 @@ impl ShmClient {
                         .fetch_add(1, Ordering::Relaxed);
                     return Ok(());
                 }
-                Locate::Full => index::reindex(&self.map, &self.layout)?,
+                Locate::Full => {
+                    index::maybe_start_rehash(&self.map, &self.layout)?;
+                    index::rehash_step(&self.map, &self.layout)?;
+                }
             }
         }
         Err(Error::StoreCapacity {
@@ -609,9 +632,8 @@ impl ShmClient {
         };
 
         for _ in 0..2 {
-            if index::needs_reindex(&self.map) {
-                index::reindex(&self.map, &self.layout)?;
-            }
+            index::maybe_start_rehash(&self.map, &self.layout)?;
+            index::rehash_step(&self.map, &self.layout)?;
             match index::locate(&self.map, &self.layout, RECORD_ENTRY, collection, key)? {
                 Locate::Live {
                     table,
@@ -642,6 +664,26 @@ impl ShmClient {
                         }
                         _ => {}
                     }
+                    // An update that hit the source mid-rehash relocates the
+                    // slot to the target first (redis: all writes land in
+                    // ht[1]); then the COW update proceeds normally.
+                    let header = self.map.header();
+                    let slot = if header.rehash_cursor.load(Ordering::Acquire) != REHASH_IDLE
+                        && header.active_index.load(Ordering::Acquire) as usize == table
+                    {
+                        index::migrate_slot(
+                            &self.map,
+                            &self.layout,
+                            RECORD_ENTRY,
+                            collection,
+                            key,
+                            table,
+                            index,
+                            block,
+                        )?
+                    } else {
+                        (table, index)
+                    };
                     return self.commit_upsert(
                         collection,
                         key,
@@ -649,7 +691,7 @@ impl ShmClient {
                         revision.as_bytes(),
                         created_ms,
                         expires_ms,
-                        (table, index),
+                        slot,
                         block,
                     );
                 }
@@ -657,8 +699,14 @@ impl ShmClient {
                     if matches!(require, Require::ExactRevision(_)) {
                         return Ok(UpsertOutcome::Conflict { current: None });
                     }
-                    let live = self.map.header().live_entries.load(Ordering::Relaxed);
-                    if live * 10 >= self.layout.index_entries * 7 {
+                    // True exhaustion only: load pressure alone just triggers
+                    // an expand via maybe_start_rehash above. The error is
+                    // numeric-only (requested/available); stats summaries
+                    // belong to the stats API.
+                    let header = self.map.header();
+                    let live = header.live_entries.load(Ordering::Relaxed);
+                    let max = header.max_index_entries.load(Ordering::Relaxed);
+                    if live + 1 > max * 9 / 10 {
                         return Err(Error::StoreCapacity {
                             requested: 1,
                             available: 0,
@@ -675,7 +723,10 @@ impl ShmClient {
                         0,
                     );
                 }
-                Locate::Full => index::reindex(&self.map, &self.layout)?,
+                Locate::Full => {
+                    index::maybe_start_rehash(&self.map, &self.layout)?;
+                    index::rehash_step(&self.map, &self.layout)?;
+                }
             }
         }
         Err(Error::StoreCapacity {
@@ -793,9 +844,8 @@ impl ShmClient {
         cull: bool,
     ) -> Result<RemoveOutcome> {
         for _ in 0..2 {
-            if index::needs_reindex(&self.map) {
-                index::reindex(&self.map, &self.layout)?;
-            }
+            index::maybe_start_rehash(&self.map, &self.layout)?;
+            index::rehash_step(&self.map, &self.layout)?;
             match index::locate(&self.map, &self.layout, record_kind, collection, key)? {
                 Locate::Live {
                     table,
@@ -828,7 +878,10 @@ impl ShmClient {
                     );
                 }
                 Locate::Vacant { .. } => return Ok(RemoveOutcome::Absent),
-                Locate::Full => index::reindex(&self.map, &self.layout)?,
+                Locate::Full => {
+                    index::maybe_start_rehash(&self.map, &self.layout)?;
+                    index::rehash_step(&self.map, &self.layout)?;
+                }
             }
         }
         Err(Error::StoreCapacity {
@@ -1011,7 +1064,7 @@ impl ShmClient {
     pub(crate) fn spawn_expiry_sweeper(
         client: &Arc<ShmClient>,
     ) -> Result<ExpirySweeper> {
-        let sweep_lock = open_lock_file(&write_lock_path(&client.path()))?;
+        let sweep_lock = open_lock_file(&write_lock_path(client.path()))?;
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let client = Arc::clone(client);
@@ -1250,11 +1303,13 @@ pub(crate) enum Require {
     ExactRevision([u8; 16]),
 }
 
+#[derive(Debug)]
 pub(crate) enum UpsertOutcome {
     Applied { revision: [u8; 16] },
     Conflict { current: Option<EntrySnapshot> },
 }
 
+#[derive(Debug)]
 pub(crate) enum RemoveOutcome {
     Removed,
     Absent,
