@@ -12,6 +12,7 @@ pub mod config;
 mod entry;
 pub(crate) mod index;
 pub(crate) mod layout;
+pub(crate) mod notify;
 mod store;
 
 pub use config::{ShmConfig, ShmCreateConfig, ShmOpenMode};

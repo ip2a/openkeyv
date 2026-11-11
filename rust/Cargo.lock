@@ -3641,6 +3641,7 @@ dependencies = [
  "flate2",
  "fs2",
  "getrandom 0.3.4",
+ "libc",
  "memcache",
  "memmap2",
  "pyo3",

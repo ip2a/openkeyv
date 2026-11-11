@@ -37,6 +37,9 @@ memcache = { version = "0.19", default-features = false }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], optional = true }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"], optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = []
 python = ["dep:pyo3", "dep:pyo3-async-runtimes"]

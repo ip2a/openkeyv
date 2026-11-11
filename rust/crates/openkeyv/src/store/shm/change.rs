@@ -15,16 +15,13 @@
 use super::client::ShmClient;
 use super::config::{MAX_COLLECTION_BYTES, MAX_KEY_BYTES};
 use super::layout::{EVENT_PAYLOAD_WORDS, Layout, SLOT_WRITING, SharedMap};
+use super::notify::NotifyRegistration;
 use crate::change::{ChangeCursor, ChangeFilter, ChangeOperation, ChangeStream, StoreChange};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
-
-const BACKOFF_MIN_MS: u64 = 1;
-const BACKOFF_MAX_MS: u64 = 20;
 
 fn operation_from_tag(tag: u64) -> Result<ChangeOperation> {
     match tag {
@@ -184,12 +181,17 @@ fn read_event(map: &SharedMap, layout: &Layout, revision: u64) -> Result<Option<
 }
 
 /// A resumable stream over the shared change ring.
+///
+/// Idle waiting uses the named-semaphore wakeup (see
+/// [`super::notify`]): one `sem_timedwait` of [`IDLE_WAIT`], then the ring is
+/// re-polled. Field order matters — `notify` must drop before `client` so
+/// unregistration still sees a live map.
 pub(crate) struct ShmChangeStream {
+    notify: Option<NotifyRegistration>,
     client: Arc<ShmClient>,
     next_revision: u64,
     generation: u64,
     filter: ChangeFilter,
-    backoff_ms: u64,
 }
 
 impl ShmChangeStream {
@@ -200,12 +202,21 @@ impl ShmChangeStream {
         filter: ChangeFilter,
     ) -> Self {
         Self {
+            notify: None,
             client,
             next_revision,
             generation,
             filter,
-            backoff_ms: BACKOFF_MIN_MS,
         }
+    }
+
+    /// Wait for a wakeup signal. The semaphore slot is claimed lazily on the
+    /// first idle wait — a stream that never idles never claims a slot.
+    async fn idle_wait(&mut self) -> Result<()> {
+        if self.notify.is_none() {
+            self.notify = Some(NotifyRegistration::register(&self.client)?);
+        }
+        self.notify.as_mut().expect("registered above").wait().await
     }
 }
 
@@ -220,8 +231,7 @@ impl ChangeStream for ShmChangeStream {
             }
             let count = map.header().change_revision.load(Ordering::Acquire);
             if self.next_revision > count {
-                tokio::time::sleep(Duration::from_millis(self.backoff_ms)).await;
-                self.backoff_ms = (self.backoff_ms * 2).min(BACKOFF_MAX_MS);
+                self.idle_wait().await?;
                 continue;
             }
             let oldest = if count == 0 {
@@ -238,13 +248,13 @@ impl ChangeStream for ShmChangeStream {
             let slot = map.ring_slot((self.next_revision - 1) % layout.change_retention, layout)?;
             let slot_sequence = slot.sequence.load(Ordering::Acquire);
             if slot_sequence != self.next_revision {
-                // Wait while the writer has reserved this revision but not
-                // published it yet, or is filling the slot right now. Skip
-                // only once the writer has provably moved past it — a crash
-                // gap whose change recovery re-appended at a fresh revision.
+                // The writer has reserved this revision but not published it
+                // yet (or is filling the slot right now): wake with the
+                // publish post. Skip only once the writer has provably moved
+                // past it — a crash gap whose change recovery re-appended at
+                // a fresh revision.
                 if slot_sequence == SLOT_WRITING || self.next_revision == count {
-                    tokio::time::sleep(Duration::from_millis(self.backoff_ms)).await;
-                    self.backoff_ms = (self.backoff_ms * 2).min(BACKOFF_MAX_MS);
+                    self.idle_wait().await?;
                 } else {
                     self.next_revision += 1;
                 }
@@ -253,7 +263,6 @@ impl ChangeStream for ShmChangeStream {
             match read_event(map, layout, self.next_revision)? {
                 Some(change) => {
                     self.next_revision += 1;
-                    self.backoff_ms = BACKOFF_MIN_MS;
                     if self.filter.matches(&change) {
                         return Ok(Some(change));
                     }

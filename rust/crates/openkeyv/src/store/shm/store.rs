@@ -10,6 +10,7 @@ use super::client::{RemoveOutcome, Require, ShmClient, UpsertOutcome};
 use super::config::{DEFAULT_COLLECTION, MAX_COLLECTION_BYTES, MAX_KEY_BYTES, ShmCreateConfig};
 use super::entry::EntrySnapshot;
 use super::layout::{RECORD_ENTRY, RECORD_REGISTRY};
+use super::notify;
 use crate::change::ChangeFeedRequest;
 use crate::error::{Error, Result};
 use crate::protocol::{
@@ -84,22 +85,32 @@ impl ShmStore {
     ) -> Result<R> {
         let _guard = self.client.local_write.lock().await;
         let client = Arc::clone(&self.client);
-        if client.try_write_lock()? {
+        let result = if client.try_write_lock()? {
             let result = op(&client);
             client.unlock_write();
             result
         } else {
+            // Move a clone into the blocking task; the outer Arc stays alive
+            // for the wakeup below.
+            let parked = Arc::clone(&client);
             tokio::task::spawn_blocking(move || {
-                client.block_write_lock()?;
-                let result = op(&client);
-                client.unlock_write();
+                parked.block_write_lock()?;
+                let result = op(&parked);
+                parked.unlock_write();
                 result
             })
             .await
             .map_err(|error| Error::StoreConnection {
                 message: format!("shm writer task failed: {error}"),
             })?
+        };
+        // One wakeup per lock section, only after a committed mutation:
+        // change events are appended last, so a failed op appended nothing,
+        // and subscribers drain the whole ring on a single wake.
+        if result.is_ok() {
+            notify::notify_all(&client);
         }
+        result
     }
 
     fn decode_value(snapshot: &EntrySnapshot) -> Result<Value> {

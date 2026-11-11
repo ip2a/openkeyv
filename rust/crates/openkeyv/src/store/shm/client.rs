@@ -17,6 +17,7 @@ use super::change::{self, now_unix_ms};
 use super::config::ShmCreateConfig;
 use super::entry::{self, EntrySnapshot};
 use super::index::{self, Locate};
+use super::notify;
 use super::layout::{
     ChangeRingSlot, FORMAT_VERSION, FREE_CLASSES, HEADER_BYTES, IndexSlot, JOURNAL_BYTES,
     JOURNAL_IDLE, JOURNAL_PREPARED, JOURNAL_PUBLISHED, JOURNAL_RECORDED, JournalRecord, KIND_CULL,
@@ -330,6 +331,11 @@ impl ShmClient {
     fn reset_common(&self, id0: u64, id1: u64) -> Result<()> {
         let header = self.map.header();
         header.state.store(STATE_DESTROYING, Ordering::Release);
+
+        // Every registration dies with the reset (generations zero below makes
+        // each live Drop-CAS fail); remake the FIFOs so fresh registrations
+        // get clean pipes instead of stale bytes.
+        notify::reset_pipes(&self.path)?;
 
         self.map
             .zero_range(HEADER_BYTES as u64, JOURNAL_BYTES as u64)?;
@@ -950,6 +956,9 @@ impl ShmClient {
                     &snapshot.key,
                     operation_id,
                 )?;
+                // A subscriber attached to an earlier generation may already
+                // be idle-waiting on the ring; wake it for the re-append.
+                notify::notify_all(self);
             }
             if journal.freed.load(Ordering::Acquire) == 0 {
                 journal.freed.store(2, Ordering::Relaxed);
