@@ -73,10 +73,17 @@ async fn stats_reconciles_with_header() {
     );
     // Every dead entry left exactly one tombstone except those the purge
     // flights already reclaimed; the counter is live-table truth.
-    assert!(
-        stats.tombstones <= 40,
-        "at most the 40 dead entries remain as tombstones, got {}",
-        stats.tombstones
+    assert_eq!(
+        stats.tombstones, 40,
+        "30 deletes + 10 culls, no purge flight at this load"
+    );
+    // Free-list reconciliation: every freed block sits in exactly one size
+    // class. All entries in this test are class 0 (256B), so the free list
+    // must hold exactly the 40 dead blocks.
+    assert_eq!(
+        stats.free_by_class,
+        vec![(0u8, 40u64)],
+        "30 deletes + 10 culls of 256B blocks"
     );
     assert!(
         stats.expired_total >= 10,
