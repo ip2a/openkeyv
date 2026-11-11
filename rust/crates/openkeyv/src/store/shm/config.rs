@@ -4,7 +4,6 @@ use crate::error::{Error, Result};
 use std::path::PathBuf;
 
 pub(crate) const DEFAULT_CAPACITY_BYTES: u64 = 256 * 1024 * 1024;
-pub(crate) const DEFAULT_INDEX_ENTRIES: u32 = 65_536;
 pub(crate) const DEFAULT_CHANGE_RETENTION: u32 = 8_192;
 
 const MIN_CAPACITY_BYTES: u64 = 16 * 1024 * 1024;
@@ -36,8 +35,11 @@ pub struct ShmCreateConfig {
     pub path: PathBuf,
     /// Total backing-file size, header/index/ring included.
     pub capacity_bytes: u64,
-    /// Slots per hash table; must be a power of two.
-    pub index_entries: u32,
+    /// Explicit logical hash-table size (power of two). `None` autofits: the
+    /// file reserves an index region derived from its size and the logical
+    /// table starts at a quarter of the reservation, growing online from
+    /// there.
+    pub index_entries: Option<u32>,
     /// Change-feed ring capacity; 0 disables the change feed. Each retained
     /// event costs about 1.6 KiB of the backing file (a self-contained ring
     /// slot); create rejects layouts that leave less than 1 MiB for entries.
@@ -49,7 +51,7 @@ impl ShmCreateConfig {
         Self {
             path: path.into(),
             capacity_bytes: DEFAULT_CAPACITY_BYTES,
-            index_entries: DEFAULT_INDEX_ENTRIES,
+            index_entries: None,
             change_retention: DEFAULT_CHANGE_RETENTION,
         }
     }
@@ -60,7 +62,7 @@ impl ShmCreateConfig {
     }
 
     pub fn with_index_entries(mut self, index_entries: u32) -> Self {
-        self.index_entries = index_entries;
+        self.index_entries = Some(index_entries);
         self
     }
 
@@ -78,13 +80,14 @@ impl ShmCreateConfig {
                 ),
             });
         }
-        if self.index_entries < MIN_INDEX_ENTRIES || !self.index_entries.is_power_of_two() {
-            return Err(Error::StoreSetup {
-                message: format!(
-                    "shm index_entries must be a power of two >= {MIN_INDEX_ENTRIES}, got {}",
-                    self.index_entries
-                ),
-            });
+        if let Some(entries) = self.index_entries {
+            if entries < MIN_INDEX_ENTRIES || !entries.is_power_of_two() {
+                return Err(Error::StoreSetup {
+                    message: format!(
+                        "shm index_entries must be a power of two >= {MIN_INDEX_ENTRIES}, got {entries}"
+                    ),
+                });
+            }
         }
         if self.change_retention > MAX_CHANGE_RETENTION {
             return Err(Error::StoreSetup {
@@ -104,7 +107,7 @@ pub struct ShmConfig {
     pub path: PathBuf,
     pub mode: ShmOpenMode,
     pub capacity_bytes: u64,
-    pub index_entries: u32,
+    pub index_entries: Option<u32>,
     pub change_retention: u32,
 }
 
@@ -114,7 +117,7 @@ impl ShmConfig {
             path: path.into(),
             mode: ShmOpenMode::Create,
             capacity_bytes: DEFAULT_CAPACITY_BYTES,
-            index_entries: DEFAULT_INDEX_ENTRIES,
+            index_entries: None,
             change_retention: DEFAULT_CHANGE_RETENTION,
         }
     }
@@ -124,7 +127,7 @@ impl ShmConfig {
             path: path.into(),
             mode: ShmOpenMode::Open,
             capacity_bytes: DEFAULT_CAPACITY_BYTES,
-            index_entries: DEFAULT_INDEX_ENTRIES,
+            index_entries: None,
             change_retention: DEFAULT_CHANGE_RETENTION,
         }
     }
@@ -135,7 +138,7 @@ impl ShmConfig {
     }
 
     pub fn with_index_entries(mut self, index_entries: u32) -> Self {
-        self.index_entries = index_entries;
+        self.index_entries = Some(index_entries);
         self
     }
 

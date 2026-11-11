@@ -20,9 +20,9 @@ use super::index::{self, Locate};
 use super::layout::{
     ChangeRingSlot, FORMAT_VERSION, FREE_CLASSES, HEADER_BYTES, IndexSlot, JOURNAL_BYTES,
     JOURNAL_IDLE, JOURNAL_PREPARED, JOURNAL_PUBLISHED, JOURNAL_RECORDED, JournalRecord, KIND_CULL,
-    KIND_REMOVE, KIND_UPSERT, Layout, MAGIC, MIN_ARENA_BYTES, OP_DELETE, OP_PUT, RECORD_ENTRY,
-    RECORD_REGISTRY, SLOT_EMPTY, SLOT_TOMBSTONE, STATE_DESTROYING, STATE_EMPTY, STATE_READY,
-    SharedMap, slot_hash,
+    KIND_REMOVE, KIND_UPSERT, Layout, MAGIC, OP_DELETE, OP_PUT,
+    REHASH_IDLE, RECORD_ENTRY, RECORD_REGISTRY, SLOT_EMPTY, SLOT_TOMBSTONE, STATE_DESTROYING,
+    STATE_EMPTY, STATE_READY, SharedMap, slot_hash,
 };
 use crate::change::ChangeStart;
 use crate::error::{Error, Result};
@@ -175,20 +175,11 @@ impl ShmClient {
                 message: format!("cannot size {}: {error}", config.path.display()),
             })?;
         let map = SharedMap::map(&data_file, config.capacity_bytes)?;
-        let layout = Layout::compute(
-            config.index_entries as u64,
-            config.change_retention as u64,
+        let layout = Layout::plan(
             config.capacity_bytes,
-        );
-        if layout.arena_capacity < MIN_ARENA_BYTES {
-            return Err(Error::StoreSetup {
-                message: format!(
-                    "capacity of {} bytes leaves only {} bytes of entry arena after the index \
-                     and change ring; raise capacity_bytes or lower index_entries/change_retention",
-                    config.capacity_bytes, layout.arena_capacity
-                ),
-            });
-        }
+            config.change_retention as u64,
+            config.index_entries.map(u64::from),
+        )?;
 
         let client = Self {
             map,
@@ -263,10 +254,12 @@ impl ShmClient {
         if header.format_version.load(Ordering::Acquire) != FORMAT_VERSION {
             return Err(Error::StoreFormat {
                 message: format!(
-                    "{} was written by format version {}, this build understands {}",
+                    "{} was written by format version {}, this build understands \
+                     {FORMAT_VERSION}; recreate the store (create mode resets it) or use a \
+                     build that matches version {}",
                     path.display(),
                     header.format_version.load(Ordering::Acquire),
-                    FORMAT_VERSION
+                    header.format_version.load(Ordering::Acquire)
                 ),
             });
         }
@@ -342,9 +335,11 @@ impl ShmClient {
             .zero_range(HEADER_BYTES as u64, JOURNAL_BYTES as u64)?;
         self.map
             .zero_range(self.layout.off_freelist, (FREE_CLASSES * 8) as u64)?;
-        let slot_bytes = self.layout.index_entries * std::mem::size_of::<IndexSlot>() as u64;
-        self.map.zero_range(self.layout.off_index[0], slot_bytes)?;
-        self.map.zero_range(self.layout.off_index[1], slot_bytes)?;
+        // Both table regions are reserved at the max stride; zero them whole.
+        let table_bytes =
+            self.layout.max_index_entries * std::mem::size_of::<IndexSlot>() as u64;
+        self.map.zero_range(self.layout.off_index[0], table_bytes)?;
+        self.map.zero_range(self.layout.off_index[1], table_bytes)?;
         let ring_bytes =
             self.layout.change_retention * std::mem::size_of::<ChangeRingSlot>() as u64;
         self.map.zero_range(self.layout.off_ring, ring_bytes)?;
@@ -367,6 +362,25 @@ impl ShmClient {
         header
             .index_entries
             .store(self.layout.index_entries, Ordering::Relaxed);
+        header
+            .max_index_entries
+            .store(self.layout.max_index_entries, Ordering::Relaxed);
+        header
+            .index_entries_target
+            .store(self.layout.index_entries, Ordering::Relaxed);
+        header.rehash_cursor.store(REHASH_IDLE, Ordering::Relaxed);
+        for slot in &header.notify {
+            slot.pid.store(0, Ordering::Relaxed);
+            slot.generation.store(0, Ordering::Relaxed);
+        }
+        header.expiry_head.store(0, Ordering::Relaxed);
+        header.expiry_count.store(0, Ordering::Relaxed);
+        header.expiry_cycle_due_ms.store(0, Ordering::Relaxed);
+        for count in &header.free_counts {
+            count.store(0, Ordering::Relaxed);
+        }
+        header.live_payload_bytes.store(0, Ordering::Relaxed);
+        header.expired_total.store(0, Ordering::Relaxed);
         header
             .change_retention
             .store(self.layout.change_retention, Ordering::Relaxed);

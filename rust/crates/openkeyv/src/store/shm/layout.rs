@@ -12,11 +12,15 @@
 //! HEADER      4096 B   format + counters (all atomics)
 //! JOURNAL     4096 B   single in-flight mutation record
 //! FREELISTS   FREE_CLASSES * 8 B   one head per size class
-//! INDEX_A     index_entries * 16 B  open-addressed slots
-//! INDEX_B     index_entries * 16 B  shadow table for compaction
+//! INDEX_A     max_index_entries * 16 B   open-addressed slots (reserved)
+//! INDEX_B     max_index_entries * 16 B   second table for rehash
 //! RING        change_retention * RING_SLOT_BYTES  self-contained change events
 //! ARENA       rest of the file      entry blocks
 //! ```
+//!
+//! The logical table size starts at a fraction of the reserved region and
+//! moves through incremental rehash; regions never move for the life of the
+//! file.
 
 use super::config::{MAX_COLLECTION_BYTES, MAX_KEY_BYTES};
 use crate::error::{Error, Result};
@@ -24,7 +28,7 @@ use memmap2::MmapMut;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const MAGIC: u64 = u64::from_le_bytes(*b"OKVSHM1\0");
-pub(crate) const FORMAT_VERSION: u64 = 1;
+pub(crate) const FORMAT_VERSION: u64 = 2;
 pub(crate) const HEADER_BYTES: usize = 4096;
 pub(crate) const JOURNAL_BYTES: usize = 4096;
 
@@ -35,10 +39,11 @@ pub(crate) const BLOCK_HEADER_BYTES: usize = 128;
 /// Payload words a ring slot reserves for `collection || key`: the worst-case
 /// identifier pair, rounded up to a word.
 pub(crate) const EVENT_PAYLOAD_WORDS: usize = (MAX_COLLECTION_BYTES + MAX_KEY_BYTES).div_ceil(8);
-/// Fixed size of one change-ring slot: seven header words plus the payload.
-/// Retained history costs exactly `change_retention * RING_SLOT_BYTES` —
-/// bounded by construction, nothing to free.
-pub(crate) const RING_SLOT_BYTES: usize = 7 * 8 + EVENT_PAYLOAD_WORDS * 8;
+/// Fixed size of one change-ring slot: eight header words (including the
+/// cause word) plus the payload. Retained history costs exactly
+/// `change_retention * RING_SLOT_BYTES` — bounded by construction, nothing
+/// to free.
+pub(crate) const RING_SLOT_BYTES: usize = 8 * 8 + EVENT_PAYLOAD_WORDS * 8;
 /// Smallest usable arena after header, indexes, and the change ring. Create
 /// rejects layouts that leave less: the arena is where entries live.
 pub(crate) const MIN_ARENA_BYTES: u64 = 1024 * 1024;
@@ -62,6 +67,16 @@ pub(crate) const STATE_DESTROYING: u64 = 2;
 pub(crate) const OP_PUT: u64 = 1;
 pub(crate) const OP_DELETE: u64 = 2;
 
+/// `ChangeRingSlot::cause` / journal cause word: an explicit mutation.
+pub(crate) const CAUSE_EXPLICIT: u64 = 0;
+
+/// `Header::rehash_cursor` value while no incremental rehash is in flight.
+/// Any other value is the next unvisited source bucket of an active rehash.
+pub(crate) const REHASH_IDLE: u64 = u64::MAX;
+/// Cross-process change-feed wakeup slots in the header (one named POSIX
+/// semaphore per subscriber process; see `store::shm::notify`).
+pub(crate) const NOTIFY_SLOTS: usize = 16;
+
 pub(crate) const KIND_UPSERT: u64 = 1;
 pub(crate) const KIND_REMOVE: u64 = 2;
 pub(crate) const KIND_CULL: u64 = 3;
@@ -71,7 +86,7 @@ pub(crate) const JOURNAL_PREPARED: u64 = 1;
 pub(crate) const JOURNAL_PUBLISHED: u64 = 2;
 pub(crate) const JOURNAL_RECORDED: u64 = 3;
 
-const HEADER_FIELDS: usize = 19;
+const HEADER_FIELDS: usize = 91;
 const JOURNAL_FIELDS: usize = 9;
 
 /// One hash-table slot. `entry_offset` is `SLOT_EMPTY`, `SLOT_TOMBSTONE`, or an
@@ -81,6 +96,18 @@ const JOURNAL_FIELDS: usize = 9;
 pub(crate) struct IndexSlot {
     pub entry_offset: AtomicU64,
     pub sequence: AtomicU64,
+}
+
+/// One header wakeup slot, owned by the subscriber process whose pid is
+/// stored here. `generation` increments on every register/unregister so a
+/// racing notifier can detect a torn registration. The semaphore behind a
+/// slot is named `/okv-shm-<store_id0 hex>-<slot index>`.
+#[repr(C)]
+pub(crate) struct NotifySlot {
+    /// Registering process pid; 0 = slot free.
+    pub pid: AtomicU64,
+    /// Bumped on register/unregister.
+    pub generation: AtomicU64,
 }
 
 /// One change-feed ring slot: a fixed-size, self-contained change event.
@@ -104,6 +131,8 @@ pub(crate) struct ChangeRingSlot {
     pub operation_id: AtomicU64,
     pub collection_len: AtomicU64,
     pub key_len: AtomicU64,
+    /// [`CAUSE_EXPLICIT`] or [`CAUSE_EXPIRED`].
+    pub cause: AtomicU64,
     /// `collection || key`, zero-padded to a word boundary.
     pub payload: [AtomicU64; EVENT_PAYLOAD_WORDS],
 }
@@ -134,7 +163,35 @@ pub(crate) struct Header {
     /// Arena-relative bump-allocation frontier.
     pub arena_high_water: AtomicU64,
     pub arena_capacity: AtomicU64,
+    /// Logical size of the active hash table (power of two, ≤
+    /// `max_index_entries`). Grows and shrinks in place through incremental
+    /// rehash; the reserved region never moves.
     pub index_entries: AtomicU64,
+    /// Reserved slots per hash table (power of two). Derived from the file
+    /// length at create; both table regions are laid out at this stride.
+    pub max_index_entries: AtomicU64,
+    /// Target table size while a rehash is in flight; equals
+    /// `index_entries` while idle.
+    pub index_entries_target: AtomicU64,
+    /// Next unvisited source bucket of the in-flight rehash, or
+    /// [`REHASH_IDLE`].
+    pub rehash_cursor: AtomicU64,
+    /// Cross-process change-feed wakeup slots (see [`NotifySlot`]).
+    pub notify: [NotifySlot; NOTIFY_SLOTS],
+    /// Intrusive expiry chain of arena offsets (singly linked through the
+    /// entry headers; 0 = empty). Head-first, unordered: the expiry cycle
+    /// walks and repairs lazily.
+    pub expiry_head: AtomicU64,
+    pub expiry_count: AtomicU64,
+    /// Writers run an expiry cycle slice once `now_unix_ms >= due`. 0 = run
+    /// on the next mutation.
+    pub expiry_cycle_due_ms: AtomicU64,
+    /// Live blocks per size class, maintained by the arena allocator.
+    pub free_counts: [AtomicU64; FREE_CLASSES],
+    /// Sum of published entry payload bytes (collection+key+value).
+    pub live_payload_bytes: AtomicU64,
+    /// Entries removed by expiry (cycle, cull, or lazy cleanup).
+    pub expired_total: AtomicU64,
     pub change_retention: AtomicU64,
     pub creation_unix_ms: AtomicU64,
     pub reserved: [AtomicU64; HEADER_BYTES / 8 - HEADER_FIELDS],
@@ -188,11 +245,15 @@ pub(crate) struct EntryBlockHeader {
     pub reserved: [AtomicU64; 4],
 }
 
-/// Computes every region offset from the three layout parameters.
+/// Computes every region offset from the layout parameters. Both index
+/// table regions are reserved at `max_index_entries` slots so the logical
+/// table can grow and shrink in place (incremental rehash) without ever
+/// moving a region; the logical size starts at `index_entries`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Layout {
     pub file_len: u64,
     pub index_entries: u64,
+    pub max_index_entries: u64,
     pub change_retention: u64,
     pub off_freelist: u64,
     pub off_index: [u64; 2],
@@ -201,18 +262,80 @@ pub(crate) struct Layout {
     pub arena_capacity: u64,
 }
 
+/// Largest reserved index region: 2 tables × 2^23 slots × 16 B = 256 MiB of
+/// reservation on paper; files that small never derive this value.
+pub(crate) const MAX_INDEX_ENTRIES_CEILING: u64 = 1 << 23;
+
 impl Layout {
-    /// Build the layout for a fresh file of `file_len` bytes.
-    pub(crate) fn compute(index_entries: u64, change_retention: u64, file_len: u64) -> Layout {
+    /// Derive the full layout for a fresh file. `index_entries_override`
+    /// pins the logical starting size; `None` autofits it to
+    /// `max_index_entries / 8`. Fails when the file cannot host the arena.
+    pub(crate) fn plan(
+        file_len: u64,
+        change_retention: u64,
+        index_entries_override: Option<u64>,
+    ) -> Result<Layout> {
+        let fixed = (HEADER_BYTES + JOURNAL_BYTES + FREE_CLASSES * 8) as u64;
+        let ring_bytes = change_retention * RING_SLOT_BYTES as u64;
+        // Reserve at most 1/8 of the post-ring budget for the two index
+        // tables; the rest is arena. Round down to a power of two.
+        let budget = file_len.saturating_sub(fixed + ring_bytes);
+        let derived = budget / 64;
+        let floored_pow2 = if derived == 0 {
+            0
+        } else {
+            1u64 << (63 - derived.leading_zeros())
+        };
+        let max_index_entries = floored_pow2.clamp(1024, MAX_INDEX_ENTRIES_CEILING);
+        let index_entries = match index_entries_override {
+            Some(override_entries) if override_entries > max_index_entries => {
+                return Err(Error::StoreSetup {
+                    message: format!(
+                        "index_entries {override_entries} exceeds the {} slots this file can \
+                         reserve; raise capacity_bytes or lower index_entries",
+                        max_index_entries
+                    ),
+                });
+            }
+            Some(override_entries) => override_entries,
+            None => (max_index_entries / 8).max(1024),
+        };
+        let layout = Self::from_parts(file_len, change_retention, index_entries, max_index_entries);
+        if layout.arena_capacity < MIN_ARENA_BYTES {
+            return Err(Error::StoreSetup {
+                message: format!(
+                    "capacity of {file_len} bytes leaves only {} bytes of entry arena after \
+                     the index reservation and change ring; raise capacity_bytes or lower \
+                     index_entries/change_retention",
+                    layout.arena_capacity
+                ),
+            });
+        }
+        Ok(layout)
+    }
+
+    /// Region math for explicit parameters. `index_entries` and
+    /// `max_index_entries` must be powers of two with
+    /// `index_entries <= max_index_entries`.
+    pub(crate) fn from_parts(
+        file_len: u64,
+        change_retention: u64,
+        index_entries: u64,
+        max_index_entries: u64,
+    ) -> Layout {
+        debug_assert!(index_entries.is_power_of_two());
+        debug_assert!(max_index_entries.is_power_of_two());
+        debug_assert!(index_entries <= max_index_entries);
         let off_freelist = (HEADER_BYTES + JOURNAL_BYTES) as u64;
         let off_index0 = align8(off_freelist + (FREE_CLASSES * 8) as u64);
-        let slot_bytes = index_entries * std::mem::size_of::<IndexSlot>() as u64;
+        let slot_bytes = max_index_entries * std::mem::size_of::<IndexSlot>() as u64;
         let off_index1 = off_index0 + slot_bytes;
         let off_ring = off_index1 + slot_bytes;
         let off_arena = align8(off_ring + change_retention * RING_SLOT_BYTES as u64);
         Layout {
             file_len,
             index_entries,
+            max_index_entries,
             change_retention,
             off_freelist,
             off_index: [off_index0, off_index1],
@@ -222,8 +345,9 @@ impl Layout {
         }
     }
 
-    /// Recompute the layout from the header and validate it against the actual
-    /// file length. Used by `open`; any disagreement is a `StoreFormat` error.
+    /// Recompute the layout from the header and validate it against the
+    /// actual file length. Used by `open`; any disagreement is a
+    /// `StoreFormat` error.
     pub(crate) fn from_header(header: &Header, file_len: u64) -> Result<Layout> {
         let layout_bytes = header.layout_bytes.load(Ordering::Acquire);
         if layout_bytes != file_len {
@@ -234,8 +358,20 @@ impl Layout {
             });
         }
         let index_entries = header.index_entries.load(Ordering::Acquire);
+        let max_index_entries = header.max_index_entries.load(Ordering::Acquire);
         let change_retention = header.change_retention.load(Ordering::Acquire);
-        let layout = Self::compute(index_entries, change_retention, file_len);
+        if !index_entries.is_power_of_two()
+            || !max_index_entries.is_power_of_two()
+            || index_entries > max_index_entries
+        {
+            return Err(Error::StoreFormat {
+                message: format!(
+                    "header index sizes are inconsistent: {index_entries} live, \
+                     {max_index_entries} reserved"
+                ),
+            });
+        }
+        let layout = Self::from_parts(file_len, change_retention, index_entries, max_index_entries);
         let expected_capacity = header.arena_capacity.load(Ordering::Acquire);
         if layout.arena_capacity != expected_capacity || layout.arena_capacity < MIN_ARENA_BYTES {
             return Err(Error::StoreFormat {
@@ -413,9 +549,11 @@ mod tests {
 
     #[test]
     fn layout_regions_do_not_overlap_and_leave_an_arena() {
-        let layout = Layout::compute(65_536, 10_000, 256 * 1024 * 1024);
+        let layout = Layout::plan(256 * 1024 * 1024, 10_000, None).unwrap();
         assert_eq!(layout.off_freelist, 8192);
-        let slot_bytes = 65_536 * 16;
+        assert!(layout.max_index_entries.is_power_of_two());
+        assert!(layout.index_entries <= layout.max_index_entries);
+        let slot_bytes = layout.max_index_entries * 16;
         assert_eq!(
             layout.off_index[0],
             align8(layout.off_freelist + FREE_CLASSES as u64 * 8)
@@ -428,13 +566,35 @@ mod tests {
 
     #[test]
     fn minimum_file_with_defaults_still_leaves_a_usable_arena() {
-        let layout = Layout::compute(65_536, 8_192, 16 * 1024 * 1024);
+        let layout = Layout::plan(16 * 1024 * 1024, 8_192, None).unwrap();
         assert!(layout.arena_capacity >= MIN_ARENA_BYTES);
     }
 
     #[test]
+    fn autofit_scales_the_index_with_the_file() {
+        let small = Layout::plan(16 * 1024 * 1024, 0, None).unwrap();
+        let large = Layout::plan(256 * 1024 * 1024, 0, None).unwrap();
+        assert!(
+            large.max_index_entries >= small.max_index_entries * 8,
+            "a 16x larger file must reserve at least 8x the index: {} vs {}",
+            large.max_index_entries,
+            small.max_index_entries
+        );
+        assert_eq!(large.index_entries, large.max_index_entries / 8);
+        assert_eq!(small.index_entries, small.max_index_entries / 8);
+    }
+
+    #[test]
+    fn explicit_index_entries_is_an_override_within_the_reservation() {
+        let layout = Layout::plan(16 * 1024 * 1024, 8_192, Some(1024)).unwrap();
+        assert_eq!(layout.index_entries, 1024);
+        let error = Layout::plan(16 * 1024 * 1024, 8_192, Some(1 << 40)).unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
     fn layout_without_change_ring_still_leaves_an_arena() {
-        let layout = Layout::compute(1_024, 0, 16 * 1024 * 1024);
+        let layout = Layout::plan(16 * 1024 * 1024, 0, None).unwrap();
         assert!(layout.arena_capacity > 0);
     }
 

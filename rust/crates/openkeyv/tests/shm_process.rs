@@ -7,7 +7,7 @@
 //! The crash scenarios live here too (`shm-test-hooks` gated): a child dies
 //! by SIGABRT mid-write, and recovery is driven by a *fresh* `open` — the
 //! pre-crash parent handle shares the mmap but never runs recovery.
-#![cfg(all(feature = "shm", unix))]
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};

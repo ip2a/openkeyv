@@ -5,7 +5,7 @@
 //! not asserted against hand-written expectations, so any future drift in
 //! either backend fails here.
 
-#![cfg(all(feature = "shm", unix))]
+#![cfg(unix)]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -662,4 +662,74 @@ async fn scenario_feed_filter(h: &Harness) {
 async fn change_filter_matches() {
     scenario_feed_filter(&memory_harness()).await;
     scenario_feed_filter(&shm_harness("feed_filter")).await;
+}
+
+/// A file carrying an old format version must be rejected loudly, naming the
+/// version it holds and the one this build understands.
+#[tokio::test]
+async fn v1_backing_file_is_rejected_loudly() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let dir = std::env::temp_dir().join(format!("openkeyv-v1-reject-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = dir.join("v1.store");
+
+    // Fabricate a v1-shaped file: valid magic, version 1, ready state, and a
+    // plausible layout header so the version check is what fires.
+    let file_len = 16 * 1024 * 1024u64;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap();
+    file.set_len(file_len).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let map = unsafe { memmap2::MmapOptions::new().map_mut(&file).unwrap() };
+    let words: &mut [AtomicU64] = unsafe {
+        std::slice::from_raw_parts_mut(map.as_ptr() as *const AtomicU64 as *mut AtomicU64, 32)
+    };
+    let magic = u64::from_le_bytes(*b"OKVSHM1\0");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    words[0].store(magic, Ordering::Relaxed); // magic
+    words[1].store(1, Ordering::Relaxed); // format_version = 1
+    words[2].store(file_len, Ordering::Relaxed); // layout_bytes
+    words[3].store(4096, Ordering::Relaxed); // header_bytes
+    words[8].store(1, Ordering::Relaxed); // state = STATE_READY
+    words[16].store(4096 * 4096, Ordering::Relaxed); // arena_capacity (any plausible value)
+    words[17].store(1024, Ordering::Relaxed); // index_entries
+    words[18].store(8192, Ordering::Relaxed); // change_retention
+    words[19].store(now, Ordering::Relaxed); // creation_unix_ms
+    drop(map);
+    drop(file);
+
+    let error = match ShmStore::open(&path) {
+        Err(error) => error,
+        Ok(_) => panic!("a v1 backing file must be rejected"),
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("format version 1") && message.contains("understands 2"),
+        "rejection must name both versions: {message}"
+    );
+    assert!(
+        message.contains("recreate"),
+        "rejection must tell the user how to proceed: {message}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }

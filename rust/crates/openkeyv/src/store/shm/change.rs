@@ -70,6 +70,7 @@ pub(crate) fn append_event(
     slot.collection_len
         .store(collection.len() as u64, Ordering::Relaxed);
     slot.key_len.store(key.len() as u64, Ordering::Relaxed);
+    slot.cause.store(super::layout::CAUSE_EXPLICIT, Ordering::Relaxed);
 
     let mut payload_bytes = Vec::with_capacity(payload_len);
     payload_bytes.extend_from_slice(collection.as_bytes());
