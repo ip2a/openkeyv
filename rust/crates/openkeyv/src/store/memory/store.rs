@@ -5,8 +5,8 @@ use crate::change::{ChangeCause, ChangeFeedRequest, ChangeOperation, ChangeStrea
 use crate::entry::ManagedEntry;
 use crate::protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
-    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
-    CompareAndSwapResult, Revision, RevisionedValue,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, AsyncStats,
+    CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue, StatsReport,
 };
 use crate::value::Value;
 use async_trait::async_trait;
@@ -549,6 +549,20 @@ impl AsyncCull for MemoryStore {
                 .await;
         }
         Ok(())
+    }
+
+    // compact keeps its default no-op: the memory engine has no block
+    // allocation to defragment.
+}
+
+#[async_trait]
+impl AsyncStats for MemoryStore {
+    async fn stats(&self) -> Result<StatsReport> {
+        // No engine introspection behind the in-memory map.
+        Ok(StatsReport {
+            available: false,
+            ..StatsReport::default()
+        })
     }
 }
 

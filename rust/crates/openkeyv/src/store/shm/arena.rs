@@ -31,6 +31,12 @@ pub(crate) fn class_bytes(class: usize) -> usize {
     MIN_BLOCK_BYTES << class
 }
 
+/// Size class a fresh block for `payload` bytes lands in — the single
+/// authority for alloc and compaction alike.
+pub(crate) fn minimal_class_for_payload(payload: usize) -> usize {
+    class_for(BLOCK_HEADER_BYTES + align8(payload))
+}
+
 /// Allocate a block with a `BLOCK_HEADER_BYTES`-byte header plus `payload`
 /// bytes. Only ever called while holding the writer lock.
 pub(crate) fn alloc(map: &SharedMap, layout: &Layout, payload: usize) -> Result<BlockHandle> {
@@ -51,6 +57,7 @@ pub(crate) fn alloc(map: &SharedMap, layout: &Layout, payload: usize) -> Result<
             let header: &EntryBlockHeader = map.entry_block(offset)?;
             let next = header.next_free.load(Ordering::Relaxed);
             head.store(next, Ordering::Relaxed);
+            map.header().free_counts[source].fetch_sub(1, Ordering::Relaxed);
             let mut current_class = source;
             while current_class > class {
                 current_class -= 1;
@@ -95,6 +102,7 @@ fn push_free(map: &SharedMap, layout: &Layout, offset: u64, class: usize) -> Res
         .next_free
         .store(head.load(Ordering::Relaxed), Ordering::Relaxed);
     head.store(offset, Ordering::Relaxed);
+    map.header().free_counts[class].fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 

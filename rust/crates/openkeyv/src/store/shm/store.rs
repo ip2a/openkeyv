@@ -15,12 +15,13 @@ use crate::change::ChangeFeedRequest;
 use crate::error::{Error, Result};
 use crate::protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
-    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
-    CompareAndSwapResult, Revision, RevisionedValue,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, AsyncStats, CompareAndDeleteResult,
+    CompareAndSwapResult, Revision, RevisionedValue, StatsReport,
 };
 use crate::value::{Value, ValueKind};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -73,7 +74,6 @@ impl ShmStore {
     /// Gated behind `shm-test-hooks`; not a public observability API.
     #[cfg(feature = "shm-test-hooks")]
     pub fn shm_debug_index_state(&self) -> (u64, u64, u64, u64) {
-        use std::sync::atomic::Ordering;
         let header = self.client.map.header();
         (
             header.index_entries.load(Ordering::Acquire),
@@ -412,6 +412,41 @@ impl AsyncCull for ShmStore {
             Ok(())
         })
         .await
+    }
+
+    async fn compact(&self, budget_bytes: u64) -> Result<u64> {
+        self.mutate(move |client| client.compact_pass(budget_bytes)).await
+    }
+}
+
+#[async_trait]
+impl AsyncStats for ShmStore {
+    async fn stats(&self) -> Result<StatsReport> {
+        let header = self.client.map.header();
+        let mut free_by_class = Vec::new();
+        for (class, count) in header.free_counts.iter().enumerate() {
+            let free = count.load(Ordering::Relaxed);
+            if free > 0 {
+                free_by_class.push((class as u8, free));
+            }
+        }
+        let high_water = header.arena_high_water.load(Ordering::Relaxed);
+        let live_payload = header.live_payload_bytes.load(Ordering::Relaxed);
+        Ok(StatsReport {
+            available: true,
+            live_entries: header.live_entries.load(Ordering::Relaxed),
+            tombstones: header.tombstones.load(Ordering::Relaxed),
+            index_entries: header.index_entries.load(Ordering::Acquire),
+            max_index_entries: header.max_index_entries.load(Ordering::Relaxed),
+            arena_high_water: high_water,
+            arena_capacity: self.client.layout.arena_capacity,
+            live_payload_bytes: live_payload,
+            fragmentation_ratio: (high_water.saturating_sub(live_payload)) as f64
+                / live_payload.max(1) as f64,
+            free_by_class,
+            expired_total: header.expired_total.load(Ordering::Relaxed),
+            change_revision: header.change_revision.load(Ordering::Acquire),
+        })
     }
 }
 

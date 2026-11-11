@@ -1,8 +1,8 @@
 use crate::error::Result;
 use crate::protocol::{
     AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,
-    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, CompareAndDeleteResult,
-    CompareAndSwapResult, Revision, RevisionedValue,
+    AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue, AsyncStats,
+    CompareAndDeleteResult, CompareAndSwapResult, Revision, RevisionedValue, StatsReport,
 };
 use crate::value::Value;
 use async_trait::async_trait;
@@ -176,6 +176,20 @@ where
 {
     async fn cull(&self) -> Result<()> {
         self.inner.cull().await
+    }
+
+    async fn compact(&self, budget_bytes: u64) -> Result<u64> {
+        self.inner.compact(budget_bytes).await
+    }
+}
+
+#[async_trait]
+impl<T> AsyncStats for LoggingWrapper<T>
+where
+    T: AsyncKeyValue + AsyncStats + Send + Sync,
+{
+    async fn stats(&self) -> Result<StatsReport> {
+        self.inner.stats().await
     }
 }
 

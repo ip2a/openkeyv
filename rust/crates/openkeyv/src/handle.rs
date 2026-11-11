@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::migration::{AsyncKeyspaceMigration, MigrationOptions, MigrationReport};
 use crate::protocol::{
-    AsyncChangeFeed, AsyncCompareAndSwap, AsyncEnumerateCollections, AsyncEnumerateKeys, BaseStore,
+    AsyncChangeFeed, AsyncCompareAndSwap, AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncStats,
+    BaseStore, StatsReport,
 };
 use crate::utils::compound::Subspace;
 
@@ -12,6 +13,7 @@ pub struct StoreCapabilities {
     pub enumerate_collections: bool,
     pub compare_and_swap: bool,
     pub change_feed: bool,
+    pub stats: bool,
 }
 
 #[derive(Clone)]
@@ -23,6 +25,7 @@ pub struct StoreHandle {
     pub compare_and_swap: Option<Arc<dyn AsyncCompareAndSwap>>,
     pub change_feed: Option<Arc<dyn AsyncChangeFeed>>,
     pub keyspace_migration: Option<Arc<dyn AsyncKeyspaceMigration>>,
+    pub stats: Option<Arc<dyn AsyncStats>>,
 }
 
 impl StoreHandle {
@@ -181,6 +184,7 @@ impl StoreHandle {
             compare_and_swap: None,
             change_feed: None,
             keyspace_migration: None,
+            stats: None,
         }
     }
 
@@ -201,13 +205,26 @@ impl StoreHandle {
                 enumerate_collections: enumerate_collections.is_some(),
                 compare_and_swap: compare_and_swap.is_some(),
                 change_feed: change_feed.is_some(),
+                stats: false,
             },
             enumerate_keys,
             enumerate_collections,
             compare_and_swap,
             change_feed,
             keyspace_migration: None,
+            stats: None,
         }
+    }
+
+    /// Attach engine statistics and mark the capability. Shm-style engines
+    /// only; the default handle carries no stats.
+    pub fn with_stats<T>(mut self, stats: Arc<T>) -> Self
+    where
+        T: AsyncStats + 'static,
+    {
+        self.stats = Some(stats);
+        self.capabilities.stats = true;
+        self
     }
 
     pub fn with_keyspace_migration<T>(mut self, migration: Arc<T>) -> Self
@@ -230,6 +247,17 @@ impl AsyncKeyspaceMigration for StoreHandle {
             .as_ref()
             .ok_or_else(|| Self::missing("keyspace migration"))?
             .migrate_into_keyspace(keyspace, options)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncStats for StoreHandle {
+    async fn stats(&self) -> crate::Result<StatsReport> {
+        self.stats
+            .as_ref()
+            .ok_or_else(|| Self::missing("engine statistics"))?
+            .stats()
             .await
     }
 }

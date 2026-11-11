@@ -28,7 +28,7 @@ use super::layout::{
 use crate::change::{ChangeCause, ChangeStart};
 use crate::error::{Error, Result};
 use crate::protocol::Revision;
-use crate::value::Value;
+use crate::value::{Value, ValueKind};
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -596,10 +596,11 @@ impl ShmClient {
                         },
                     )?;
                     index::publish_slot(&self.map, &self.layout, table, index, handle.offset)?;
-                    self.map
-                        .header()
-                        .live_entries
-                        .fetch_add(1, Ordering::Relaxed);
+                    let header = self.map.header();
+                    header.live_entries.fetch_add(1, Ordering::Relaxed);
+                    header
+                        .live_payload_bytes
+                        .fetch_add(payload as u64, Ordering::Relaxed);
                     return Ok(());
                 }
                 Locate::Full => {
@@ -693,6 +694,7 @@ impl ShmClient {
                         expires_ms,
                         slot,
                         block,
+                        true,
                     );
                 }
                 Locate::Vacant { table, index } => {
@@ -721,6 +723,7 @@ impl ShmClient {
                         expires_ms,
                         (table, index),
                         0,
+                        true,
                     );
                 }
                 Locate::Full => {
@@ -735,8 +738,86 @@ impl ShmClient {
         })
     }
 
+    /// One incremental compaction pass: rewrite entries parked in blocks
+    /// larger than their payload's minimal class, freeing the oversized
+    /// blocks for reuse. Stops after roughly `budget_bytes` of freed block
+    /// bytes. Writer lock held. Rewrite = COW into the minimal class with the
+    /// original revision and timestamps and NO change event — compaction is
+    /// physical maintenance, not a store mutation.
+    pub(crate) fn compact_pass(&self, budget_bytes: u64) -> Result<u64> {
+        let mut rewritten = 0u64;
+        for hit in self.scan_hits(Some(RECORD_ENTRY), None, false)? {
+            if rewritten >= budget_bytes {
+                break;
+            }
+            // Fresh snapshot per entry: the scan above is weakly consistent.
+            let Some(snapshot) = self.find_snapshot(RECORD_ENTRY, &hit.collection, &hit.key)?
+            else {
+                continue;
+            };
+            if snapshot.is_expired(now_unix_ms()) {
+                // The expiry sweep owns expired entries.
+                continue;
+            }
+            let payload =
+                entry::payload_len(&snapshot.collection, &snapshot.key, snapshot.value.len());
+            let minimal_class = arena::minimal_class_for_payload(payload);
+            match index::locate(
+                &self.map,
+                &self.layout,
+                RECORD_ENTRY,
+                &snapshot.collection,
+                &snapshot.key,
+            )? {
+                index::Locate::Live {
+                    table,
+                    index,
+                    block,
+                    ..
+                } => {
+                    let current_class =
+                        self.map.entry_block(block)?.size_class.load(Ordering::Relaxed) as usize;
+                    if current_class <= minimal_class {
+                        continue;
+                    }
+                    let value = Value::new_unchecked(
+                        ValueKind::from_tag(snapshot.value_kind as u8).ok_or_else(|| {
+                            Error::StoreFormat {
+                                message: format!(
+                                    "entry holds unknown value kind tag {}",
+                                    snapshot.value_kind
+                                ),
+                            }
+                        })?,
+                        snapshot.value.clone(),
+                    );
+                    let old_bytes = arena::class_bytes(current_class) as u64;
+                    // commit_upsert frees the oversized block via the normal
+                    // journal path; the rewrite is silent and revision-stable.
+                    self.commit_upsert(
+                        &snapshot.collection,
+                        &snapshot.key,
+                        &value,
+                        &snapshot.revision,
+                        snapshot.created_at_ms,
+                        snapshot.expires_at_ms,
+                        (table, index),
+                        block,
+                        false,
+                    )?;
+                    rewritten += old_bytes;
+                }
+                index::Locate::Vacant { .. } | index::Locate::Full => {
+                    // Vanished between scan and rewrite; nothing to compact.
+                }
+            }
+        }
+        Ok(rewritten)
+    }
+
     /// The journaled write pipeline: publish a fresh block, flip the slot,
     /// record the change, then free the replaced block. Writer lock held.
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn commit_upsert(
         &self,
@@ -748,6 +829,7 @@ impl ShmClient {
         expires_ms: u64,
         target: (usize, u64),
         old_block: u64,
+        emit: bool,
     ) -> Result<UpsertOutcome> {
         let operation_id = self.next_operation_id();
         let payload = entry::payload_len(collection, key, value.len());
@@ -776,12 +858,29 @@ impl ShmClient {
             target.1,
         )?;
 
-        let slot = self.map.index_slot(target.0, target.1, &self.layout)?;
-        if old_block == 0 {
+        if !emit {
+            // Silent physical rewrite (compaction): no change event, and the
+            // journal marks the record event-free so crash recovery replays
+            // it silently too.
             self.map
-                .header()
-                .live_entries
-                .fetch_add(1, Ordering::Relaxed);
+                .journal()
+                .emit_change
+                .store(0, Ordering::Relaxed);
+        }
+        let slot = self.map.index_slot(target.0, target.1, &self.layout)?;
+        let header = self.map.header();
+        if old_block == 0 {
+            header.live_entries.fetch_add(1, Ordering::Relaxed);
+            header
+                .live_payload_bytes
+                .fetch_add(payload as u64, Ordering::Relaxed);
+        } else {
+            header
+                .live_payload_bytes
+                .fetch_sub(entry::block_payload_len(&self.map, old_block)? as u64, Ordering::Relaxed);
+            header
+                .live_payload_bytes
+                .fetch_add(payload as u64, Ordering::Relaxed);
         }
         // TTL entries join the intrusive expiry chain (singly-linked,
         // insert-at-head) inside the journaled window, before the slot flip:
@@ -811,7 +910,7 @@ impl ShmClient {
         abort_hook("published");
         self.journal_set(JOURNAL_PUBLISHED);
 
-        if self.layout.change_retention > 0 {
+        if emit && self.layout.change_retention > 0 {
             change::append_event(
                 &self.map,
                 &self.layout,
@@ -905,12 +1004,19 @@ impl ShmClient {
         let kind = if cull { KIND_CULL } else { KIND_REMOVE };
         self.journal_prepare(kind, operation_id, old_block, 0, table, index)?;
 
+        let old_payload = entry::block_payload_len(&self.map, old_block)?;
         let slot = self.map.index_slot(table, index, &self.layout)?;
         slot.entry_offset.store(SLOT_TOMBSTONE, Ordering::Relaxed);
         slot.sequence.fetch_add(1, Ordering::Release);
         let header = self.map.header();
         header.live_entries.fetch_sub(1, Ordering::Relaxed);
         header.tombstones.fetch_add(1, Ordering::Relaxed);
+        header
+            .live_payload_bytes
+            .fetch_sub(old_payload as u64, Ordering::Relaxed);
+        if cull {
+            header.expired_total.fetch_add(1, Ordering::Relaxed);
+        }
         abort_hook("published");
         self.journal_set(JOURNAL_PUBLISHED);
 

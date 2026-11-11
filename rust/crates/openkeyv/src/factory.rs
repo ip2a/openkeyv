@@ -118,12 +118,13 @@ pub async fn open_store(config: StoreConfig) -> Result<StoreHandle> {
                 .change_feed_enabled()
                 .then(|| base.clone() as std::sync::Arc<dyn crate::protocol::AsyncChangeFeed>);
             Ok(StoreHandle::with_capabilities(
-                store,
+                store.clone(),
                 Some(base.clone()),
                 Some(base.clone()),
                 Some(base.clone()),
                 feed,
-            ))
+            )
+            .with_stats(store))
         }
 
         "valkey" => {

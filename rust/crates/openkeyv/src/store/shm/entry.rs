@@ -18,6 +18,7 @@ use std::sync::atomic::Ordering;
 pub(crate) struct EntrySnapshot {
     pub record_kind: u64,
     pub value_kind: u64,
+    pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub revision: [u8; 16],
     pub collection: String,
@@ -104,6 +105,7 @@ pub(crate) fn snapshot_once(map: &SharedMap, block_offset: u64) -> Result<Option
     Ok(Some(EntrySnapshot {
         record_kind: header.flags.load(Ordering::Relaxed),
         value_kind: header.value_kind.load(Ordering::Relaxed),
+        created_at_ms: header.created_at_ms.load(Ordering::Relaxed),
         expires_at_ms: header.expires_at_ms.load(Ordering::Relaxed),
         revision,
         collection,
@@ -186,6 +188,15 @@ pub(crate) fn write_entry_block(
 }
 
 /// Payload byte length implied by identifier and value sizes.
+/// Payload length of an already-written block, from its header lens. Writer
+/// lock held — the block is quiescent.
+pub(crate) fn block_payload_len(map: &SharedMap, offset: u64) -> Result<usize> {
+    let header = map.entry_block(offset)?;
+    Ok((header.collection_len.load(Ordering::Relaxed)
+        + header.key_len.load(Ordering::Relaxed)
+        + header.value_len.load(Ordering::Relaxed)) as usize)
+}
+
 pub(crate) fn payload_len(collection: &str, key: &str, value_len: usize) -> usize {
     collection.len() + key.len() + value_len
 }

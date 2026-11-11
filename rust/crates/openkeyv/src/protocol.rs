@@ -182,6 +182,46 @@ pub trait AsyncCompareAndSwap: Send + Sync {
 #[async_trait]
 pub trait AsyncCull: Send + Sync {
     async fn cull(&self) -> Result<()>;
+
+    /// Rewrite entries whose block size class exceeds the minimal class for
+    /// their payload, freeing oversized blocks for reuse. Incremental: stops
+    /// after roughly `budget_bytes` of rewrites; call repeatedly to converge.
+    /// Returns bytes rewritten. Default is a no-op for engines without
+    /// block-level allocation.
+    async fn compact(&self, budget_bytes: u64) -> Result<u64> {
+        let _ = budget_bytes;
+        Ok(0)
+    }
+}
+
+/// Read-only engine statistics. Backends without engine introspection
+/// return a zeroed report with `available: false`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StatsReport {
+    pub available: bool,
+    pub live_entries: u64,
+    pub tombstones: u64,
+    pub index_entries: u64,
+    pub max_index_entries: u64,
+    pub arena_high_water: u64,
+    pub arena_capacity: u64,
+    pub live_payload_bytes: u64,
+    /// Dead bytes above the live payload, per live payload byte:
+    /// `(arena_high_water - live_payload_bytes) / max(live_payload_bytes, 1)`.
+    /// Includes inherent per-entry block headers, so small entries inflate it
+    /// even with zero fragmentation. Above ~1.5 the arena is a good compact
+    /// candidate.
+    pub fragmentation_ratio: f64,
+    /// Non-zero free-list lengths per size class.
+    pub free_by_class: Vec<(u8, u64)>,
+    pub expired_total: u64,
+    pub change_revision: u64,
+}
+
+/// Protocol for stores that expose engine statistics.
+#[async_trait]
+pub trait AsyncStats: Send + Sync {
+    async fn stats(&self) -> Result<StatsReport>;
 }
 
 /// Protocol for enumerating keys within a collection.
