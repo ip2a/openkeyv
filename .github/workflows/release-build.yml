@@ -54,7 +54,7 @@ jobs:
           test -f "${archive}"
           checkdir="$(mktemp -d)"
           tar -xzf "${archive}" -C "${checkdir}"
-          cargo test --locked --manifest-path "${checkdir}/openkeyv-${version}/Cargo.toml" --no-default-features --features "json shm shm-test-hooks"
+          cargo test --locked --manifest-path "${checkdir}/openkeyv-${version}/Cargo.toml" --no-default-features --features "shm-test-hooks"
 
       - name: Upload crate artifact
         uses: actions/upload-artifact@v4

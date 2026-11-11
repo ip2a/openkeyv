@@ -7,6 +7,7 @@ license.workspace = true
 authors.workspace = true
 description = "SDK-backed store bridges for openkeyv - SQL/NoSQL/cloud backends, all opt-in"
 repository = "https://github.com/ip2a/openkeyv"
+readme = "../../README.md"
 keywords = ["kv", "store", "async", "database"]
 categories = ["database", "caching", "asynchronous"]
 
