@@ -65,8 +65,8 @@ pub use handle::{StoreCapabilities, StoreHandle};
 pub use migration::AsyncKeyspaceMigration;
 pub use migration::migrate_into_keyspace;
 pub use migration::{
-    MigrationOptions, MigrationReport, apply_change, copy_snapshot, copy_snapshot_with_feed,
-    merge_report,
+    MigrationOptions, MigrationReport, SyncEntry, apply_change, copy_snapshot,
+    copy_snapshot_with_feed, merge_report, sync_snapshot,
 };
 pub use protocol::{
     AsyncChangeFeed, AsyncCompareAndSwap, AsyncCull, AsyncDestroyCollection, AsyncDestroyStore,

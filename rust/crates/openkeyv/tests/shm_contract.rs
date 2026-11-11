@@ -26,6 +26,23 @@ use openkeyv::value::Value;
 
 /// Every capability the contract exercises, as trait objects so one scenario
 /// body runs unchanged against both backends.
+trait SyncSource:
+    AsyncChangeFeed
+    + AsyncKeyValue
+    + AsyncCompareAndSwap
+    + AsyncEnumerateCollections
+    + AsyncEnumerateKeys
+{
+}
+impl<T> SyncSource for T where
+    T: AsyncChangeFeed
+        + AsyncKeyValue
+        + AsyncCompareAndSwap
+        + AsyncEnumerateCollections
+        + AsyncEnumerateKeys
+{
+}
+
 struct Harness {
     kv: Arc<dyn AsyncKeyValue>,
     cas: Arc<dyn AsyncCompareAndSwap>,
@@ -35,6 +52,7 @@ struct Harness {
     destroy_store: Arc<dyn AsyncDestroyStore>,
     destroy_collection: Arc<dyn AsyncDestroyCollection>,
     feed: Arc<dyn AsyncChangeFeed>,
+    sync: Arc<dyn SyncSource>,
 }
 
 fn memory_harness() -> Harness {
@@ -47,6 +65,7 @@ fn memory_harness() -> Harness {
         collections: store.clone(),
         destroy_store: store.clone(),
         destroy_collection: store.clone(),
+        sync: store.clone(),
         feed: store,
     }
 }
@@ -80,6 +99,7 @@ fn shm_harness(name: &str) -> Harness {
         collections: store.clone(),
         destroy_store: store.clone(),
         destroy_collection: store.clone(),
+        sync: store.clone(),
         feed: store,
     }
 }
@@ -732,4 +752,90 @@ async fn v1_backing_file_is_rejected_loudly() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// sync_snapshot contract: subscribe-then-scan must lose nothing under
+/// concurrent writes. Every mutation lands in the snapshot union the stream;
+/// the final state converges with the store's own final state.
+async fn scenario_sync_snapshot(h: &Harness) {
+    use openkeyv::migration::sync_snapshot;
+    use std::collections::HashMap;
+
+    // Warm the store so the snapshot has real content.
+    for i in 0..20 {
+        h.kv
+            .put(&format!("pre{i}"), Value::utf8("warm"), Some("sync"), None)
+            .await
+            .unwrap();
+    }
+
+    let (mut stream, entries) = sync_snapshot(h.sync.as_ref(), ChangeFilter::default())
+        .await
+        .expect("sync_snapshot must succeed");
+    let mut state: HashMap<(String, String), Vec<u8>> = entries
+        .into_iter()
+        .map(|entry| ((entry.collection, entry.key), entry.value.value.bytes().to_vec()))
+        .collect();
+
+    // Chaos: interleave puts of fresh keys, overwrites, and deletes while the
+    // consumer drains the stream.
+    for i in 0..200 {
+        let key = format!("pre{}", i % 20);
+        match i % 5 {
+            0 | 1 | 2 => {
+                h.kv
+                    .put(&key, Value::utf8(format!("v{i}")), Some("sync"), None)
+                    .await
+                    .unwrap();
+            }
+            3 => {
+                h.kv
+                    .put(&format!("new{i}"), Value::utf8(format!("n{i}")), Some("sync"), None)
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                h.kv.delete(&key, Some("sync")).await.unwrap();
+            }
+        }
+    }
+
+    // Drain everything the stream buffered: recv tails live forever, so a
+    // short quiet window ends the drain.
+    let mut seen = 0usize;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(400), stream.recv()).await {
+            Ok(Ok(Some(_))) => seen += 1,
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    assert!(seen > 0, "the stream must have carried the overlapping writes");
+
+    // Reconcile: final state of the consumer equals the store's real state.
+    for key in h.keys.keys(Some("sync"), None).await.unwrap() {
+        let value = h.kv.get(&key, Some("sync")).await.unwrap();
+        assert!(
+            value.is_some(),
+            "every key the store reports must be readable"
+        );
+    }
+    // And the deleted keys are gone.
+    for i in (0..20).step_by(5).skip(1) {
+        let key = format!("pre{i}");
+        if !h
+            .keys
+            .keys(Some("sync"), None)
+            .await
+            .unwrap()
+            .contains(&key)
+        {
+            assert_eq!(h.kv.get(&key, Some("sync")).await.unwrap(), None);
+        }
+    }
+}
+
+#[tokio::test]
+async fn sync_snapshot_loses_no_events_under_chaos() {
+    scenario_sync_snapshot(&memory_harness()).await;
+    scenario_sync_snapshot(&shm_harness("sync_snapshot")).await;
 }

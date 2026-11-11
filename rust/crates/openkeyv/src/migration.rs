@@ -1,7 +1,10 @@
-use crate::change::{ChangeFeedRequest, ChangeOperation, ChangeSubscription, StoreChange};
+use crate::change::{
+    ChangeFeedRequest, ChangeFilter, ChangeOperation, ChangeStart, ChangeSubscription, StoreChange,
+};
 use crate::error::Result;
 use crate::protocol::{
-    AsyncChangeFeed, AsyncEnumerateCollections, AsyncEnumerateKeys, AsyncKeyValue,
+    AsyncChangeFeed, AsyncCompareAndSwap, AsyncEnumerateCollections, AsyncEnumerateKeys,
+    AsyncKeyValue, RevisionedValue,
 };
 use crate::utils::compound::Subspace;
 
@@ -86,6 +89,69 @@ pub(crate) fn target_collection(options: &MigrationOptions, collection: &str) ->
 
 fn batch_size(options: &MigrationOptions) -> usize {
     options.batch_size.max(1)
+}
+
+/// One entry of a catch-up snapshot taken atomically with a change-stream
+/// start point. The revision rides along so consumers can resolve
+/// snapshot-vs-stream overlap by last write wins.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncEntry {
+    pub collection: String,
+    pub key: String,
+    pub value: RevisionedValue,
+}
+
+/// Open a change stream and take a catch-up snapshot in one call, mirroring
+/// the redis full-resync handoff (see `references/redis/src/replication.c`).
+///
+/// Contract: the stream starts at watermark `W` taken before the snapshot;
+/// every mutation with a revision past `W` is delivered by the stream, and
+/// every snapshot entry reflects the store at some point at or after `W`.
+/// Applying `entries` first and then draining the stream therefore loses
+/// nothing; a key present in both sides converges because consumers apply
+/// changes idempotently (the revisions on
+/// [`SyncEntry::value`] and [`StoreChange`] decide which write is older).
+///
+/// This works unchanged on every backend: the subscription is opened first,
+/// so a backend that takes its start point under the writer lock (shm) hands
+/// out a gap-free watermark, and a broadcast backend (memory) starts
+/// buffering immediately.
+pub async fn sync_snapshot<S>(
+    store: &S,
+    filter: ChangeFilter,
+) -> Result<(ChangeSubscription, Vec<SyncEntry>)>
+where
+    S: AsyncChangeFeed
+        + AsyncKeyValue
+        + AsyncCompareAndSwap
+        + AsyncEnumerateCollections
+        + AsyncEnumerateKeys
+        + Sync
+        + ?Sized,
+{
+    let stream = store
+        .subscribe(ChangeFeedRequest {
+            start: ChangeStart::Latest,
+            filter,
+        })
+        .await?;
+    let mut entries = Vec::new();
+    for collection in store.collections(None).await? {
+        for key in store.keys(Some(&collection), None).await? {
+            // One atomic read per key; an entry that expires between
+            // enumeration and read simply drops out of the snapshot, and the
+            // stream carries the expiry-driven removal once it lands.
+            let Some(revisioned) = store.get_with_revision(&key, Some(&collection)).await? else {
+                continue;
+            };
+            entries.push(SyncEntry {
+                collection: collection.clone(),
+                key,
+                value: revisioned,
+            });
+        }
+    }
+    Ok((stream, entries))
 }
 
 /// Copy the current contents of selected collections, preserving each entry's TTL.
