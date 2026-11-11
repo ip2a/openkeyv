@@ -166,7 +166,8 @@ async fn compact_moves_oversized_blocks() {
     );
     assert!(
         after_small.arena_high_water - after_big.arena_high_water <= 256,
-        "the only lift is the first overwrite bumping one small block before          the first big block is freed for reuse"
+        "the only lift is the first overwrite bumping one small block \
+         before the first big block is freed for reuse"
     );
 
     let rewritten = store.compact(u64::MAX).await.expect("compact must work");
